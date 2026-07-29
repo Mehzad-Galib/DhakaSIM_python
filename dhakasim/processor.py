@@ -48,6 +48,7 @@ class Processor:
         self.random = Parameters.random
         self.vehicle_id = 0
         self.object_id = 0
+        self._recorder = None  # lazily created run-visualisation recorder
         self.pedestrian_id = 0
         self.start_along_ped = Parameters.along_pedestrian_mode
         self.mid_point = None
@@ -144,6 +145,23 @@ class Processor:
         if Parameters.OBJECT_MODE:
             self._generate_new_objects()
             self._remove_old_objects()
+
+        self._capture_frame()
+
+    def _capture_frame(self) -> None:
+        # Capture a handful of frames across the run for the report animation.
+        if self._recorder is None:
+            if Parameters.REPORT_ANIMATION_FRAMES <= 0:
+                self._recorder = False  # animation disabled via parameter
+            else:
+                try:
+                    from .visualize import RunRecorder
+                    self._recorder = RunRecorder(
+                        self, max_frames=Parameters.REPORT_ANIMATION_FRAMES)
+                except Exception:
+                    self._recorder = False  # disable on any failure
+        if self._recorder:
+            self._recorder.maybe_capture(Parameters.simulation_step)
 
     def _generate_statistics(self) -> None:
         n_links = len(self.link_list)
@@ -263,12 +281,12 @@ class Processor:
             Statistics.trip_time[0][3],
             Statistics.no_of_vehicles_completing_trip[0][3])
 
-        print("speed: " + jstr(overall_avg_speed))
-        print("waiting time: " + jstr(overall_waiting_time))
-        print("motorized speed: " + jstr(motorized_avg_speed))
-        print("motorized waiting time: " + jstr(motorized_waiting_time))
-        print("non-motorized speed: " + jstr(non_motorized_avg_speed))
-        print("non-motorized waiting time: " + jstr(non_motorized_waiting_time))
+        print("speed: " + jstr(overall_avg_speed * 3.6) + " km/h")
+        print("waiting time: " + jstr(overall_waiting_time) + " s (avg per vehicle)")
+        print("motorized speed: " + jstr(motorized_avg_speed * 3.6) + " km/h")
+        print("motorized waiting time: " + jstr(motorized_waiting_time) + " s")
+        print("non-motorized speed: " + jstr(non_motorized_avg_speed * 3.6) + " km/h")
+        print("non-motorized waiting time: " + jstr(non_motorized_waiting_time) + " s")
 
         self._print_data(Statistics.avg_speed_of_vehicle,
                          "statistics/avg_speed_vehicle.csv")
@@ -339,8 +357,57 @@ class Processor:
         # flow rate statistics
         self._print_data(Statistics.flow, "statistics/flow.csv")
 
+        # human-readable HTML report (see dhakasim/report.py)
+        try:
+            from .report import write_html_report
+            visual = None
+            if self._recorder:
+                try:
+                    visual = self._recorder.finish()
+                except Exception:
+                    visual = None
+            write_html_report(
+                visual=visual,
+                params={
+                    "seed": Parameters.seed,
+                    "end_time": Parameters.simulation_end_time,
+                    "cf_model": getattr(Parameters.car_following_model, "name",
+                                        str(Parameters.car_following_model)),
+                    "dlc_model": getattr(Parameters.lane_changing_model, "name",
+                                         str(Parameters.lane_changing_model)),
+                    "strip_width": Parameters.strip_width,
+                    "footpath_strip_width": Parameters.footpath_strip_width,
+                    "maximum_speed": Parameters.maximum_speed,
+                    "signal_change": Parameters.SIGNAL_CHANGE_DURATION,
+                    "across_ped": Parameters.across_pedestrian_mode,
+                    "along_ped": Parameters.along_pedestrian_mode,
+                    "object_mode": Parameters.OBJECT_MODE,
+                    "num_links": len(self.link_list),
+                    "num_nodes": len(self.node_list),
+                    "num_od": len(self.demand_list),
+                },
+                per_type={
+                    "avg_speed": Statistics.avg_speed_of_vehicle,
+                    "counts": Statistics.no_of_vehicles,
+                    "waiting_pct": percentage_of_waiting,
+                    "generated": Statistics.no_of_generated_vehicles,
+                    "trips": aggregated_total_trip_complete,
+                    "avg_tt": aggregated_avg_trip_time,
+                    "avg_fuel": aggregated_avg_fuel_consumption,
+                    "collision": aggregated_avg_collision,
+                    "accident": aggregated_avg_accident,
+                },
+                totals=total_number_of_collision_and_accident,
+            )
+        except Exception as exc:  # never let reporting break a run
+            print(f"report generation skipped: {exc}")
+
     @staticmethod
     def _print_data(data, filename: str) -> None:
+        # Keep raw CSVs out of the statistics/ root, which now holds only the
+        # human-readable HTML reports; write them under statistics/csv/.
+        if filename.startswith("statistics/") and filename.endswith(".csv"):
+            filename = "statistics/csv/" + filename[len("statistics/"):]
         os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
         with open(filename, "a") as writer:
             for d in data:
@@ -633,7 +700,54 @@ class Processor:
         else:
             return 8 + self.random.next_int_bound(2)  # bus
 
+    def _distributed_vehicle_type_survey(self) -> int:
+        """Sample a vehicle type from the network's measured mix.
+
+        Reads ``vehicle_mix.txt`` of the selected network (see
+        ``Parameters.VEHICLE_MIX``). Types that stand for a family of indices
+        -- car 4-6, bus 8-9, truck 10-11 -- are spread across that family.
+        """
+        r = self.random.next_int_bound(10000)
+        for threshold, type_ in Parameters.VEHICLE_MIX:
+            if r < threshold:
+                if type_ == 4:
+                    return 4 + self.random.next_int_bound(3)
+                if type_ == 8:
+                    return 8 + self.random.next_int_bound(2)
+                if type_ == 10:
+                    return 10 + self.random.next_int_bound(2)
+                return type_
+        return 4 + self.random.next_int_bound(3)
+
+    def _distributed_vehicle_type_kakrail(self) -> int:
+        # Survey-matched mix for the Kakrail Church + Kakrail Mosque corridor,
+        # peak hour 13:00-14:00 on 29-05-2025.  The 18 classified survey classes
+        # are mapped onto DhakaSim's 13 vehicle types; thresholds are per-10000
+        # shares of the observed peak-hour flow (total 11,860 veh).
+        #   bicycle 0.94 | rickshaw(+easybike) 5.35 | van/cart 0.61 |
+        #   motorbike 18.81 | car(private/jeep/microbus/emergency) 46.53 |
+        #   CNG(+autorickshaw/tempo) 22.83 | bus(std+mini) 0.83 | truck 4.09
+        r = self.random.next_int_bound(10000)
+        if r < 94:
+            return 0  # bicycle
+        elif r < 629:
+            return 1  # rickshaw
+        elif r < 690:
+            return 2  # van / cart
+        elif r < 2571:
+            return 3  # motorbike
+        elif r < 7224:
+            return 4 + self.random.next_int_bound(3)  # car
+        elif r < 9507:
+            return 7  # CNG
+        elif r < 9590:
+            return 8 + self.random.next_int_bound(2)  # bus
+        else:
+            return 10 + self.random.next_int_bound(2)  # truck
+
     def _pedestrian_vehicle_distribution_type(self) -> int:
+        if Parameters.VEHICLE_MIX:
+            return self._distributed_vehicle_type_survey()
         return self._distributed_vehicle_type()
 
     def _new_pedestrian_vehicle_distribution_type(self) -> int:
@@ -747,8 +861,15 @@ class Processor:
 
     def _create_vehicle(self, type_: int, link_segment_orientation, link, segment,
                         demand_index: int, path_index: int, strip_index: int) -> None:
-        color = Color(self.random.next_float(), self.random.next_float(),
-                      self.random.next_float())
+        # Fixed colour per vehicle type so types are distinguishable in the
+        # animation and match the report legend (Constants.VEHICLE_TYPE_COLORS).
+        # The RNG draw is kept so vehicle-generation stays seed-identical.
+        _ = (self.random.next_float(), self.random.next_float(),
+             self.random.next_float())
+        if 0 <= type_ < len(Constants.VEHICLE_TYPE_COLORS):
+            color = Color(*Constants.VEHICLE_TYPE_COLORS[type_])
+        else:
+            color = Color.BLACK
         if type_ == Constants.PEDESTRIANS_ALONG_THE_ROAD_TYPE:
             color = Color.BLACK
         if link_segment_orientation.reverse_segment:
@@ -1246,9 +1367,34 @@ class Processor:
         if condition1 and condition2 and condition3 and condition4 and condition5:
             Statistics.flow_count += 1
 
+    @staticmethod
+    def input_path(filename: str) -> str:
+        """Resolve an input file inside the selected network folder.
+
+        Falls back to ``input/<filename>`` when no network is selected or the
+        network folder does not provide that file.
+        """
+        if Parameters.NETWORK_DIR:
+            candidate = os.path.join("input", Parameters.NETWORK_DIR, filename)
+            if os.path.exists(candidate):
+                return candidate
+        return os.path.join("input", filename)
+
+    @staticmethod
+    def available_networks():
+        """Sub-folders of ``input/`` that contain a network definition."""
+        names = []
+        try:
+            for entry in sorted(os.listdir("input")):
+                if os.path.isfile(os.path.join("input", entry, "node.txt")):
+                    names.append(entry)
+        except OSError:
+            pass
+        return names
+
     def _read_network(self) -> None:
         try:
-            with open("input/link.txt", "r") as reader:
+            with open(self.input_path("link.txt"), "r") as reader:
                 num_links = int(reader.readline())
                 for i in range(num_links):
                     tokens = reader.readline().split()
@@ -1275,7 +1421,7 @@ class Processor:
                         link.add_segment(segment)
                     self.link_list.append(link)
 
-            with open("input/node.txt", "r") as reader:
+            with open(self.input_path("node.txt"), "r") as reader:
                 num_nodes = int(reader.readline())
                 boundary_points = []
 
@@ -1309,6 +1455,49 @@ class Processor:
         except OSError as ex:
             print(f"SEVERE: {ex}")
 
+        # Optional friendly node names: "<id> <name with spaces>" per line.
+        names = {}
+        try:
+            with open(self.input_path("node_names.txt"), "r") as reader:
+                for line in reader:
+                    parts = line.split(None, 1)
+                    if len(parts) == 2:
+                        names[int(parts[0])] = parts[1].strip()
+        except OSError:
+            pass
+        Parameters.NODE_NAMES = names
+
+        # Optional survey vehicle mix: "<type index> <percentage>" per line.
+        # Converted to cumulative per-10000 thresholds for sampling.
+        mix = []
+        try:
+            shares = []
+            hour = Parameters.TIME_OF_DAY
+            hourly = self.input_path("vehicle_mix_by_hour.txt")
+            if hour >= 0 and os.path.exists(hourly):
+                # "<hour> <type index> <percentage>" per line
+                with open(hourly, "r") as reader:
+                    for line in reader:
+                        parts = line.split()
+                        if len(parts) == 3 and int(parts[0]) == hour:
+                            shares.append((int(parts[1]), float(parts[2])))
+            if not shares:
+                with open(self.input_path("vehicle_mix.txt"), "r") as reader:
+                    for line in reader:
+                        parts = line.split()
+                        if len(parts) == 2:
+                            shares.append((int(parts[0]), float(parts[1])))
+            total = sum(s for _, s in shares)
+            if shares and total > 0:
+                running = 0.0
+                for type_, share in shares:
+                    running += share / total * 10000.0
+                    mix.append((int(round(running)), type_))
+                mix[-1] = (10000, mix[-1][1])
+        except OSError:
+            pass
+        Parameters.VEHICLE_MIX = mix
+
     def _get_link_index(self, link_id: int) -> int:
         for link in self.link_list:
             if link.get_id() == link_id:
@@ -1323,23 +1512,38 @@ class Processor:
 
     def _read_demand(self) -> None:
         try:
-            with open("input/demand.txt", "r") as reader:
-                num_demands = int(reader.readline())
-                for _ in range(num_demands):
-                    tokens = reader.readline().split()
-                    node_id1 = int(tokens[0])
-                    node_id2 = int(tokens[1])
-                    demand = int(tokens[2])
+            rows = []
+            hour = Parameters.TIME_OF_DAY
+            hourly = self.input_path("demand_by_hour.txt")
+            if hour >= 0 and os.path.exists(hourly):
+                # "<hour> <source> <destination> <vehiclesPerHour>" per line
+                with open(hourly, "r") as reader:
+                    for line in reader:
+                        tokens = line.split()
+                        if len(tokens) == 4 and int(tokens[0]) == hour:
+                            rows.append((int(tokens[1]), int(tokens[2]),
+                                         int(tokens[3])))
+                if rows:
+                    print(f"Time of day: {hour:02d}:00-{(hour + 1) % 24:02d}:00 "
+                          f"({sum(r[2] for r in rows)} veh/h)")
+            if not rows:
+                with open(self.input_path("demand.txt"), "r") as reader:
+                    num_demands = int(reader.readline())
+                    for _ in range(num_demands):
+                        tokens = reader.readline().split()
+                        rows.append((int(tokens[0]), int(tokens[1]),
+                                     int(tokens[2])))
 
-                    self.demand_list.append(Demand(self._get_node_index(node_id1),
-                                                   self._get_node_index(node_id2),
-                                                   jint(demand + 30)))
+            for node_id1, node_id2, demand in rows:
+                self.demand_list.append(Demand(self._get_node_index(node_id1),
+                                               self._get_node_index(node_id2),
+                                               jint(demand + 30)))
         except OSError as ex:
             print(f"SEVERE: {ex}")
 
     def _read_path(self) -> None:
         try:
-            with open("input/path.txt", "r") as reader:
+            with open(self.input_path("path.txt"), "r") as reader:
                 num_paths = int(reader.readline())
                 for _ in range(num_paths):
                     tokens = reader.readline().split()

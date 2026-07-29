@@ -1334,8 +1334,8 @@ class Vehicle:
             leader_type = -1 if leader is None else leader.get_type()
             leader_speed = NaN if leader is None else leader.get_speed()
             leader_acc = NaN if leader is None else leader.get_acceleration()
-            os.makedirs("statistics", exist_ok=True)
-            with open("statistics/accident_log.csv", "a") as writer:
+            os.makedirs("statistics/csv", exist_ok=True)
+            with open("statistics/csv/accident_log.csv", "a") as writer:
                 # sim_step, vehicle_id, type, speed, leader_type, leader_speed,
                 # acceleration, collision_penalty
                 writer.write("%d, %d, %d, %s, %s, %d, %s, %s\n"

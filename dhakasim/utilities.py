@@ -567,6 +567,15 @@ def initialize() -> None:
                     Parameters.CONSIDER_MINIMUM = value.lower() == "on"
                 elif name == "NoOfRoutes":
                     Parameters.NO_OF_ROUTES_FOR_STAT = int(value)
+                elif name == "ReportAnimationFrames":
+                    Parameters.REPORT_ANIMATION_FRAMES = int(value)
+                elif name == "Network":
+                    Parameters.NETWORK_DIR = value.strip()
+                elif name == "TimeOfDay":
+                    try:
+                        Parameters.TIME_OF_DAY = int(value)
+                    except ValueError:
+                        Parameters.TIME_OF_DAY = -1
                 elif name == "BrakeHard":
                     Parameters.BRAKE_HARD = value.lower() == "on"
                 elif name == "AcrossPedestrianPercentage":

@@ -41,6 +41,19 @@ class VEHICLE_GENERATION_RATE(Enum):
 
 
 class Parameters:
+    # Optional map of node id -> human-readable name (loaded from
+    # input/node_names.txt if present); used for GUI labels and the report.
+    NODE_NAMES = {}
+    # Number of frames captured for the report's embedded animation (0 = off).
+    REPORT_ANIMATION_FRAMES = 24
+    # Sub-folder of input/ holding the selected network's files ("" = input/).
+    NETWORK_DIR = ""
+    # Hour of the survey day to simulate, 0-23. -1 = the network's peak hour
+    # (the default demand.txt / vehicle_mix.txt).
+    TIME_OF_DAY = -1
+    # Survey vehicle mix: list of (cumulative_threshold_per_10000, type_index).
+    # Empty means fall back to the built-in distribution.
+    VEHICLE_MIX = []
     simulation_step = 1
     simulation_end_time = 0
     pixel_per_strip = 0.0

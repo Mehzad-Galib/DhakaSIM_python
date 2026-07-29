@@ -21,8 +21,31 @@ from .parameters import Parameters
 class Constants:
     TYPES_OF_CARS = 13
     PEDESTRIANS_ALONG_THE_ROAD_TYPE = 12
+
+    # Fixed display colour per vehicle type, so the animation and the report
+    # legend agree. Indexes match the 13 vehicle types (see report.TYPE_NAMES):
+    # cars (4-6) share a red family, buses (8-9) a purple family, trucks
+    # (10-11) a grey family; CNG is Dhaka-green.
+    VEHICLE_TYPE_COLORS = (
+        (0, 160, 160),    # 0  bicycle      - teal
+        (230, 130, 20),   # 1  rickshaw     - orange
+        (140, 90, 40),    # 2  van / cart   - brown
+        (40, 110, 220),   # 3  motorbike    - blue
+        (210, 50, 50),    # 4  car          - red
+        (170, 30, 60),    # 5  car          - crimson
+        (240, 105, 105),  # 6  car          - light red
+        (30, 160, 70),    # 7  CNG / auto   - green
+        (140, 60, 190),   # 8  bus          - purple
+        (200, 70, 170),   # 9  bus          - magenta
+        (100, 100, 100),  # 10 truck        - grey
+        (55, 55, 55),     # 11 truck        - dark grey
+        (0, 0, 0),        # 12 pedestrian   - black
+    )
     pedestrian_color = Color.BLACK
     road_border_color = Color.BLACK
+    # Filled road surface; junctions are filled with the same colour so that
+    # intersections read as one smooth area instead of a tangle of kerb stubs.
+    road_fill_color = Color(176, 182, 190)
     background_color = Color.WHITE  # Color(105, 105, 105) / Color.DARK_GRAY
     DEFAULT_SCALE = 5.0
     TIME_STEP = 1.0
@@ -32,7 +55,7 @@ class Constants:
     MAX_NUMBER_OF_OBJECTS = 2147483647
     MAX_NUMBER_OF_VEHICLES = 2147483647
 
-    TOTAL_NETWORK_ROAD_LENGTH = 3.83
+    TOTAL_NETWORK_ROAD_LENGTH = 1.01
 
     ROAD_BORDER_COLOR = Color.BLACK
     BACKGROUND_COLOR = Color(240, 240, 240)

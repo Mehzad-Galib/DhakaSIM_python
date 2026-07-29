@@ -19,6 +19,19 @@ def main(argv=None) -> int:
     Utilities.index_trace_file()
 
     argv = sys.argv[1:] if argv is None else list(argv)
+    # --network <name> overrides the Network setting in parameter.txt
+    if "--network" in argv:
+        i = argv.index("--network")
+        if i + 1 < len(argv):
+            Parameters.NETWORK_DIR = argv[i + 1]
+    # --hour <0-23> overrides TimeOfDay in parameter.txt (-1 = peak hour)
+    if "--hour" in argv:
+        i = argv.index("--hour")
+        if i + 1 < len(argv):
+            try:
+                Parameters.TIME_OF_DAY = int(argv[i + 1])
+            except ValueError:
+                pass
     gui_mode = Parameters.GUI_MODE
     if "--headless" in argv or "--no-gui" in argv:
         gui_mode = False

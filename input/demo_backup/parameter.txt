@@ -46,6 +46,3 @@ PenaltyWait On
 ConsiderMinimum On
 NoOfRoutes 12
 BrakeHard Off
-ReportAnimationFrames 24
-Network kakrail_corridor
-TimeOfDay -1

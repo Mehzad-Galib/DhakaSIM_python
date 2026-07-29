@@ -37,8 +37,8 @@ right-hand slider to zoom, the bottom slider shows progress.
 ## Layout
 
 ```
-input/            network, demand and parameter files (read at startup)
-statistics/       created on first run; results are appended
+input/            parameter.txt plus one sub-folder per intersection/network
+statistics/       HTML reports at the root; raw CSVs in statistics/csv/ (appended)
 trace.txt         created by the GUI; one frame per simulation step
 dhakasim/         the simulator package
 run_dhakasim.py   launcher
@@ -46,25 +46,72 @@ run_sim.py        route/demand generator (only needed if the network changes)
 tests/            regression tests for the numeric layer
 ```
 
+### Choosing an intersection
+
+Each intersection lives in its own folder under `input/`, holding that
+network's roads, routes, demand and vehicle mix:
+
+```
+input/parameter.txt          shared settings
+input/kakrail_corridor/      Kakrail Church + Kakrail Mosque (2 junctions)
+input/bijoy_sarani/          Bijoy Sarani
+input/khamarbari/            Khamarbari
+input/banani_23/             Banani 23 Super Market
+input/banani_27/             Banani 27 Kacha Bazar
+input/demo_backup/           the original demonstration network
+```
+
+Pick one from the **Intersection** dropdown on the GUI's start screen, or set
+`Network <folder>` in `parameter.txt`, or pass `--network <folder>`:
+
+```bash
+python run_dhakasim.py --headless --network bijoy_sarani
+```
+
+To add your own network, create a new folder with the same files.
+
+### Choosing the time of day
+
+The surveys cover a full 24 hours, so every network carries hourly demand and a
+hourly vehicle mix. Choose the hour from the **Time of Day** dropdown, or set
+`TimeOfDay <0-23>` in `parameter.txt`, or pass `--hour`:
+
+```bash
+python run_dhakasim.py --headless --network kakrail_corridor --hour 8
+```
+
+`TimeOfDay -1` (the default) uses the network's busiest hour. Traffic varies
+enormously across the day — the Kakrail corridor carries about 1,500 veh/h at
+04:00 against 6,300 veh/h at its 13:00 peak — and the vehicle mix shifts too
+(more rickshaws by day, proportionally more trucks overnight).
+
 ### Input files
 
 | File | Contents |
 | --- | --- |
-| `parameter.txt` | every simulation setting; see below |
+| `parameter.txt` | every simulation setting; see below (stays in `input/`) |
 | `link.txt` | links, then one line per segment: `id startX startY endX endY width` (metres) |
 | `node.txt` | `id centerX centerY` followed by the ids of the links meeting there |
 | `path.txt` | `source dest` followed by the link ids along the route |
 | `demand.txt` | `source dest vehiclesPerHour` per route |
 | `demand_all.txt` | the unthinned demand `run_sim.py` produced before `DemandType` filtering |
 | `demand-low/medium/high.txt` | alternative demand levels; copy one over `demand.txt` to use it |
+| `node_names.txt` | optional `id name` per line; friendly node labels for the GUI and report |
+| `vehicle_mix.txt` | optional `typeIndex percentage` per line; the survey-measured vehicle mix for that intersection |
+| `demand_by_hour.txt` | `hour source dest vehiclesPerHour` per line; the 24-hour demand profile |
+| `vehicle_mix_by_hour.txt` | `hour typeIndex percentage` per line; the vehicle mix for each hour |
 
 `demand.txt` and `path.txt` must agree — every demand row needs at least one
 matching route. `run_sim.py` regenerates both from `link.txt` + `node.txt`.
 
 ### Output files
 
-Written into `statistics/`, all **appended**, so repeated runs accumulate one row
-per run:
+Each run writes a self-contained HTML report to `statistics/`, named
+`report_<YYYYMMDD_HHMMSS>.html`, summarising the run with metric cards, a
+configuration table, a per-type results table, colour-coded bar charts, a
+vehicle-colour legend and a glossary. The raw numeric CSVs below are written
+into `statistics/csv/` (paths in the table are relative to that folder), all
+**appended**, so repeated runs accumulate one row per run:
 
 | File | Contents |
 | --- | --- |
@@ -88,7 +135,7 @@ trips divides by zero. Per-type geometry and performance live in
 `_CAR_ACCELERATIONS`).
 
 The run also prints six summary metrics to stdout: overall, motorized and
-non-motorized mean speed and waiting time.
+non-motorized mean speed (km/h) and waiting time (seconds).
 
 ## Parameters
 
@@ -113,6 +160,9 @@ touch:
 | `AcrossPedestrianPerHour`, `AlongPedestrianPerHour` | pedestrian arrival rates |
 | `SignalChangeDuration` | seconds between signal phase changes |
 | `NoOfRoutes` | how many routes get their own per-route CSV files |
+| `ReportAnimationFrames` | frames captured for the report's embedded SVG animation (`0` disables it) |
+| `Network` | which `input/` sub-folder to simulate (e.g. `bijoy_sarani`); the GUI dropdown and `--network` override it |
+| `TimeOfDay` | hour of the surveyed day to simulate, `0`-`23`; `-1` uses the busiest hour. The GUI dropdown and `--hour` override it |
 | `TraceMode` | `On` replays a recorded `trace.txt` instead of simulating |
 | `DebugMode` | `On` writes per-vehicle traces into `debug/` |
 
@@ -146,8 +196,9 @@ otherwise.
   pedestrian as a side effect of logging, so `agg_total_collision.csv` reports 0
   collisions and 0 accidents even while `Accident: SimStep: …` lines print to
   stdout. Count those lines if you need the total.
-- **`statistics/` is appended, never truncated.** Delete the folder between
-  experiments, or each file grows a row per run.
+- **`statistics/csv/` is appended, never truncated.** Delete that folder between
+  experiments, or each CSV grows a row per run. (HTML reports at the
+  `statistics/` root are per-run, time-stamped files and are not overwritten.)
 - **The GUI writes `trace.txt` every frame**, which grows quickly.
 
 ## Performance
@@ -177,7 +228,7 @@ values — if it fails, the numerics have drifted.
 
 Translated from the Java implementation of DhakaSim, one module per original
 class, and validated against it: with a matched seed both produce byte-identical
-`statistics/*.csv` and identical printed metrics, across all 13 car-following
+`statistics/csv/*.csv` and identical printed metrics, across all 13 car-following
 models, all 4 lane-changing models, the pedestrian and roadside-object paths
 including the per-step accident log, the route/demand generator output, and the
 drawing geometry written to `trace.txt`. Unseeded, repeated runs agree within
