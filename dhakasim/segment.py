@@ -128,6 +128,41 @@ class Segment:
             self.middle_low_strip_index = self.middle_high_strip_index - 2
         self.last_vehicle_strip_index = self._strip_count - 2
 
+        self._apply_median()
+
+    def _apply_median(self) -> None:
+        """Consume centre strips for a physical median (GeometryMode only).
+
+        A median of width *w* occupies ``ceil(w / StripWidth)`` strips centred on
+        the carriageway centre line. Those strips are marked unusable -- reusing
+        the same mechanism that already excludes footpath strips -- and the
+        per-direction limits move outward, so the median genuinely takes road
+        space away from traffic instead of being a free dividing line.
+
+        Disabled unless ``GeometryMode On``; with it off this is a no-op and the
+        strip layout is exactly the Java reference's.
+        """
+        if not Parameters.GEOMETRY_MODE:
+            return
+        width = Parameters.MEDIAN_WIDTHS.get(self._parent_link_id, 0.0)
+        if width <= 0:
+            return
+        strips = jint(math.ceil(width / Parameters.strip_width))
+        if strips <= 0:
+            return
+        # Centre the median on the boundary between the two directions.
+        first = self.middle_low_strip_index + 1 - strips // 2
+        last = first + strips - 1
+        first = max(1, first)
+        last = min(self._strip_count - 2, last)
+        if last < first or (last - first + 1) >= self._strip_count - 2:
+            return  # median would swallow the carriageway; ignore it
+        for i in range(first, last + 1):
+            self._strip_list[i].set_blocked(True)
+        # Traffic now stops short of the median on each side.
+        self.middle_low_strip_index = first - 1
+        self.middle_high_strip_index = last + 1
+
     def get_link_index(self) -> int:
         return self._link_index
 

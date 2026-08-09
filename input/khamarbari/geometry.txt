@@ -1,0 +1,7 @@
+# Khamarbari / Bangabandhu Square -- real geometry from OpenStreetMap.
+# The junction is a ROUNDABOUT: centre 23.758496,90.383775, radius 28.8 m,
+# one-way circulation, 2 circulating lanes.
+# Dual carriageways (separate one-way carriageways in OSM) carry a median:
+median 2 2.0   # Manik Mia Avenue  (7 + 4 lanes)
+median 5 2.0   # Sangsad Avenue / Begum Rokeya Sharani (3 + 3 lanes)
+roundabout 6 28.8   # Khamar Bari Goal Chottor

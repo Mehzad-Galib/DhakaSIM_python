@@ -19,6 +19,8 @@ from .constants import Constants
 from .javacompat import Color, JavaRandom, jbool, jbool_str, jint, jround, jstr
 from .parameters import Parameters
 from .processor import Processor
+from . import render3d
+from . import road_geometry
 from . import utilities as Utilities
 
 
@@ -60,10 +62,23 @@ class CanvasGraphics:
     def set_font(self, family, size) -> None:
         self._font = (family, size)
 
-    def draw_line(self, x1, y1, x2, y2) -> None:
+    def begin_prop(self, kind, type_index=None) -> None:
+        """Ignored here; :class:`dhakasim.render3d.Scene3D` uses it to pick the
+        3D model to stand on the footprint that follows."""
+
+    def end_prop(self) -> None:
+        pass
+
+    def draw_line(self, x1, y1, x2, y2, arrow=False) -> None:
+        opts = {}
+        if arrow:
+            # arrowhead at the far end, sized so it stays visible when zoomed out
+            size = max(4.0, 9.0 * self.scale)
+            opts["arrow"] = "last"
+            opts["arrowshape"] = (size * 1.6, size * 2.0, size * 0.7)
         self.canvas.create_line(self._tx(x1), self._ty(y1), self._tx(x2), self._ty(y2),
                                 fill=self._color.to_hex(),
-                                width=max(1, self._stroke * self.scale))
+                                width=max(1, self._stroke * self.scale), **opts)
 
     def fill_polygon(self, xs, ys, n) -> None:
         points = []
@@ -78,9 +93,16 @@ class CanvasGraphics:
         self.canvas.create_oval(x1, y1, x1 + w * self.scale, y1 + h * self.scale,
                                 fill=self._color.to_hex(), outline="")
 
-    def draw_string(self, text, x, y) -> None:
+    def draw_oval(self, x, y, w, h) -> None:
+        x1 = self._tx(x)
+        y1 = self._ty(y)
+        self.canvas.create_oval(x1, y1, x1 + w * self.scale, y1 + h * self.scale,
+                                fill="", outline=self._color.to_hex(),
+                                width=max(1, self.scale))
+
+    def draw_string(self, text, x, y, anchor="sw") -> None:
         size = max(1, int(self._font[1] * self.scale))
-        self.canvas.create_text(self._tx(x), self._ty(y), text=text, anchor="sw",
+        self.canvas.create_text(self._tx(x), self._ty(y), text=text, anchor=anchor,
                                 fill=self._color.to_hex(), font=(self._font[0], size))
 
 
@@ -139,8 +161,16 @@ class DhakaSimPanel:
         self.canvas = tk.Canvas(parent, bg=Constants.background_color.to_hex(),
                                 highlightthickness=0)
         self.graphics = CanvasGraphics(self.canvas)
+        # The 3D view is a second drawing surface taking the same calls, so
+        # switching between them changes nothing about what is simulated or
+        # where anything is -- only how the same four corners are drawn.
+        self.scene3d = render3d.Scene3D(self.canvas)
+        self.view_3d = Parameters.RENDER_3D
         self.canvas.bind("<ButtonPress-1>", self.mouse_pressed)
         self.canvas.bind("<B1-Motion>", self.mouse_dragged)
+        self.canvas.bind("<ButtonPress-3>", self.mouse_pressed)
+        self.canvas.bind("<B3-Motion>", self.mouse_dragged_right)
+        self.canvas.bind("<Double-Button-1>", self.mouse_double_clicked)
         self.canvas.bind("<MouseWheel>", self.mouse_wheel_moved)
 
         self.processor = Processor()
@@ -159,12 +189,29 @@ class DhakaSimPanel:
             self.translate_x = Parameters.DEFAULT_TRANSLATE_X
             self.translate_y = Parameters.DEFAULT_TRANSLATE_Y
 
+        # Frame the whole network for the 3D camera, and remember it as the
+        # view a double-click goes back to.
+        extent = render3d.network_extent(self.link_list, Parameters.pixel_per_meter)
+        self.scene3d.set_ground_extent(*extent)
+        self.scene3d.camera.frame(*extent)
+
     def start(self) -> None:
         self._timer = self.canvas.after(max(1, Parameters.simulation_speed),
                                        self._on_timer)
 
     def set_scale(self, scale: float) -> None:
         self.scale = scale
+        if self.view_3d:
+            # One zoom control for both views: the slider's 2D scale is read as
+            # a camera distance, so the same handle does the same job in each.
+            base = self.scene3d.camera.home_distance
+            self.scene3d.camera.distance = base * (0.30 / max(scale, 0.004))
+        self.repaint()
+
+    def set_view_3d(self, enabled: bool) -> None:
+        self.view_3d = bool(enabled)
+        if self.view_3d:
+            self.set_scale(self.scale)   # re-derive the camera distance
         self.repaint()
 
     def get_trace_reader(self):
@@ -183,9 +230,14 @@ class DhakaSimPanel:
         canvas.delete("all")
         width = canvas.winfo_width() or 1
         height = canvas.winfo_height() or 1
-        g2d = self.graphics
-        g2d.set_transform(width, height, self.scale, self.translate_x, self.translate_y)
-        canvas.configure(bg=Constants.background_color.to_hex())
+        if self.view_3d:
+            g2d = self.scene3d
+            g2d.begin_frame(width, height, Parameters.pixel_per_meter)
+        else:
+            g2d = self.graphics
+            g2d.set_transform(width, height, self.scale,
+                              self.translate_x, self.translate_y)
+            canvas.configure(bg=Constants.background_color.to_hex())
 
         # The current list objects are replaced wholesale when entries are
         # removed, so re-read them from the processor each frame.
@@ -211,23 +263,101 @@ class DhakaSimPanel:
             if Parameters.across_pedestrian_mode:
                 self.trace_writer.write("Current Pedestrians\n")
                 for pedestrian in self.pedestrians:
+                    g2d.begin_prop("pedestrian")
                     pedestrian.draw_mobile_pedestrian(
                         self.trace_writer, g2d, Parameters.pixel_per_strip,
                         Parameters.pixel_per_meter, Parameters.pixel_per_footpath_strip)
+                    g2d.end_prop()
             self.trace_writer.write("Current Vehicles\n")
             for vehicle in self.vehicle_list:
+                # The type is what picks the 3D model, so a bus is drawn as a
+                # bus and a rickshaw gets its hood; in 2D this is a no-op.
+                g2d.begin_prop("vehicle", vehicle.get_type())
                 vehicle.draw_vehicle(self.trace_writer, g2d, Parameters.pixel_per_strip,
                                      Parameters.pixel_per_meter,
                                      Parameters.pixel_per_footpath_strip)
+                g2d.end_prop()
 
             self.trace_writer.write("Current Objects\n")
             for obj in self.object_list:
+                g2d.begin_prop("object", obj.object_type)
                 obj.draw_object(self.trace_writer, g2d, Parameters.pixel_per_strip,
                                 Parameters.pixel_per_meter,
                                 Parameters.pixel_per_footpath_strip)
+                g2d.end_prop()
 
             self.trace_writer.write("End Step\n")
             self.trace_writer.flush()
+
+        if self.view_3d:
+            g2d.flush()
+        # Furniture last, so a vehicle can never be painted over the compass.
+        self._draw_map_furniture(width, height)
+
+    def _draw_map_furniture(self, width, height) -> None:
+        """North arrow and scale bar, drawn in screen space.
+
+        These are map furniture rather than part of the network, so they are
+        painted straight onto the canvas and stay put while the view is panned
+        or zoomed -- only the distance the scale bar represents changes.
+        Networks are built with bearings measured from screen-up, so north is
+        simply up -- except in the 3D view, where the camera can be swung round
+        and the needle has to swing with it.
+        """
+        canvas = self.canvas
+        ink, paper = "#12263a", "#ffffff"
+
+        # --- north arrow, top right ---
+        cx, cy = width - 46, 46
+        bearing = -self.scene3d.camera.yaw if self.view_3d else 0.0
+        cos_b, sin_b = math.cos(bearing), math.sin(bearing)
+
+        def needle(x, y):
+            """Rotate an offset from the dial centre by the camera bearing."""
+            return cx + x * cos_b - y * sin_b, cy + x * sin_b + y * cos_b
+
+        canvas.create_oval(cx - 26, cy - 26, cx + 26, cy + 26,
+                           fill=paper, outline="#c7ccd3")
+        canvas.create_polygon(*needle(0, -19), *needle(-8, 11), *needle(0, 5),
+                              *needle(8, 11), fill=ink, outline="")
+        canvas.create_text(*needle(0, 17), text="N", fill=ink,
+                           font=("Segoe UI", 10, "bold"))
+
+        if self.view_3d:
+            # A scale bar means nothing under perspective -- the metres a
+            # pixel covers change from the top of the frame to the bottom --
+            # so the corner carries the controls instead.
+            canvas.create_text(
+                16, height - 16, anchor="sw", fill="#33465c",
+                font=("Segoe UI", 9),
+                text="3D view — drag to orbit · right-drag or Shift+drag to "
+                     "pan · wheel to zoom · double-click to reset")
+            return
+
+        # --- scale bar, bottom left ---
+        px_per_m = Parameters.pixel_per_meter * self.scale
+        if px_per_m <= 0:
+            return
+        # pick a round distance whose bar is a comfortable width on screen
+        nice = None
+        for candidate in (10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000):
+            if candidate * px_per_m >= 90:
+                nice = candidate
+                break
+        if nice is None:
+            nice = 5000
+        bar = nice * px_per_m
+        if bar > width * 0.6:
+            return
+        x0, y0 = 20, height - 26
+        canvas.create_rectangle(x0 - 8, y0 - 24, x0 + bar + 12, y0 + 12,
+                                fill=paper, outline="#c7ccd3")
+        canvas.create_line(x0, y0, x0 + bar, y0, fill=ink, width=3)
+        for x in (x0, x0 + bar):
+            canvas.create_line(x, y0 - 6, x, y0 + 4, fill=ink, width=2)
+        label = f"{nice} m" if nice < 1000 else f"{nice // 1000} km"
+        canvas.create_text(x0 + bar / 2, y0 - 13, text=label, fill=ink,
+                           font=("Segoe UI", 10, "bold"))
 
     def draw_all_trajectories(self, g2d) -> None:
         # TODO
@@ -249,51 +379,31 @@ class DhakaSimPanel:
                           jint(points[i + 1].x), jint(points[i + 1].y))
 
     def _node_label_point(self, node):
-        """World (metre) point at which to draw a node's label.
-
-        Boundary nodes carry real coordinates; junction nodes are stored at
-        (0, 0), so their position is recovered as the mean of the link
-        endpoints that meet there.
-        """
-        n = node.number_of_links()
-        if n == 0:
-            return node.x, node.y
-        sx = sy = 0.0
-        for j in range(n):
-            link = self.link_list[node.get_link(j)]
-            if link.get_up_node() == node.get_id():
-                seg = link.get_first_segment()
-                sx += seg.get_start_x()
-                sy += seg.get_start_y()
-            else:
-                seg = link.get_last_segment()
-                sx += seg.get_end_x()
-                sy += seg.get_end_y()
-        return sx / n, sy / n
-
+        """World (metre) point at which to draw a node's label."""
+        return road_geometry.node_point(self.link_list, node)
     def draw_node_id(self, g2d, node) -> None:
         # Prefer a friendly name (input/node_names.txt) over the numeric id.
         name = Parameters.NODE_NAMES.get(node.get_id(), str(node.get_id()))
         x_m, y_m = self._node_label_point(node)
-        g2d.set_font("Serif", 160)
+        g2d.set_font("Serif", 100)
         g2d.set_color(Color.BLACK)
 
-        # Push the label clear of the carriageway: terminals are pushed
-        # outwards along their own road, junctions straight up.
+        # Push the label well clear of the carriageway and join it back to the
+        # junction with a leader line, so a name is never read as sitting on a
+        # road it does not belong to.
         widest = 0.0
         for j in range(node.number_of_links()):
             link = self.link_list[node.get_link(j)]
             for k in range(link.get_number_of_segments()):
                 widest = max(widest, link.get_segment(k).get_segment_width())
-        # Junction names need more room: they sit inside the road network,
-        # so lift them well clear of the widest carriageway.
+        # Junction names sit inside the network, so they need the most room.
         if node.number_of_links() > 1:
-            clearance = widest * 1.8 + 12.0
+            clearance = widest * 1.6 + 16.0
         else:
-            clearance = widest * 0.75 + 6.0
+            clearance = widest * 0.8 + 10.0
 
-        dx, dy = 0.0, -1.0
         if node.number_of_links() == 1:
+            # A terminal is pushed outwards along its own road.
             link = self.link_list[node.get_link(0)]
             if link.get_up_node() == node.get_id():
                 seg = link.get_first_segment()
@@ -303,151 +413,77 @@ class DhakaSimPanel:
                 ox, oy = seg.get_start_x(), seg.get_start_y()
             vx, vy = x_m - ox, y_m - oy          # points away from the junction
             length = math.hypot(vx, vy)
-            if length > 0:
-                dx, dy = vx / length, vy / length
-
-        lx = (x_m + dx * clearance) * Parameters.pixel_per_meter
-        ly = (y_m + dy * clearance) * Parameters.pixel_per_meter
-        g2d.draw_string(name, jint(lx), jint(ly))
-
-    @staticmethod
-    def _convex_hull(points):
-        """Monotone-chain convex hull of ``(x, y)`` points."""
-        pts = sorted(set(points))
-        if len(pts) <= 2:
-            return pts
-
-        def cross(o, a, b):
-            return ((a[0] - o[0]) * (b[1] - o[1])
-                    - (a[1] - o[1]) * (b[0] - o[0]))
-
-        lower = []
-        for p in pts:
-            while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
-                lower.pop()
-            lower.append(p)
-        upper = []
-        for p in reversed(pts):
-            while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
-                upper.pop()
-            upper.append(p)
-        return lower[:-1] + upper[:-1]
-
-    def _segment_quads(self):
-        """The four corner points of every road segment, in pixel space."""
-        ppm = Parameters.pixel_per_meter
-        quads = []
-        for link in self.link_list:
-            for j in range(link.get_number_of_segments()):
-                seg = link.get_segment(j)
-                x1 = seg.get_start_x() * ppm
-                y1 = seg.get_start_y() * ppm
-                x2 = seg.get_end_x() * ppm
-                y2 = seg.get_end_y() * ppm
-                w = seg.get_segment_width() * ppm
-                x3 = Utilities.return_x3(x1, y1, x2, y2, w)
-                y3 = Utilities.return_y3(x1, y1, x2, y2, w)
-                x4 = Utilities.return_x4(x1, y1, x2, y2, w)
-                y4 = Utilities.return_y4(x1, y1, x2, y2, w)
-                quads.append(([x1, x2, x4, x3], [y1, y2, y4, y3]))
-        return quads
-
-    def _junction_hulls(self):
-        """A filled convex patch for every junction (node with >1 link).
-
-        The patch is built from each incident link's two kerb corners at the
-        node *and* the same corners carried a short way along the link, so the
-        patch overlaps the road surfaces and leaves no notch at the mouth.
-        """
-        ppm = Parameters.pixel_per_meter
-        hulls = []
-        for node in self.node_list:
-            if node.number_of_links() < 2:
-                continue
-            pts = []
-            widths = []
+            dx, dy = (vx / length, vy / length) if length > 0 else (0.0, -1.0)
+        else:
+            # A junction is pushed into its widest empty quadrant -- the
+            # direction furthest from every arm -- so neighbouring junctions
+            # send their labels different ways instead of stacking.
+            bearings = []
             for j in range(node.number_of_links()):
                 link = self.link_list[node.get_link(j)]
                 if link.get_up_node() == node.get_id():
                     seg = link.get_first_segment()
-                    ax, ay = seg.get_start_x(), seg.get_start_y()
-                    bx, by = seg.get_end_x(), seg.get_end_y()
+                    fx, fy = seg.get_end_x(), seg.get_end_y()
                 else:
                     seg = link.get_last_segment()
-                    ax, ay = seg.get_end_x(), seg.get_end_y()
-                    bx, by = seg.get_start_x(), seg.get_start_y()
-                widths.append(seg.get_segment_width())
-                x1, y1, x3, y3 = self._link_end_at_node(link, node, ppm)
-                pts.append((x1, y1))
-                pts.append((x3, y3))
-                # unit vector pointing from the node into the link
-                dx, dy = bx - ax, by - ay
-                length = math.hypot(dx, dy)
-                if length > 0:
-                    reach = seg.get_segment_width() * ppm
-                    ux, uy = dx / length * reach, dy / length * reach
-                    pts.append((x1 + ux, y1 + uy))
-                    pts.append((x3 + ux, y3 + uy))
-            hull = self._convex_hull(pts)
-            if len(hull) >= 3:
-                # A disc at the junction centre rounds off any concave mouth
-                # the convex hull cannot reach.
-                cx = sum(p[0] for p in hull) / len(hull)
-                cy = sum(p[1] for p in hull) / len(hull)
-                radius = max(widths) * ppm * 0.5
-                hulls.append(([p[0] for p in hull], [p[1] for p in hull],
-                              cx, cy, radius))
-        return hulls
+                    fx, fy = seg.get_start_x(), seg.get_start_y()
+                bearings.append(math.atan2(fx - x_m, -(fy - y_m)) % (2 * math.pi))
+            # midpoint of the largest angular gap between consecutive arms
+            best, best_gap = 0.0, -1.0
+            bearings.sort()
+            for k in range(len(bearings)):
+                a = bearings[k]
+                b = bearings[(k + 1) % len(bearings)]
+                gap = (b - a) % (2 * math.pi)
+                if gap > best_gap:
+                    best_gap, best = gap, (a + gap / 2.0) % (2 * math.pi)
+            dx, dy = math.sin(best), -math.cos(best)
+
+        lx = (x_m + dx * clearance) * Parameters.pixel_per_meter
+        ly = (y_m + dy * clearance) * Parameters.pixel_per_meter
+
+        # Leader drawn from the label back to the junction, with the arrowhead
+        # on the junction end so it points at what it names.
+        g2d.set_color(Color(90, 90, 90))
+        g2d.set_stroke(1)
+        near = 0.30 * clearance
+        g2d.draw_line(jint(lx), jint(ly),
+                      jint((x_m + dx * near) * Parameters.pixel_per_meter),
+                      jint((y_m + dy * near) * Parameters.pixel_per_meter),
+                      arrow=True)
+
+        # Anchor the text on the side away from the junction, so a label placed
+        # to the left runs leftwards instead of back across the road.
+        if dx < -0.35:
+            anchor = "se"
+        elif dx > 0.35:
+            anchor = "sw"
+        else:
+            anchor = "s"
+
+        # Halo: the same text in white just behind the label, so names stay
+        # legible over the carriageway and over each other on tight networks.
+        halo = max(1.0, 1.2 / max(self.scale, 0.0001))
+        g2d.set_color(Color.WHITE)
+        for ox, oy in ((-halo, 0), (halo, 0), (0, -halo), (0, halo)):
+            g2d.draw_string(name, jint(lx + ox), jint(ly + oy), anchor)
+        g2d.set_color(Color.BLACK)
+        g2d.draw_string(name, jint(lx), jint(ly), anchor)
 
     def draw_road_network(self, g2d) -> None:
-        # Cache the static geometry: it depends only on the network and
-        # pixelPerMeter, and rebuilding it every frame is wasteful.
+        # The road surface is painted by road_geometry.paint, which the report's
+        # animation also calls, so the two pictures cannot diverge.  Cache the
+        # geometry: it depends only on the network and pixelPerMeter, and
+        # rebuilding it every frame is wasteful.
         if self._road_geometry is None:
-            self._road_geometry = (self._segment_quads(), self._junction_hulls())
-        quads, hulls = self._road_geometry
-
-        # 1. road surfaces, 2. kerb outlines, 3. junction patches painted last
-        # so they cover the kerb stubs and give a smooth intersection.
-        g2d.set_color(Constants.road_fill_color)
-        for xs, ys in quads:
-            g2d.fill_polygon(xs, ys, 4)
-
-        g2d.set_color(Constants.road_border_color)
-        for link in self.link_list:
-            link.draw(g2d)
-
-        g2d.set_color(Constants.road_fill_color)
-        for xs, ys, cx, cy, radius in hulls:
-            g2d.fill_polygon(xs, ys, len(xs))
-            g2d.fill_oval(cx - radius, cy - radius, radius * 2, radius * 2)
+            self._road_geometry = road_geometry.build(
+                self.link_list, self.node_list, Parameters.pixel_per_meter)
+        road_geometry.paint(g2d, self.link_list, self.node_list,
+                            Parameters.pixel_per_meter, self._road_geometry)
 
         for node in self.node_list:
             g2d.set_color(Color.BLACK)
             self.draw_node_id(g2d, node)
-
-
-    @staticmethod
-    def _link_end_at_node(link, node, pixel_per_meter):
-        """The two outer corner points of *link* where it meets *node*."""
-        if link.get_up_node() == node.get_id():
-            segment = link.get_first_segment()
-            x1 = segment.get_start_x() * pixel_per_meter
-            y1 = segment.get_start_y() * pixel_per_meter
-            x2 = segment.get_end_x() * pixel_per_meter
-            y2 = segment.get_end_y() * pixel_per_meter
-            w = segment.get_segment_width() * pixel_per_meter
-            x3 = Utilities.return_x3(x1, y1, x2, y2, w)
-            y3 = Utilities.return_y3(x1, y1, x2, y2, w)
-            return x1, y1, x3, y3
-        segment = link.get_last_segment()
-        x1 = segment.get_start_x() * pixel_per_meter
-        y1 = segment.get_start_y() * pixel_per_meter
-        x2 = segment.get_end_x() * pixel_per_meter
-        y2 = segment.get_end_y() * pixel_per_meter
-        w = segment.get_segment_width() * pixel_per_meter
-        x4 = Utilities.return_x4(x1, y1, x2, y2, w)
-        y4 = Utilities.return_y4(x1, y1, x2, y2, w)
-        return x2, y2, x4, y4
 
     # ---- timer / events --------------------------------------------------
 
@@ -473,22 +509,78 @@ class DhakaSimPanel:
             self.trace_writer.flush()
         self.frame.on_simulation_finished()
 
+    def dispose(self) -> None:
+        """Stop the run and release what it holds.
+
+        Called when the view is torn down -- either to go back to the option
+        form or on shutdown -- so a half-finished run cannot keep stepping in
+        the background and trace.txt is not left open.
+        """
+        self._finished = True
+        if self._timer is not None:
+            try:
+                self.canvas.after_cancel(self._timer)
+            except tk.TclError:
+                pass
+            self._timer = None
+        for handle in (self.trace_writer, self.trace_reader):
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+        self.trace_writer = None
+        self.trace_reader = None
+
     def mouse_pressed(self, event) -> None:
         self._reference_x = event.x
         self._reference_y = event.y
 
     def mouse_dragged(self, event) -> None:
-        self.translate_x += (event.x - self._reference_x) * 30
-        self.translate_y += (event.y - self._reference_y) * 30
+        dx = event.x - self._reference_x
+        dy = event.y - self._reference_y
         self._reference_x = event.x
         self._reference_y = event.y
+        if self.view_3d:
+            # Shift turns the orbit into a pan, the convention every 3D viewer
+            # uses; right-drag does the same for a two-button mouse.
+            if event.state & 0x0001:
+                self.scene3d.camera.pan(dx, dy, self.scene3d.focal)
+            else:
+                self.scene3d.camera.orbit(dx, dy)
+            if not Parameters.TRACE_MODE:
+                self.repaint()
+            return
+        self.translate_x += dx * 30
+        self.translate_y += dy * 30
         if not Parameters.TRACE_MODE:
             self.repaint()
         if Parameters.DEBUG_MODE:
             print(f"{self.translate_x} {self.translate_y}")
 
+    def mouse_dragged_right(self, event) -> None:
+        if not self.view_3d:
+            return
+        self.scene3d.camera.pan(event.x - self._reference_x,
+                                event.y - self._reference_y,
+                                self.scene3d.focal)
+        self._reference_x = event.x
+        self._reference_y = event.y
+        if not Parameters.TRACE_MODE:
+            self.repaint()
+
+    def mouse_double_clicked(self, event) -> None:
+        if not self.view_3d:
+            return
+        self.scene3d.camera.reset()
+        self.repaint()
+
     def mouse_wheel_moved(self, event) -> None:
         notches = -1 if event.delta > 0 else 1
+        if self.view_3d:
+            self.scene3d.camera.zoom(notches)
+            self.repaint()
+            return
         new_scale_value = self.scale - notches * 0.004
         self.scale = min(1.0, max(0.001, new_scale_value))
         self.repaint()
@@ -578,8 +670,16 @@ class OptionPanel:
             ("Footpath Strip Width (metres):", "footpath",
              jstr(Parameters.footpath_strip_width),
              "Strip granularity on the footpath, in METRES."),
-            ("Maximum Speed (km/h):", "max_speed", "60",
-             "Network speed limit, in KILOMETRES PER HOUR."),
+            # Speeds are held in m/s; this field, like MaximumSpeed in
+            # parameter.txt, is km/h.  Rounding to 2 dp undoes the 4-digit
+            # truncation precision2 applied on the way in, so the value shown
+            # is the value the file states and start_simulation converts it
+            # back to exactly the same m/s -- the round trip is an identity.
+            ("Maximum Speed (km/h):", "max_speed",
+             jstr(round(Parameters.maximum_speed * 3.6, 2)),
+             "Network speed limit, in KILOMETRES PER HOUR, as set by "
+             "MaximumSpeed in parameter.txt. The fastest vehicle type manages "
+             "110 km/h, so anything above that is no limit at all."),
         )
         for i, (label, key, value, desc) in enumerate(rows, start=4):
             ttk.Label(frame, text=label, font=("Consolas", 10)).grid(
@@ -593,11 +693,11 @@ class OptionPanel:
             self.fields[key] = var
 
         ttk.Label(frame, text="Trace Mode:", font=("Consolas", 10)).grid(
-            row=14, column=0, sticky="w", pady=4)
+            row=12, column=0, sticky="w", pady=4)
         self.trace_var = tk.StringVar(
             value="On" if Parameters.TRACE_MODE else "Off")
         trace_radios = ttk.Frame(frame)
-        trace_radios.grid(row=14, column=1, sticky="w")
+        trace_radios.grid(row=12, column=1, sticky="w")
         ttk.Radiobutton(trace_radios, text="On", value="On",
                         variable=self.trace_var).pack(side="left")
         ttk.Radiobutton(trace_radios, text="Off", value="Off",
@@ -606,14 +706,14 @@ class OptionPanel:
                              "trace.txt instead of simulating a fresh one.",
                   font=("Segoe UI", 9), foreground="#5b6b7b",
                   wraplength=430, justify="left").grid(
-            row=14, column=2, sticky="w", padx=(16, 0), pady=4)
+            row=12, column=2, sticky="w", padx=(16, 0), pady=4)
 
         ttk.Label(frame, text="Pedestrian:", font=("Consolas", 10)).grid(
-            row=14, column=0, sticky="w", pady=4)
+            row=13, column=0, sticky="w", pady=4)
         self.pedestrian_var = tk.StringVar(
             value="On" if Parameters.across_pedestrian_mode else "Off")
         radios = ttk.Frame(frame)
-        radios.grid(row=14, column=1, sticky="w")
+        radios.grid(row=13, column=1, sticky="w")
         ttk.Radiobutton(radios, text="On", value="On",
                         variable=self.pedestrian_var).pack(side="left")
         ttk.Radiobutton(radios, text="Off", value="Off",
@@ -622,11 +722,48 @@ class OptionPanel:
                              "source of congestion in Dhaka.",
                   font=("Segoe UI", 9), foreground="#5b6b7b",
                   wraplength=430, justify="left").grid(
+            row=13, column=2, sticky="w", padx=(16, 0), pady=4)
+
+        ttk.Label(frame, text="Real Geometry:", font=("Consolas", 10)).grid(
+            row=14, column=0, sticky="w", pady=4)
+        self.geometry_var = tk.StringVar(
+            value="On" if Parameters.GEOMETRY_MODE else "Off")
+        geom_radios = ttk.Frame(frame)
+        geom_radios.grid(row=14, column=1, sticky="w")
+        ttk.Radiobutton(geom_radios, text="On", value="On",
+                        variable=self.geometry_var).pack(side="left")
+        ttk.Radiobutton(geom_radios, text="Off", value="Off",
+                        variable=self.geometry_var).pack(side="left")
+        ttk.Label(frame, text="On = use the surveyed road layout: physical "
+                             "medians, and roundabouts with a central island, "
+                             "give-way priority and deflection. Off reproduces "
+                             "the original simulator exactly.",
+                  font=("Segoe UI", 9), foreground="#5b6b7b",
+                  wraplength=430, justify="left").grid(
             row=14, column=2, sticky="w", padx=(16, 0), pady=4)
+
+        ttk.Label(frame, text="3D View:", font=("Consolas", 10)).grid(
+            row=15, column=0, sticky="w", pady=4)
+        self.render3d_var = tk.StringVar(
+            value="On" if Parameters.RENDER_3D else "Off")
+        view_radios = ttk.Frame(frame)
+        view_radios.grid(row=15, column=1, sticky="w")
+        ttk.Radiobutton(view_radios, text="On", value="On",
+                        variable=self.render3d_var).pack(side="left")
+        ttk.Radiobutton(view_radios, text="Off", value="Off",
+                        variable=self.render3d_var).pack(side="left")
+        ttk.Label(frame, text="On = watch the run as a 3D perspective scene "
+                             "with modelled vehicles, as VISSIM does; Off = "
+                             "the 2D plan view. Drawing only — the results are "
+                             "the same either way, and the button in the "
+                             "toolbar (or the V key) switches at any time.",
+                  font=("Segoe UI", 9), foreground="#5b6b7b",
+                  wraplength=430, justify="left").grid(
+            row=15, column=2, sticky="w", padx=(16, 0), pady=4)
 
         start = ttk.Button(frame, text="Start Simulation",
                            command=self.start_simulation)
-        start.grid(row=14, column=0, columnspan=3, pady=(22, 0))
+        start.grid(row=16, column=0, columnspan=3, pady=(22, 0))
         start.focus_set()
         parent_toplevel = frame.winfo_toplevel()
         parent_toplevel.bind("<Return>", lambda _e: self.start_simulation())
@@ -645,6 +782,9 @@ class OptionPanel:
         Parameters.random = (JavaRandom() if Parameters.seed < 0
                              else JavaRandom(Parameters.seed))
         Parameters.TRACE_MODE = self.trace_var.get() == "On"
+        Parameters.GEOMETRY_MODE = self.geometry_var.get() == "On"
+        print("Real geometry: " + ("On" if Parameters.GEOMETRY_MODE else "Off"))
+        Parameters.RENDER_3D = self.render3d_var.get() == "On"
         Parameters.pixel_per_meter = float(self.fields["ppm"].get())
         value = float(self.fields["accident"].get())
         if value < 1:
@@ -677,9 +817,16 @@ class DhakaSimFrame:
             pass
         self.container = ttk.Frame(self.root)
         self.container.pack(fill="both", expand=True)
-        self.option_panel = OptionPanel(self, self.container)
-        self.option_panel.frame.pack(fill="both", expand=True)
+        # The configuration as loaded from parameter.txt, before any run has
+        # had a chance to mutate it.  show_options() puts this back, so the
+        # form always opens on the same values it opened on the first time.
+        self._baseline = Parameters.snapshot()
+        self.option_panel = None
         self.panel = None
+        self._report_button = None
+        self._view_button = None
+        self._status = None
+        self.show_options()
 
     # Legend rows: label -> the vehicle type indices it covers.
     LEGEND_CATEGORIES = (
@@ -759,12 +906,64 @@ class DhakaSimFrame:
         except tk.TclError:
             pass
 
-    def show_simulation(self) -> None:
+    def show_options(self) -> None:
+        """Return to the start form, ready for another run."""
+        self._teardown()
+        # Undo everything the finished run changed, so the form shows the
+        # values it was loaded with rather than that run's leftovers.
+        Parameters.restore(self._baseline)
+        Parameters.simulation_step = 1
+        self.option_panel = OptionPanel(self, self.container)
+        self.option_panel.frame.pack(fill="both", expand=True)
+
+    def new_simulation(self) -> None:
+        """Go back to the form, checking first if a run is still going."""
+        running = self.panel is not None and not self.panel._finished
+        if running and not messagebox.askyesno(
+                "New simulation",
+                "The current run has not finished.\n\n"
+                "Discard it and go back to the setup screen?"):
+            return
+        self.show_options()
+
+    def _teardown(self) -> None:
+        if self.panel is not None:
+            self.panel.dispose()
+            self.panel = None
+        self.option_panel = None
+        self._report_button = None
+        self._view_button = None
+        self._status = None
+        Parameters.show_progress_slider = None
         for child in self.container.winfo_children():
             child.destroy()
 
+    def show_simulation(self) -> None:
+        self._teardown()
+
         panel = DhakaSimPanel(self, self.container)
         self.panel = panel
+
+        # A toolbar that stays available for the whole run, so getting back to
+        # the setup screen never means restarting the program.
+        top_bar = ttk.Frame(self.container, padding=(8, 6))
+        ttk.Button(top_bar, text="◀  New simulation",
+                   command=self.new_simulation).pack(side="left")
+        self._report_button = ttk.Button(top_bar, text="Open report",
+                                         command=self.open_report,
+                                         state="disabled")
+        self._report_button.pack(side="left", padx=(8, 0))
+
+        # The view can be flipped at any point in a run: it changes only how
+        # the frame is drawn, never what is simulated.
+        self._view_button = ttk.Button(top_bar, command=self.toggle_view)
+        self._view_button.pack(side="left", padx=(8, 0))
+        self._sync_view_button()
+        self.root.bind("<KeyPress-v>", lambda _e: self.toggle_view())
+
+        self._status = ttk.Label(top_bar, text="")
+        self._status.pack(side="left", padx=(12, 0))
+        top_bar.pack(side="top", fill="x")
 
         scale_slider = ttk.Scale(self.container, from_=100, to=0, orient="vertical")
         scale_slider.set(30)
@@ -809,22 +1008,51 @@ class DhakaSimFrame:
         panel.set_scale(max(0.00001, scale_slider.get() / 100.0))
         panel.start()
 
+    def toggle_view(self) -> None:
+        """Swap between the 2D plan view and the 3D perspective view."""
+        if self.panel is None:
+            return
+        self.panel.set_view_3d(not self.panel.view_3d)
+        self._sync_view_button()
+
+    def _sync_view_button(self) -> None:
+        if self._view_button is None or self.panel is None:
+            return
+        # The button says where it takes you, not where you are.
+        self._view_button.configure(
+            text="Plan view (2D)" if self.panel.view_3d else "3D view")
+
     def repaint(self) -> None:
         if self.panel is not None:
             self.panel.repaint()
+
+    def open_report(self) -> None:
+        """Open the most recent HTML report in the default browser."""
+        from . import report
+        path = report.LAST_REPORT_PATH
+        if not path:
+            messagebox.showinfo("Report", "No report was written for this run.")
+            return
+        webbrowser.open(f"file://{path}")
 
     def on_simulation_finished(self) -> None:
         # Java swaps in an inert slider once the run ends; just stop repainting.
         # In addition, offer the auto-generated HTML report to the user.
         try:
+            if self._status is not None:
+                self._status.configure(text="Run finished.")
             from . import report
             path = report.LAST_REPORT_PATH
             if path:
+                if self._report_button is not None:
+                    self._report_button.configure(state="normal")
                 if messagebox.askyesno(
                         "Simulation finished",
                         "The run has finished.\n\nA report explaining every "
                         "result and term has been saved to:\n"
-                        f"{path}\n\nOpen it now?"):
+                        f"{path}\n\nOpen it now?\n\n"
+                        "(Use ◀ New simulation, top left, to set up "
+                        "another run without restarting.)"):
                     webbrowser.open(f"file://{path}")
         except Exception as exc:  # never let the popup break shutdown
             print(f"could not open report: {exc}")

@@ -10,13 +10,15 @@
 2. [The Strip Model](#2-the-strip-model)
 3. [Architecture — How the Simulator Works](#3-architecture--how-the-simulator-works)
 4. [Repository Layout](#4-repository-layout)
-5. [Module Reference](#5-module-reference)
+5. [Module Reference](#5-module-reference) · [5.5a Running more than once](#55a-running-more-than-once-per-session) · [5.6 One picture, two renderers](#56-one-picture-two-renderers)
 6. [The Simulation Loop, Step by Step](#6-the-simulation-loop-step-by-step)
 7. [Vehicle Generation & Demand](#7-vehicle-generation--demand)
 8. [Vehicle Types](#8-vehicle-types)
 9. [Car-Following Models](#9-car-following-models)
 10. [Lane-Changing (Strip-Changing) Models](#10-lane-changing-strip-changing-models)
 11. [Side Friction: Pedestrians & Roadside Objects](#11-side-friction-pedestrians--roadside-objects)
+11a. [Networks, Time of Day & Survey Data](#11a-networks-time-of-day--survey-data)
+11b. [GeometryMode: Medians & Roundabouts](#11b-geometrymode-medians--roundabouts)
 12. [Intersections & Signals](#12-intersections--signals)
 13. [Input File System](#13-input-file-system)
 14. [Complete Parameter Reference](#14-complete-parameter-reference)
@@ -69,7 +71,8 @@ translation of the original Java simulator; see
 | Lane-changing models | 4 selectable |
 | Dependencies | none — standard library only, `tkinter` for the GUI |
 | Python | 3.10+ |
-| Code size | ~8,200 lines across 29 files |
+| Code size | ~10,100 lines across 31 files |
+| Bundled networks | 5 surveyed Dhaka junctions + the synthetic demo |
 
 ---
 
@@ -241,23 +244,40 @@ is built on. See [section 16](#16-the-numeric-compatibility-layer).
 
 ```
 DhakaSIM_python/
-├── input/                          scenario definition (read at startup)
-│   ├── parameter.txt               all runtime settings
-│   ├── link.txt                    links and their segments (geometry, width)
-│   ├── node.txt                    intersections and boundary nodes
-│   ├── path.txt                    routes (link sequences) per OD pair
-│   ├── demand.txt                  vehicles/hour per OD pair
-│   ├── demand_all.txt              unthinned demand from run_sim.py
-│   └── demand-low/medium/high.txt  alternative demand levels
+├── input/
+│   ├── parameter.txt               all runtime settings (global, not per-network)
+│   ├── junctions.txt               surveyed junction centres (lat/lon), reference
+│   ├── demand-low/medium/high.txt  legacy alternative demand levels
+│   ├── kakrail_corridor/           ── one folder per network ──
+│   │   ├── link.txt                links and their segments (geometry, width)
+│   │   ├── node.txt                intersections and boundary nodes
+│   │   ├── node_names.txt          human-readable name per node (reports, GUI)
+│   │   ├── path.txt                routes (link sequences) per OD pair
+│   │   ├── demand.txt              vehicles/hour per OD pair (peak hour)
+│   │   ├── demand_by_hour.txt      surveyed demand for all 24 hours
+│   │   ├── vehicle_mix.txt         surveyed vehicle composition (peak hour)
+│   │   ├── vehicle_mix_by_hour.txt surveyed composition for all 24 hours
+│   │   └── geometry.txt            medians and roundabouts (GeometryMode)
+│   ├── khamarbari/  banani_23/  banani_27/  bijoy_sarani/
+│   └── demo_backup/                the original synthetic demo network
 ├── dhakasim/                       the simulator package
 ├── run_dhakasim.py                 launcher
 ├── run_sim.py                      route + demand generator (Floyd–Warshall)
 ├── tests/test_javacompat.py        numeric regression tests
+├── Traffic Flow Data/              the survey workbooks the networks derive from
+├── DhakaSIM Papers/                the published DhakaSim literature
 ├── README.md                       user-facing quick start
-└── DhakaSIM_Python_Codebase_Analysis.md   this document
+└── DhakaSIM_Python_Codebase_Analysis.{md,tex}   this document
 ```
 
-Generated at run time (git-ignored): `statistics/`, `trace.txt`, `debug/`.
+Generated at run time (git-ignored): `statistics/` (CSVs under `statistics/csv/`,
+HTML reports at `statistics/report_<timestamp>.html`), `trace.txt`, `debug/`.
+
+The network is chosen by `Network` in `parameter.txt` or `--network` on the
+command line. `Processor.input_path()` resolves each file inside the selected
+folder and falls back to `input/<filename>` when the network does not provide
+it; `parameter.txt` is deliberately *not* resolved that way — it is always read
+from `input/parameter.txt` so one settings file governs every network.
 
 ---
 
@@ -267,11 +287,11 @@ Generated at run time (git-ignored): `statistics/`, `trace.txt`, `debug/`.
 
 | Module | Lines | Purpose |
 | --- | --- | --- |
-| `node.py` | 277 | Intersections. Owns `IntersectionStripBundle`s (one per incoming link) that carry the signal state, the list of `IntersectionStrip`s (turn paths through the junction), and the vehicles currently inside the junction. Runs separating-axis collision detection between vehicles in the junction. A node with more than one link is a signalised junction. |
+| `node.py` | 365 | Intersections. Owns `IntersectionStripBundle`s (one per incoming link) that carry the signal state, the list of `IntersectionStrip`s (turn paths through the junction), and the vehicles currently inside the junction. Runs separating-axis collision detection between vehicles in the junction. A node with more than one link is a signalised junction; a node listed in `geometry.txt` becomes a **roundabout** and uses give-way priority instead of phases. |
 | `link.py` | 57 | Connects two nodes (`upNode`, `downNode`); an ordered list of `Segment`s. |
-| `segment.py` | 293 | A straight road stretch: start/end coordinates, width, the strip array, a mid-point sensor, and per-segment counters (throughput, average speed, waiting time, accidents). Computes the strip layout of [section 2](#2-the-strip-model). |
-| `strip.py` | 528 | The spatial unit. Holds the vehicle, pedestrian and object lists occupying it, and answers every neighbour query: `probable_leader`, `probable_follower`, `probable_object_leader`, `has_gap_for_adding_vehicle`, `has_gap_for_strip_change` (which is where the lane-changing models live), `get_gap_for_forward_movement`, `has_collision_occurred`, `check_for_accident`. |
-| `intersection_strip.py` | 35 | One turn path across a junction: entry strip → exit strip, with the two pixel-space endpoints that define its centre line. |
+| `segment.py` | 328 | A straight road stretch: start/end coordinates, width, the strip array, a mid-point sensor, and per-segment counters (throughput, average speed, waiting time, accidents). Computes the strip layout of [section 2](#2-the-strip-model), and under `GeometryMode` consumes centre strips for a physical median. |
+| `strip.py` | 539 | The spatial unit. Holds the vehicle, pedestrian and object lists occupying it, and answers every neighbour query: `probable_leader`, `probable_follower`, `probable_object_leader`, `has_gap_for_adding_vehicle`, `has_gap_for_strip_change` (which is where the lane-changing models live), `get_gap_for_forward_movement`, `has_collision_occurred`, `check_for_accident`. |
+| `intersection_strip.py` | 90 | One turn path across a junction: entry strip → exit strip, with the two pixel-space endpoints that define its centre line. Inside a roundabout the path is bent into a clockwise arc (`set_arc`, `point_at`, `is_curved`) and `get_length()` returns arc length, so going round the island genuinely costs more distance than cutting across it. |
 | `intersection_strip_bundle.py` | 58 | All turn paths that *enter* the junction from one link, sharing a single signal state. Signal control operates on bundles, not on individual turns. |
 | `link_segment_orientation.py` | 45 | Given a point and a link, decides whether the vehicle traverses the link forwards or backwards (`reverseLink`) and whether the segment itself is entered from its start or its end (`reverseSegment`). Everything directional keys off these two flags. |
 
@@ -279,7 +299,7 @@ Generated at run time (git-ignored): `statistics/`, `trace.txt`, `debug/`.
 
 | Module | Lines | Purpose |
 | --- | --- | --- |
-| `vehicle.py` | 2,309 | The main entity. Physical properties from type; longitudinal control (13 car-following models); lateral control (strip changing); junction traversal including deadlock escape; fuel consumption; collision/accident bookkeeping; drawing geometry. |
+| `vehicle.py` | 2,315 | The main entity. Physical properties from type; longitudinal control (13 car-following models); lateral control (strip changing); junction traversal including deadlock escape; fuel consumption; collision/accident bookkeeping; drawing geometry. |
 | `pedestrian.py` | 218 | A **road-crossing** pedestrian: moves laterally across the strips one at a time (`move_forward`), and can shuffle longitudinally (`move_length_wise`) when blocked. Removed on reaching the far side or when stuck for longer than `segmentWidth / speed`. |
 | `roadside_object.py` | 207 | A stationary side-friction element: standing pedestrian, parked car, parked rickshaw, parked CNG. Occupies a contiguous block of strips from the footpath inwards for a randomly drawn parking duration. |
 
@@ -291,18 +311,20 @@ in car-following and strip-changing like any other road user.
 
 | Module | Lines | Purpose |
 | --- | --- | --- |
-| `processor.py` | 1,367 | The engine. Network/route/demand parsing, per-step orchestration, vehicle and pedestrian and object generation, signal control, junction entry/exit, flow measurement, and final statistics output. |
-| `parameters.py` | 98 | Every runtime setting as class attributes (Java `static` fields), plus the three model enumerations. |
-| `constants.py` | 130 | Fixed physical constants, colours, and the empirical Gaussian-mixture blockage distributions for the four roadside object types, derived from Dhaka field survey data. |
+| `processor.py` | 1,699 | The engine. Network/route/demand parsing, per-step orchestration, vehicle and pedestrian and object generation, signal control, junction entry/exit, flow measurement, and final statistics output. |
+| `parameters.py` | 120 | Every runtime setting as class attributes (Java `static` fields), plus the three model enumerations. |
+| `constants.py` | 160 | Fixed physical constants, colours, and the empirical Gaussian-mixture blockage distributions for the four roadside object types, derived from Dhaka field survey data. |
 | `statistics.py` | 60 | Global accumulators, reset per run. |
 | `vehicle_stats.py` | 37 | Per-vehicle speed and trajectory time series (only written out when `Processor.write_speed()` is enabled). |
-| `dhaka_sim.py` | 37 | Entry point: initialise, then branch on GUI mode. |
+| `report.py` | 390 | Builds a self-contained HTML report after every run: per-type table, inline SVG bar charts, plain-language explanation of each metric, and the embedded animation from `visualize.py`. No third-party dependencies. |
+| `visualize.py` | 355 | Captures `ReportAnimationFrames` frames during the run and emits an inline animated SVG (a pure-CSS flip-book) plus a static snapshot for the report. Reuses the simulator's own drawing geometry through an SVG-emitting graphics backend. |
+| `dhaka_sim.py` | 50 | Entry point: initialise, apply `--network` / `--hour` / `--gui` / `--headless`, then branch on GUI mode. |
 
 ### 5.4 Support layer
 
 | Module | Lines | Purpose |
 | --- | --- | --- |
-| `utilities.py` | 658 | Parameter file parsing; 2-D geometry helpers (`return_x3` … `return_y6` compute perpendicular offsets used for road and vehicle corners); the error function and Gaussian CDF; per-type vehicle dimensions and performance; blockage sampling from the Gaussian mixtures; the strip-weight function used by the strip-based car-following model. |
+| `utilities.py` | 669 | Parameter file parsing; 2-D geometry helpers (`return_x3` … `return_y6` compute perpendicular offsets used for road and vehicle corners); the error function and Gaussian CDF; per-type vehicle dimensions and performance; blockage sampling from the Gaussian mixtures; the strip-weight function used by the strip-based car-following model. |
 | `javacompat.py` | 640 | Exact numeric semantics and the seeded RNG. See [section 16](#16-the-numeric-compatibility-layer). |
 | `demand.py` | 40 | An OD pair with its flow rate and the routes serving it. |
 | `path.py` | 33 | A route: source node, destination node, ordered link ids. |
@@ -312,11 +334,62 @@ in car-following and strip-changing like any other road user.
 
 | Module | Lines | Purpose |
 | --- | --- | --- |
-| `gui.py` | 549 | `DhakaSimFrame` (window), `OptionPanel` (parameter form), `DhakaSimPanel` (animated canvas), and `CanvasGraphics` — an adapter that applies the pan/zoom transform and draws onto a `tkinter.Canvas`. Also writes and replays `trace.txt`. |
-| `run_sim.py` | 281 | Floyd–Warshall route generator: builds the node adjacency from `link.txt`/`node.txt`, computes shortest paths between all boundary node pairs, and writes `path.txt` + `demand.txt`. |
+| `gui.py` | 908 | `DhakaSimFrame` (window), `OptionPanel` (parameter form), `DhakaSimPanel` (animated canvas), and `CanvasGraphics` — an adapter that applies the pan/zoom transform and draws onto a `tkinter.Canvas`. Also writes and replays `trace.txt`. |
+| `road_geometry.py` | 217 | **The single road painter.** Builds the segment quads, junction hull patches and roundabout island discs, and paints road surface, kerb outlines, junction patches and islands onto any graphics surface. Called by both `gui.py` and `visualize.py`, so the live animation and the report's animation are the same picture — see [section 5.6](#56-one-picture-two-renderers). |
+| `run_sim.py` | 371 | Floyd–Warshall route generator: builds the node adjacency from `link.txt`/`node.txt`, computes shortest paths between all boundary node pairs, and writes `path.txt` + `demand.txt` into the selected network's folder. Refuses to overwrite a survey network's measured demand unless `--force`; `--paths-only` regenerates routes alone. |
 | `tests/test_javacompat.py` | 131 | Pins the numeric layer to reference values. |
 
 ---
+
+### 5.5a Running more than once per session
+
+`DhakaSimFrame` can go back to the setup form and start another run, which is
+what the **◀ New simulation** button in the simulation toolbar does. That only
+works if a second `Processor` really is a fresh start, and several pieces of
+state are process-wide:
+
+| State | How it is reset |
+| --- | --- |
+| Every `Parameters` field | `DhakaSimFrame` snapshots the configuration once, straight after `Utilities.initialize()`, and `show_options()` restores it. Needed because a run mutates it: the form converts `MaximumSpeed` from km/h, `EncounterPerAccident` is transformed again, `along_pedestrian_mode` is left wherever the 20-step toggle stopped, and `GeometryMode` fills in the median and roundabout tables |
+| `Parameters.simulation_step` | set back to 1 by `show_options()` |
+| `Processor`'s roadside-object counters | zeroed in `Processor.__init__`; they are class-level (Java `static`), and a fresh JVM always started them at zero |
+| `Strip._rand` | cleared in `Processor.__init__` so the strips capture the new run's generator instead of the previous one's |
+| `Statistics` | already reset per run by `Statistics.reset()` |
+| The timer and `trace.txt` | released by `DhakaSimPanel.dispose()` |
+
+With every unseeded source switched off, running the same seeded scenario twice
+in one process gives byte-identical results. With side friction on the runs
+differ, as they should — pedestrian arrivals and roadside objects are sampled
+from clock-seeded generators ([section 17.1](#17-known-behaviours--quirks)) —
+but the object population still starts from zero each time.
+
+### 5.6 One picture, two renderers
+
+The GUI is what you watch while a run is in progress; the report's embedded
+animation is what everybody else sees afterwards. Those have to be the same
+picture, so neither the shapes nor the colours are duplicated:
+
+- **Geometry** lives only in `road_geometry.py`. `build()` returns the segment
+  quads, junction hulls and island discs; `paint()` draws them in the order that
+  makes an intersection read as one smooth area (surfaces → kerbs → junction
+  patches on top → islands last). `gui.py` and `visualize.py` both call it.
+- **Colours** come only from `Constants` (`road_fill_color`,
+  `island_fill_color`, `road_border_color`, `background_color`).
+- **Scale** is handled by the graphics surface, not by the geometry. Everything
+  is built in *simulation pixel space* — metres × `PixelPerMeter`, the space
+  `IntersectionStrip` endpoints and vehicle bodies already live in — and each
+  backend applies one uniform transform on the way out: an `AffineTransform` in
+  the GUI, a scale-and-translate in the SVG writer. Building at one scale and
+  scaling once is what makes the two outputs congruent rather than merely
+  similar.
+- **Vehicles** are drawn by `Vehicle.draw_vehicle()` in both, with the real
+  `Parameters.pixel_per_strip` / `pixel_per_meter` / `pixel_per_footpath_strip`.
+  That matters for vehicles inside a junction, whose position comes from the
+  `IntersectionStrip` arc built at the simulation scale.
+
+Only the report's own chrome — node name labels with leader lines, the north
+arrow, the scale bar — is drawn in output pixels with its own palette, because
+the simulation has no equivalent of it.
 
 ## 6. The Simulation Loop, Step by Step
 
@@ -745,6 +818,134 @@ Target counts are `ceil(rate × TOTAL_NETWORK_ROAD_LENGTH)` with
 
 ---
 
+## 11a. Networks, Time of Day & Survey Data
+
+### Selecting a network
+
+`Network` in `parameter.txt` (or `--network <name>` on the command line) names a
+folder under `input/`. Five networks are built from real intersection surveys in
+the `Traffic Flow Data/` workbooks, and `demo_backup/` holds the original
+synthetic network the port was validated against:
+
+| Network | Junction | Notes |
+| --- | --- | --- |
+| `kakrail_corridor` | Kakrail Church + Kakrail Mosque | two-junction corridor; the Church is a roundabout, r = 16.3 m |
+| `khamarbari` | Khamar Bari Goal Chottor | roundabout, r = 28.8 m; two dual carriageways with medians |
+| `banani_23` | Banani 23 / Super Market | |
+| `banani_27` | Banani 27 / Kacha Bazar | Kamal Ataturk Ave dual carriageway |
+| `bijoy_sarani` | Bijoy Sarani | |
+| `demo_backup` | synthetic | 23 links, 110 routes; the Java-parity reference |
+
+`input/junctions.txt` records the surveyed junction centres in WGS84 as
+provenance for the coordinates, and supersedes the GPS fields inside the
+workbooks (which were wrong for Banani 23 and Bijoy Sarani).
+
+### Node names
+
+`node_names.txt` maps each node id to a street name (`0 Indira Road`). Purely
+cosmetic — it makes the HTML report and the GUI readable instead of numeric.
+
+### Time of day
+
+Survey networks carry demand and vehicle composition for all 24 hours:
+
+- `demand_by_hour.txt` — `hour source destination vehiclesPerHour` per line
+- `vehicle_mix_by_hour.txt` — `hour vehicleType percentage` per line
+
+`TimeOfDay` in `parameter.txt`, or `--hour <0-23>`, selects the hour. The
+default `-1` means *peak hour*, which falls back to the flat `demand.txt` and
+`vehicle_mix.txt`. This is what makes a diurnal study possible:
+
+```bash
+python run_dhakasim.py --headless --network khamarbari --hour 8    # morning peak
+python run_dhakasim.py --headless --network khamarbari --hour 14   # midday
+```
+
+### Surveyed vehicle composition
+
+`vehicle_mix.txt` is `vehicleType percentage` per line, e.g. for Khamarbari:
+
+```
+0 2.231     bicycle
+1 8.572     rickshaw
+2 0.761     van / cart
+3 29.266    motorbike
+4 33.780    car
+7 20.994    CNG
+8 2.491     bus
+10 1.906    truck
+```
+
+When present it replaces the built-in 25/25/50 distribution of
+[section 7.4](#74-vehicle-type-mix) entirely: `Parameters.VEHICLE_MIX` holds
+cumulative thresholds per 10,000 and a single draw picks the type. An empty mix
+falls back to the built-in behaviour, which is what keeps the demo network
+byte-identical to the Java reference.
+
+## 11b. GeometryMode: Medians & Roundabouts
+
+`GeometryMode Off` (the default) keeps the simulator byte-identical to the Java
+reference. Turning it on reads the selected network's `geometry.txt` and applies
+real-world geometry that the original model could not express.
+
+`geometry.txt` takes one directive per line; `#` starts a comment:
+
+```
+# Khamarbari / Bangabandhu Square -- real geometry from OpenStreetMap.
+median 2 2.0        # Manik Mia Avenue  (7 + 4 lanes)
+median 5 2.0        # Sangsad Avenue / Begum Rokeya Sharani (3 + 3 lanes)
+roundabout 6 28.8   # Khamar Bari Goal Chottor
+```
+
+| Directive | Arguments | Effect |
+| --- | --- | --- |
+| `median` | `linkId widthMetres` | a physical central reservation on that link |
+| `roundabout` | `nodeId radiusMetres` | that junction circulates instead of signalling |
+
+### Medians
+
+`Segment._apply_median()` converts a median of width *w* into
+`ceil(w / StripWidth)` strips centred on the carriageway centre line, marks them
+unusable through the same `Strip.is_fp()` test that already excludes footpath
+strips, and moves `middleLowStripIndex` / `middleHighStripIndex` outward. The
+median therefore *takes road space away* from traffic rather than being a free
+dividing line. If the median would swallow the carriageway it is ignored.
+
+### Roundabouts
+
+- **Geometry.** Each turn path through the node is bent into a clockwise arc
+  about the island centre (`IntersectionStrip.set_arc`). Bangladesh circulates
+  clockwise, so the sweep is the positive angular difference; screen *y* grows
+  downward, which makes increasing angle clockwise. `get_length()` returns
+  `radius × sweep`, and `Vehicle.draw_vehicle` places the body along the arc via
+  `point_at()` instead of along the chord.
+- **Speed.** Circulating speed is `ROUNDABOUT_SPEED_FACTOR × sqrt(radius)` m/s
+  with the factor at 1.7 — the usual side-friction form for a curve, putting a
+  16 m island at ≈24 km/h and a 29 m one at ≈33 km/h.
+- **Priority.** `Node.roundabout_signal_change()` replaces phases with the
+  give-way rule: traffic already circulating keeps moving, and an approach may
+  enter only when no circulating vehicle is about to cross it. Approaches are
+  judged independently, so non-conflicting entries proceed simultaneously —
+  which is exactly where a roundabout's capacity advantage over a signal comes
+  from. If the circulation order is unknown it blocks every approach, the
+  capacity-conservative reading.
+- **Drawing.** The central island is filled with `Constants.island_fill_color`,
+  a muted green, so it reads as planted ground.
+
+Effect on the shipped networks, 90-second runs (mean speed, km/h):
+
+| Network | GeometryMode Off | On | Change |
+| --- | --- | --- | --- |
+| `kakrail_corridor` | 26.20 | 26.26 | +0.2 % |
+| `khamarbari` | 23.43 | 26.77 | +14.3 % |
+| `banani_23` | 16.74 | 16.98 | +1.4 % |
+| `banani_27` | 18.83 | 22.14 | +17.6 % |
+| `bijoy_sarani` | 32.80 | 28.69 | −12.5 % |
+
+The two largest movements are the networks whose `geometry.txt` actually carries
+a roundabout or a dual carriageway; the others shift only through second-order
+effects.
+
 ## 12. Intersections & Signals
 
 ### 12.1 Turn paths are created lazily
@@ -764,6 +965,9 @@ Turn paths entering the junction from the same link share an
 `IntersectionStripBundle`, and the bundle carries the signal. Exactly one bundle
 is green at a time; `constant_signal_change()` advances to the next bundle once
 `simulationTime − timePassed >= SignalChangeDuration`.
+
+Roundabout nodes bypass this entirely and use give-way priority instead — see
+[section 11b](#11b-geometrymode-medians--roundabouts).
 
 > With the shipped `SignalChangeDuration 1`, the green phase advances **every
 > simulated second**. That is effectively a round-robin gate rather than a
@@ -796,8 +1000,11 @@ one-line change.
 
 ## 13. Input File System
 
-Every scenario is defined purely by plain-text files in `input/`. No code
-changes are required to model a new location.
+Every scenario is defined purely by plain-text files. `parameter.txt` lives at
+the top of `input/`; everything describing a network lives in
+`input/<network>/`, selected by `Network` or `--network`
+([section 11a](#11a-networks-time-of-day--survey-data)). No code changes are
+required to model a new location.
 
 ### 13.1 `node.txt` — intersections and boundaries
 
@@ -873,7 +1080,26 @@ one matching route, or that demand is silently unusable.
 One `Name Value` pair per line; unknown names are ignored, so you can leave
 comments. See [section 14](#14-complete-parameter-reference).
 
-### 13.6 Regenerating routes and demand
+### 13.6 The rest of a network folder
+
+Beyond the four files above, a network folder may carry:
+
+| File | Required? | Contents |
+| --- | --- | --- |
+| `node_names.txt` | no | `nodeId name` — street names for reports and the GUI |
+| `demand_by_hour.txt` | no | `hour src dst vehiclesPerHour` — surveyed 24-hour demand |
+| `vehicle_mix.txt` | no | `vehicleType percentage` — surveyed composition |
+| `vehicle_mix_by_hour.txt` | no | `hour vehicleType percentage` |
+| `geometry.txt` | no | `median`/`roundabout` directives, read only under `GeometryMode On` |
+| `demand_all.txt` | no | the unthinned demand `run_sim.py` produced |
+
+All are described in [section 11a](#11a-networks-time-of-day--survey-data) and
+[section 11b](#11b-geometrymode-medians--roundabouts). A network needs only
+`node.txt`, `link.txt`, `path.txt` and `demand.txt` to run —
+`Processor.available_networks()` lists every `input/` subfolder containing a
+`node.txt`.
+
+### 13.7 Regenerating routes and demand
 
 `run_sim.py` builds the node adjacency matrix from the link/node files, runs
 **Floyd–Warshall** to obtain all-pairs shortest paths, emits one route and one
@@ -929,7 +1155,7 @@ Grouped by purpose. Defaults are the shipped values.
 | `ConsiderMinimum` | On | MY_MODEL: minimum over leaders instead of weighted average |
 | `DensityPercentage` | 50 | MY_MODEL: density threshold for widening attention |
 | `PedestrianWeight` | 2 | MY_MODEL: how strongly pedestrians restrain vehicles |
-| `MaximumSpeed` | 100.0 | network speed limit — **m/s headless, km/h in the GUI** |
+| `MaximumSpeed` | 100.0 | network speed limit in **km/h**; held internally in m/s, and the GUI field round-trips it exactly |
 | `ALPHA` / `BETA` / `ETA` | 0.92 / 0.1 / 0 | KFTM calibration constants |
 | `TTC_Threshold` | 0.6 | time-to-collision threshold for near-crash counting |
 | `PenaltyWait` | On | collided vehicles wait out a penalty before removal |
@@ -958,6 +1184,15 @@ Grouped by purpose. Defaults are the shipped values.
 | `PedestrianRandomLaneChangePercentage` | 20 | chance a walker attempts a lateral move |
 | `PedestrianLeftBiasPercentage` | 40 | of those, the chance it is towards the kerb |
 
+### Network & reporting
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `Network` | `kakrail_corridor` | folder under `input/` holding the network; `--network` overrides |
+| `TimeOfDay` | −1 | hour of the survey day to simulate, 0–23; −1 = peak hour. `--hour` overrides |
+| `GeometryMode` | Off | apply `geometry.txt`: medians and roundabouts ([section 11b](#11b-geometrymode-medians--roundabouts)). Off keeps Java parity |
+| `ReportAnimationFrames` | 24 | frames captured for the animated SVG in the HTML report |
+
 ### Signals & measurement
 
 | Name | Default | Meaning |
@@ -978,32 +1213,36 @@ Grouped by purpose. Defaults are the shipped values.
 Six lines are printed at the end of the run:
 
 ```
-speed: 7.5465…
-waiting time: 4.7762…
-motorized speed: 9.2665…
-motorized waiting time: 4.6145…
-non-motorized speed: 2.1864…
-non-motorized waiting time: 5.2801…
+speed: 26.200045524864382 km/h
+waiting time: 0.4381625441696113 s (avg per vehicle)
+motorized speed: 27.9931... km/h
+motorized waiting time: 0.5272727272727272 s
+non-motorized speed: 11.4218... km/h
+non-motorized waiting time: 0.12698412698412698 s
 ```
 
 | Metric | Definition | Unit |
 | --- | --- | --- |
-| `speed` | mean over vehicles of (distance travelled ÷ time alive) | **m/s** |
+| `speed` | mean over vehicles of (distance travelled ÷ time alive) | **km/h** |
 | `waiting time` | mean over vehicles of the number of steps with zero speed | **seconds** |
 | `motorized …` | the same, restricted to types 3–11 | |
 | `non-motorized …` | the same, restricted to types 0–2 | |
 
-Type 12 (pedestrians) is excluded from all six. Note the unit mismatch with the
-CSVs: **stdout speeds are m/s, `avg_speed_vehicle.csv` is km/h.**
+Type 12 (pedestrians) is excluded from all six. The units are printed
+explicitly, and the speeds agree with `avg_speed_vehicle.csv` (both km/h).
+
+When a network selects an hour, a `Time of day: 08:00-09:00 (4715 veh/h)` line
+precedes the metrics; `GeometryMode On` similarly announces the roundabouts it
+found.
 
 `Accident: SimStep: … Vehicle … Pedestrian …` lines are also printed as they
 happen — counting these lines is currently the only way to get the accident
 total ([quirk 17.5](#17-known-behaviours--quirks)).
 
-### 15.2 `statistics/*.csv`
+### 15.2 `statistics/csv/*.csv`
 
-All files are **appended**, one row per run, so a directory accumulates an
-experiment. Every per-type file has 13 comma-separated columns in vehicle-type
+The CSVs live in `statistics/csv/`. All files are **appended**, one row per run,
+so a directory accumulates an experiment. Every per-type file has 13 comma-separated columns in vehicle-type
 order (bicycle, rickshaw, van, motorbike, car ×3, CNG, bus ×2, truck ×2,
 pedestrian) with a trailing comma. Empty cells print as `NaN`.
 
@@ -1036,6 +1275,17 @@ the row order of `demand.txt`.
 > `_update_flow()` to a location that exists. The per-segment sensor used by
 > `avg_speed_vehicle` statistics is unrelated and sits at each segment's
 > mid-point.
+
+### 15.2a `statistics/report_<timestamp>.html`
+
+Every run also writes a self-contained HTML report (`report.py`), named with the
+run's local timestamp so runs do not overwrite each other. It contains the
+per-type table, inline SVG bar charts, a plain-language explanation of every
+metric, and an embedded animated SVG of the run itself (`visualize.py`,
+`ReportAnimationFrames` frames). It has no external dependencies — it opens in
+any browser with no server and no network access, and can be attached to a report
+as-is. The GUI offers to open the newest one when a run finishes;
+`report.LAST_REPORT_PATH` holds the path.
 
 ### 15.3 The fuel model
 
@@ -1125,10 +1375,25 @@ Separately, `SlowVehicle`/`MediumVehicle`/`FastVehicle` are unconditionally
 overwritten with 25/25/50 at the end of parsing, so the file values have no
 effect on the vehicle mix.
 
-**17.3 `MaximumSpeed` changes units between modes.** Headless reads it as m/s;
-the GUI option form reads it as km/h and divides by 3.6. The shipped `100.0`
-therefore caps speeds at 100 m/s headless but 27.78 m/s in the GUI — the same
-scenario yields different results in the two modes.
+**17.3 `MaximumSpeed` is in km/h.** It is written in km/h — the unit the GUI
+field is labelled with, and the unit a speed limit is actually quoted in — and
+held internally in m/s. The option form is populated from it and
+`start_simulation` converts back, so the round trip is an identity and the GUI
+and a headless run apply the same limit. The shipped `100.0` is a realistic
+100 km/h network limit.
+
+*Two things used to be wrong here.* The Java original read the field as **m/s**,
+so the same `100.0` meant 360 km/h — no limit at all, since the fastest vehicle
+type manages 110 km/h. And the GUI ignored the file entirely, hardcoding
+`60` km/h, so the two modes silently disagreed. Both are fixed; set
+`MaximumSpeed 360` if you need the old no-limit reference behaviour.
+
+The limit is not merely a ceiling on achieved speed: `currentMaxSpeed` feeds the
+Gipps free-flow term (`1 - v/V`), so it shapes acceleration throughout. On a
+120-step seeded run, moving from no limit to 100 km/h changed mean speed from
+25.97 to 29.88 km/h — tightening the spread of desired speeds cut the
+lane-changing churn. **Runs recorded before this change are not comparable with
+runs after it.**
 
 **17.4 `Probability of Accident` is transformed twice in the GUI.** Startup turns
 `EncounterPerAccident 0.01` into 10000; the option form displays that 10000 and
@@ -1150,6 +1415,14 @@ waiting time of every vehicle still on the road, then calls
 completed their trip are counted once. So `waiting time` and
 `waiting_percentage_vehicle.csv` are biased upwards by the vehicles in flight at
 the end — a smaller effect the longer the run.
+
+**17.6a The +30 veh/h demand offset also applies to measured survey demand.**
+`_read_demand()` adds 30 veh/h to every OD row, whether it came from the
+synthetic `demand.txt` or from a surveyed `demand_by_hour.txt`
+([section 7.1](#71-from-demandtxt-to-a-spawn-schedule)). On a large movement of
+621 veh/h that is a 5 % inflation; on a small one of 60 veh/h it is 50 %. If you
+are calibrating against the survey counts, this offset is the first thing to
+account for — or to remove.
 
 **17.7 `Segment.get_accident_count()` mutates.** The Java original is
 `return accidentCount++`, so reading the counter increments it. Preserved.
@@ -1177,9 +1450,10 @@ your target area (Mirpur-10, Farmgate, …), read off intersection positions and
 road widths in metres. Pick any convenient local origin; coordinates are plain
 metres, not lat/lon.
 
-**Step 2 — Write `input/node.txt`.** Number nodes from 0. Give each boundary node
-its real `x y` and the single link id attached to it. Give each interior junction
-`0 0` and the list of link ids meeting there.
+**Step 2 — Create the network folder and write `input/<name>/node.txt`.** Number
+nodes from 0. Give each boundary node its real `x y` and the single link id
+attached to it. Give each interior junction `0 0` and the list of link ids
+meeting there.
 
 ```
 5
@@ -1190,8 +1464,8 @@ its real `x y` and the single link id attached to it. Give each interior junctio
 4 0 -500 3
 ```
 
-**Step 3 — Write `input/link.txt`.** One header per link, then one line per
-straight segment. Split curves into several segments.
+**Step 3 — Write `input/<name>/link.txt`.** One header per link, then one line
+per straight segment. Split curves into several segments.
 
 ```
 4
@@ -1211,25 +1485,30 @@ Check the width gives you the strips you expect:
 **Step 4 — Generate routes and demand.**
 
 ```bash
-python run_sim.py
+python run_sim.py --network <name>
 ```
 
-This writes `input/path.txt` and `input/demand.txt` (and keeps the unthinned
-demand as `input/demand_all.txt`). Set `DemandType`, `LowRate`, `MediumRate` and
-`HighRate` in `parameter.txt` *before* running it — they control the output.
+This writes `input/<name>/path.txt` and `input/<name>/demand.txt` (keeping the
+unthinned demand as `input/<name>/demand_all.txt`). Set `DemandType`, `LowRate`,
+`MediumRate` and `HighRate` in `input/parameter.txt` *before* running it — they
+control the output. If the folder already holds surveyed counts
+(`demand_by_hour.txt`), `run_sim.py` refuses to overwrite `demand.txt`; use
+`--paths-only` to regenerate just the routes, or `--force` to override.
 
-**Step 5 — Configure the run.** In `input/parameter.txt` set
+**Step 5 — Configure the run.** In `input/parameter.txt` set `Network <name>`,
 `SimulationEndTime`, the model choices, the side-friction switches, and either
-`CenteredView On` or a manual `DefaultTranslateX/Y`.
+`CenteredView On` or a manual `DefaultTranslateX/Y`. Add a `geometry.txt` and set
+`GeometryMode On` if the location has medians or a roundabout.
 
 **Step 6 — Run.**
 
 ```bash
-python run_dhakasim.py --gui
+python run_dhakasim.py --gui --network <name>
 ```
 
 Watch it once in the GUI to confirm the geometry looks right and vehicles route
-sensibly, then switch to `--headless` for the measured runs.
+sensibly, then switch to `--headless` for the measured runs. The HTML report in
+`statistics/` is the quickest way to sanity-check the result.
 
 **Common pitfalls**
 
@@ -1245,13 +1524,15 @@ sensibly, then switch to `--headless` for the measured runs.
 
 ### 19.1 Full closure
 
-Remove the link from `input/link.txt`, remove its id from the affected nodes in
-`input/node.txt`, and re-run `run_sim.py`. Floyd–Warshall re-routes the traffic
-around the closure automatically.
+Remove the link from the network's `link.txt`, remove its id from the affected
+nodes in its `node.txt`, and re-run `run_sim.py --network <name>`.
+Floyd–Warshall re-routes the traffic around the closure automatically. On a
+survey network add `--paths-only` so the measured demand survives.
 
 ### 19.2 Road narrowing (construction, flyover works)
 
-Reduce the `width` field of the affected segment(s) in `input/link.txt`. Strip
+Reduce the `width` field of the affected segment(s) in the network's
+`link.txt`. Strip
 count — and therefore capacity — follows directly. No route regeneration needed.
 
 ```
@@ -1417,6 +1698,12 @@ verified across:
 | Route/demand generation (`run_sim.py`) | byte-identical output files |
 | Vehicle / object / pedestrian draw geometry (`trace.txt` coordinates) | identical |
 
+Parity is defined with `GeometryMode Off`, no `vehicle_mix.txt` and
+`MaximumSpeed 360` (the Java reading of the shipped value, i.e. no effective
+speed limit), i.e. the `demo_backup` network as the Java build ran it: medians, roundabouts, surveyed vehicle mixes and hourly
+demand are extensions with no Java counterpart, and are deliberately gated so a
+default run still reproduces the reference exactly.
+
 The side-friction paths use unseeded generators in the original, so they were
 compared by seeding both sides identically in a scratch build. Unseeded,
 repeated runs of the two implementations agree within statistical noise (all
@@ -1441,6 +1728,7 @@ Java class → Python module map:
 | `Statistics.java` | `dhakasim/statistics.py` |
 | `VehicleStats.java` | `dhakasim/vehicle_stats.py` |
 | `Link.java`, `Path.java`, `Demand.java` | `dhakasim/link.py`, `path.py`, `demand.py` |
+| — | `dhakasim/report.py`, `visualize.py` (HTML report + SVG animation) |
 | `IntersectionStrip.java`, `IntersectionStripBundle.java` | `dhakasim/intersection_strip.py`, `intersection_strip_bundle.py` |
 | `LinkSegmentOrientation.java` | `dhakasim/link_segment_orientation.py` |
 | `NormalDistribution.java` | `dhakasim/normal_distribution.py` |
@@ -1460,7 +1748,10 @@ leading underscore; Java `static` fields are class attributes.
 
 | Goal | What to change | Code edit? |
 | --- | --- | --- |
-| New map / location | `input/node.txt`, `input/link.txt`, then `run_sim.py` | No |
+| Switch network | `Network` in `parameter.txt`, or `--network <name>` | No |
+| Simulate a different hour | `TimeOfDay`, or `--hour <0-23>` | No |
+| Enable medians / roundabouts | `GeometryMode On` + the network's `geometry.txt` | No |
+| New map / location | new `input/<name>/` with `node.txt` + `link.txt`, then `run_sim.py --network <name>` | No |
 | Road diversion / closure | remove link from `link.txt` + `node.txt`, re-run `run_sim.py` | No |
 | Lane reduction / narrowing | reduce `width` in `link.txt` | No |
 | Adjust traffic volume | `input/demand.txt`, or `DemandType` + `*Rate` then `run_sim.py` | No |
@@ -1480,11 +1771,13 @@ leading underscore; Java `static` fields are class attributes.
 ### 23.2 Commands
 
 ```bash
-python run_dhakasim.py              # honour GUIMode in parameter.txt
-python run_dhakasim.py --headless   # force batch mode
-python run_dhakasim.py --gui        # force the animation
-python run_sim.py                   # regenerate path.txt + demand.txt
-python tests/test_javacompat.py     # verify numeric fidelity
+python run_dhakasim.py                              # honour parameter.txt
+python run_dhakasim.py --headless                   # force batch mode
+python run_dhakasim.py --gui                        # force the animation
+python run_dhakasim.py --network khamarbari --hour 8 # pick network and hour
+python run_sim.py --network demo_backup             # regenerate routes + demand
+python run_sim.py --paths-only                      # routes only, keep survey demand
+python tests/test_javacompat.py                     # verify numeric fidelity
 ```
 
 ### 23.3 Key constants

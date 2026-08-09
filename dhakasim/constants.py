@@ -22,6 +22,11 @@ class Constants:
     TYPES_OF_CARS = 13
     PEDESTRIANS_ALONG_THE_ROAD_TYPE = 12
 
+    # Circulating speed in a roundabout is taken as k*sqrt(radius) m/s, the
+    # usual side-friction form for a curve. k = 1.7 puts a 16 m island at
+    # ~24 km/h and a 29 m one at ~33 km/h, which matches observed practice.
+    ROUNDABOUT_SPEED_FACTOR = 1.7
+
     # Fixed display colour per vehicle type, so the animation and the report
     # legend agree. Indexes match the 13 vehicle types (see report.TYPE_NAMES):
     # cars (4-6) share a red family, buses (8-9) a purple family, trucks
@@ -46,6 +51,8 @@ class Constants:
     # Filled road surface; junctions are filled with the same colour so that
     # intersections read as one smooth area instead of a tangle of kerb stubs.
     road_fill_color = Color(176, 182, 190)
+    # central island of a roundabout (planted, so a muted green)
+    island_fill_color = Color(198, 214, 190)
     background_color = Color.WHITE  # Color(105, 105, 105) / Color.DARK_GRAY
     DEFAULT_SCALE = 5.0
     TIME_STEP = 1.0

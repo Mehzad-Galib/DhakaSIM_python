@@ -396,17 +396,25 @@ def draw_trace(trace_reader, g) -> None:
             x = int(tokenizer[0])
             y = int(tokenizer[1])
             in_accident = jbool(tokenizer[2])
+            g.begin_prop("pedestrian")
             if in_accident:
                 g.set_color(Color.RED)
                 g.fill_oval(x, y, 10, 10)
             else:
                 g.set_color(Constants.pedestrian_color)
                 g.fill_oval(x, y, 7, 7)
+            g.end_prop()
 
     # Lines after current vehicles
     while True:
         line = trace_reader.readline()
-        if not line or line.startswith("End"):
+        # "Current Objects" ends the vehicle block just as "End Step" does: the
+        # writer emits the objects header between the two, and stopping only on
+        # "End" walks straight into it and fails to parse it as a vehicle.
+        # (The objects themselves are never written -- drawing one does not
+        # touch the trace -- so the header is immediately followed by the end
+        # of the step and nothing is lost by stopping here.)
+        if not line or line.startswith("End") or line.startswith("Current"):
             break
         tokenizer = line.split()
         xs = [0] * 4
@@ -426,7 +434,12 @@ def draw_trace(trace_reader, g) -> None:
         blue = int(tokenizer[10])
 
         g.set_color(Color(red, green, blue))
+        # The trace records corners and a colour but not the vehicle type, so
+        # the 3D view is left to infer the model from the footprint; in 2D the
+        # pair of calls does nothing.
+        g.begin_prop("vehicle", None)
         g.fill_polygon(xs, ys, 4)
+        g.end_prop()
 
 
 def precision2(d: float) -> float:
@@ -487,7 +500,14 @@ def initialize() -> None:
                 elif name == "FootpathStripWidth":
                     Parameters.footpath_strip_width = float(value)
                 elif name == "MaximumSpeed":
-                    Parameters.maximum_speed = float(value)
+                    # Written in km/h -- the unit a speed limit is actually
+                    # quoted in, and the unit the GUI field is labelled with --
+                    # and held internally in m/s like every other speed.
+                    # The Java original read this field as m/s, which made the
+                    # shipped 100 mean 360 km/h: no limit at all, since the
+                    # fastest vehicle type manages 110 km/h.  Set 360 here to
+                    # reproduce that.
+                    Parameters.maximum_speed = precision2(float(value) * 1000 / 3600)
                 elif name == "AcrossPedestrianMode":
                     Parameters.across_pedestrian_mode = value.lower() == "on"
                 elif name == "AlongPedestrianMode":
@@ -571,6 +591,10 @@ def initialize() -> None:
                     Parameters.REPORT_ANIMATION_FRAMES = int(value)
                 elif name == "Network":
                     Parameters.NETWORK_DIR = value.strip()
+                elif name == "GeometryMode":
+                    Parameters.GEOMETRY_MODE = value.lower() == "on"
+                elif name == "Render3D":
+                    Parameters.RENDER_3D = value.lower() == "on"
                 elif name == "TimeOfDay":
                     try:
                         Parameters.TIME_OF_DAY = int(value)

@@ -1,0 +1,7 @@
+# Kakrail corridor -- real geometry (Google Maps centres + OSM bearings).
+# Kakrail Church is a ROUNDABOUT ("Kakrail Cir"): centre 23.737591,90.405234,
+# radius 16.3 m, one-way circulation. Approaches are largely one-way.
+# Kakrail Rd carries a median; Minto Road approach is 3 lanes.
+median 2 1.2   # Church -> Mosque (Kakrail Rd)
+median 3 1.2   # Minto Road
+roundabout 4 16.3   # Kakrail Church = "Kakrail Cir"

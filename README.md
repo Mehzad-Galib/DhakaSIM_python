@@ -34,6 +34,44 @@ In the GUI the option form lets you change the seed, end time, speed and road
 geometry before starting. Once running: drag to pan, mouse wheel or the
 right-hand slider to zoom, the bottom slider shows progress.
 
+**◀ New simulation** (top left) takes you back to the setup form at any time, so
+one session can run as many scenarios as you like without restarting the
+program. It asks for confirmation if the current run has not finished. Every
+setting goes back to what `parameter.txt` loaded, so the form opens on the same
+values each time rather than on the previous run's leftovers, and each run starts
+with an empty road. **Open report** next to it reopens the newest HTML report.
+
+### The 3D view
+
+Next to those is a button that swaps the plan view for a **3D perspective view**
+of the same run, in the manner of VISSIM's 3D mode: the road laid out in
+perspective with modelled vehicles driving on it, lit and casting shadows. Each
+of the 13 vehicle types has its own model — a bus with a window band and a roof
+rack, a truck with a cab and a cargo body, a CNG with its canopy, a rickshaw with
+its hood and its driver, a rider on the motorbikes and bicycles — and every one
+keeps the colour its type has in the 2D view and the report legend. Pedestrians,
+parked cars and the other roadside objects are modelled too.
+
+| | |
+| --- | --- |
+| orbit | drag |
+| pan | right-drag, or Shift+drag |
+| zoom | mouse wheel, or the right-hand slider |
+| reset the camera | double-click |
+| switch views | the toolbar button, or the `V` key |
+
+`Render3D On` in `parameter.txt` (or the **3D View** radio on the start screen)
+opens straight into it. The view can be switched at any point in a run, without
+disturbing it: it is only a matter of how each frame is drawn, so the results,
+the report and `trace.txt` are identical either way. A recorded run replayed
+with `TraceMode On` renders in 3D as well — the trace stores no vehicle types,
+so the model is inferred from each footprint, which recovers all 13 correctly.
+
+The renderer is `dhakasim/render3d.py`, drawing with plain `tkinter` polygons:
+no OpenGL, no GPU and, in keeping with the rest of the simulator, no third-party
+package. It costs roughly 3–4x a 2D frame at typical densities, so a busy
+network animates a little slower than in plan view.
+
 ## Layout
 
 ```
@@ -42,9 +80,13 @@ statistics/       HTML reports at the root; raw CSVs in statistics/csv/ (appende
 trace.txt         created by the GUI; one frame per simulation step
 dhakasim/         the simulator package
 run_dhakasim.py   launcher
-run_sim.py        route/demand generator (only needed if the network changes)
+run_sim.py        route/demand generator (only needed if the network geometry changes)
 tests/            regression tests for the numeric layer
 ```
+
+Inside `dhakasim/`, three modules render the same picture through the same
+drawing calls, so they cannot drift apart: `gui.py` draws the 2D window,
+`render3d.py` the 3D one, and `visualize.py` the report's SVG.
 
 ### Choosing an intersection
 
@@ -102,14 +144,51 @@ enormously across the day — the Kakrail corridor carries about 1,500 veh/h at
 | `vehicle_mix_by_hour.txt` | `hour typeIndex percentage` per line; the vehicle mix for each hour |
 
 `demand.txt` and `path.txt` must agree — every demand row needs at least one
-matching route. `run_sim.py` regenerates both from `link.txt` + `node.txt`.
+matching route. `run_sim.py` regenerates both from `link.txt` + `node.txt`,
+writing into the selected network's folder:
 
-### Output files
+```bash
+python run_sim.py --network demo_backup
+```
+
+The survey networks derive `demand.txt` from measured traffic counts, so it is
+input data the generator cannot recompute; those are refused unless you pass
+`--force`. Use `--paths-only` to regenerate the routes after a geometry edit and
+leave the counts alone:
+
+```bash
+python run_sim.py --paths-only
+```
+
+### Real geometry: medians and roundabouts
+
+`GeometryMode On` reads the selected network's `geometry.txt`, one directive per
+line (`#` starts a comment):
+
+```
+median 2 2.0        # a 2 m central reservation on link 2
+roundabout 6 28.8   # node 6 is a roundabout with a 28.8 m radius
+```
+
+A **median** consumes `ceil(width / StripWidth)` strips at the centre of the
+carriageway and pushes the per-direction limits outward, so it takes road space
+away from traffic rather than being a free dividing line. A **roundabout**
+replaces the junction's signal phases with give-way priority — circulating
+traffic keeps moving and an approach enters only when nothing is about to cross
+it — bends every turn path into a clockwise arc around the island, and sets the
+circulating speed to `1.7 × sqrt(radius)` m/s.
+
+`khamarbari` and `kakrail_corridor` ship roundabouts; `khamarbari` and
+`banani_27` ship medians. Left off, none of this runs and the simulator
+reproduces the Java reference exactly.
+
+## Output files
 
 Each run writes a self-contained HTML report to `statistics/`, named
-`report_<YYYYMMDD_HHMMSS>.html`, summarising the run with metric cards, a
-configuration table, a per-type results table, colour-coded bar charts, a
-vehicle-colour legend and a glossary. The raw numeric CSVs below are written
+`report_<YYYYMMDD_HHMMSS>.html`, summarising the run with two animations of the
+run -- the same captured frames in plan view and through the 3D camera -- metric
+cards, a configuration table, a per-type results table, colour-coded bar charts,
+a vehicle-colour legend and a glossary. The raw numeric CSVs below are written
 into `statistics/csv/` (paths in the table are relative to that folder), all
 **appended**, so repeated runs accumulate one row per run:
 
@@ -147,11 +226,12 @@ touch:
 | --- | --- |
 | `SimulationEndTime` | simulated seconds to run (1800 = 30 min) |
 | `GUIMode` | `On` opens the animation, `Off` runs headless |
+| `Render3D` | `On` opens the GUI in the 3D perspective view instead of the 2D plan view; drawing only, and switchable during a run |
 | `SimulationSpeed` | GUI frame delay in milliseconds |
 | `CF_model` | car-following model, 0–12 (see below) |
 | `DLC_model` | lane-changing model: 0 naive, 1 GHR, 2 Gipps, 3 MOBIL |
 | `StripWidth`, `FootpathStripWidth` | strip granularity in metres |
-| `MaximumSpeed` | network speed limit (see the unit caveat below) |
+| `MaximumSpeed` | network speed limit in **km/h** (shipped: 100) |
 | `DemandType` | 0 low, 1 medium, 2 high — used by `run_sim.py` |
 | `LowRate`, `MediumRate`, `HighRate` | vehicles/hour for each `DemandType` |
 | `ObjectMode` | `On` generates parked cars/rickshaws/CNGs and standing pedestrians |
@@ -160,9 +240,10 @@ touch:
 | `AcrossPedestrianPerHour`, `AlongPedestrianPerHour` | pedestrian arrival rates |
 | `SignalChangeDuration` | seconds between signal phase changes |
 | `NoOfRoutes` | how many routes get their own per-route CSV files |
-| `ReportAnimationFrames` | frames captured for the report's embedded SVG animation (`0` disables it) |
+| `ReportAnimationFrames` | frames captured for the report's two embedded SVG animations, 2D and 3D (`0` disables both). Each frame is stored in full, so this is the main control over report size |
 | `Network` | which `input/` sub-folder to simulate (e.g. `bijoy_sarani`); the GUI dropdown and `--network` override it |
 | `TimeOfDay` | hour of the surveyed day to simulate, `0`-`23`; `-1` uses the busiest hour. The GUI dropdown and `--hour` override it |
+| `GeometryMode` | `On` applies the network's `geometry.txt`: physical medians and roundabouts. `Off` (default) keeps byte-identical parity with the Java reference |
 | `TraceMode` | `On` replays a recorded `trace.txt` instead of simulating |
 | `DebugMode` | `On` writes per-vehicle traces into `debug/` |
 
@@ -186,9 +267,12 @@ otherwise.
   `DLC_model` before `CF_model`, the `CF_model` line wins — keep that order.
   `SlowVehicle`/`MediumVehicle`/`FastVehicle` are overwritten with 25/25/50 at
   the end of parsing regardless of what the file says.
-- **`MaximumSpeed` means different things in the two modes.** Headless reads it
-  as m/s; the GUI option form reads it as km/h and divides by 3.6. The shipped
-  `100.0` therefore caps speeds at 100 m/s headless and 27.8 m/s in the GUI.
+- **`MaximumSpeed` is in km/h**, the unit the GUI field is labelled with and
+  the unit a speed limit is actually quoted in. It is held internally in m/s.
+  The shipped `100.0` is a realistic 100 km/h network limit. *The Java original
+  read this field as m/s*, which made the same `100.0` mean 360 km/h — no limit
+  at all, since the fastest vehicle type manages 110 km/h. Set `MaximumSpeed 360`
+  to reproduce that reference behaviour.
 - **`Probability of Accident` is transformed twice in the GUI.** Startup turns
   `EncounterPerAccident 0.01` into 10000; the option form shows that 10000 and
   transforms it again, giving −9899. Nothing currently reads the result.
@@ -196,6 +280,10 @@ otherwise.
   pedestrian as a side effect of logging, so `agg_total_collision.csv` reports 0
   collisions and 0 accidents even while `Accident: SimStep: …` lines print to
   stdout. Count those lines if you need the total.
+- **Every demand row gets +30 veh/h added**, including the surveyed hourly
+  counts. On a 621 veh/h movement that is a 5% inflation; on a 60 veh/h one it is
+  50%. Account for it — or remove it in `Processor._read_demand` — before
+  calibrating against the survey data.
 - **`statistics/csv/` is appended, never truncated.** Delete that folder between
   experiments, or each CSV grows a row per run. (HTML reports at the
   `statistics/` root are per-run, time-stamped files and are not overwritten.)

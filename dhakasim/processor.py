@@ -21,6 +21,7 @@ from .roadside_object import Object
 from .segment import Segment
 from .signal import SIGNAL
 from .statistics import Statistics
+from .strip import Strip
 from .vehicle import Vehicle
 from . import utilities as Utilities
 
@@ -53,6 +54,22 @@ class Processor:
         self.start_along_ped = Parameters.along_pedestrian_mode
         self.mid_point = None
 
+        # These are class-level (Java `static`), and a fresh JVM always started
+        # them at zero.  Reset them here so a second Processor in the same
+        # process -- the GUI's "New simulation", or a batch loop -- begins from
+        # the same state the first one did, rather than inheriting its
+        # roadside-object population.
+        Processor.number_of_vehicles = 0
+        Processor.number_of_objects = 0
+        Processor.number_of_standing_pedestrians = 0
+        Processor.number_of_parked_cars = 0
+        Processor.number_of_parked_rickshaws = 0
+        Processor.number_of_parked_cngs = 0
+        # Strip caches Parameters.random at class-initialisation time; drop it
+        # so the strips of this run use this run's generator.
+        Strip._rand = None
+
+        self._read_geometry()   # must precede _read_network: strips depend on it
         self._read_network()
         self._read_path()
         self._read_demand()
@@ -158,8 +175,10 @@ class Processor:
                     from .visualize import RunRecorder
                     self._recorder = RunRecorder(
                         self, max_frames=Parameters.REPORT_ANIMATION_FRAMES)
-                except Exception:
-                    self._recorder = False  # disable on any failure
+                except Exception as exc:
+                    # Report it rather than silently dropping the animation.
+                    print(f"run animation disabled: {exc!r}")
+                    self._recorder = False
         if self._recorder:
             self._recorder.maybe_capture(Parameters.simulation_step)
 
@@ -1214,8 +1233,14 @@ class Processor:
 
                 if not node.intersection_strip_exists(old_link_index, old_strip_index,
                                                       new_link_index, new_strip_index):
-                    node.add_intersection_strip(self._create_intersection_strip(
-                        vehicle, old_link_index, new_link_index))
+                    new_strip = self._create_intersection_strip(
+                        vehicle, old_link_index, new_link_index)
+                    if node.is_roundabout():
+                        # deflect the crossing into an arc around the island
+                        cx, cy = node.get_centre()
+                        new_strip.set_arc(cx * Parameters.pixel_per_meter,
+                                          cy * Parameters.pixel_per_meter)
+                    node.add_intersection_strip(new_strip)
 
                 if node.is_bundle_active(old_link_index):
                     vehicle.set_intersection_strip_index(node.get_my_intersection_strip(
@@ -1230,6 +1255,15 @@ class Processor:
                         vehicle.set_in_intersection(False)
                         vehicle.set_speed(0)
                     else:
+                        # Deflection: a roundabout bends the path around the
+                        # island, so drivers slow to a circulating speed rather
+                        # than crossing at approach speed. Tighter islands
+                        # deflect more, hence the radius term.
+                        if node.is_roundabout():
+                            radius = node.get_roundabout_radius()
+                            circulating = Constants.ROUNDABOUT_SPEED_FACTOR * math.sqrt(
+                                max(radius, 1.0))
+                            vehicle.set_speed(jmin(vehicle.get_speed(), circulating))
                         # in the next step the vehicle will start moving in the
                         # intersection; so here we update statistics
                         vehicle.update_segment_leaving_data()
@@ -1336,7 +1370,10 @@ class Processor:
     def _control_signal(self) -> None:
         for node in self.intersection_list:
             # node.adaptive_signal_change(Parameters.simulation_step)
-            node.constant_signal_change(Parameters.simulation_step)
+            if node.is_roundabout():
+                node.roundabout_signal_change()   # give way to circulating traffic
+            else:
+                node.constant_signal_change(Parameters.simulation_step)
 
     def _get_next_signal(self, vehicle) -> SIGNAL:
         demand_index = vehicle.get_demand_index()
@@ -1392,6 +1429,48 @@ class Processor:
             pass
         return names
 
+    def _read_geometry(self) -> None:
+        """Load the network's real-world geometry description, if any.
+
+        ``geometry.txt`` holds one directive per line; blank lines and lines
+        starting with ``#`` are ignored. Currently understood::
+
+            median <linkId> <widthMetres>
+
+        The file is only consulted when ``GeometryMode On`` is set, so a default
+        run is unaffected and remains byte-identical to the Java reference.
+        """
+        Parameters.MEDIAN_WIDTHS = {}
+        if not Parameters.GEOMETRY_MODE:
+            return
+        path = self.input_path("geometry.txt")
+        if not os.path.exists(path):
+            return
+        medians = {}
+        roundabouts = {}
+        try:
+            with open(path, "r") as reader:
+                for line in reader:
+                    line = line.split("#", 1)[0].strip()
+                    if not line:
+                        continue
+                    tokens = line.split()
+                    if len(tokens) == 3 and tokens[0].lower() == "median":
+                        medians[int(tokens[1])] = float(tokens[2])
+                    elif len(tokens) >= 3 and tokens[0].lower() == "roundabout":
+                        roundabouts[int(tokens[1])] = float(tokens[2])
+        except (OSError, ValueError) as ex:
+            print(f"geometry.txt ignored: {ex}")
+            return
+        Parameters.MEDIAN_WIDTHS = medians
+        Parameters.ROUNDABOUTS = roundabouts
+        if medians:
+            print(f"Geometry: medians on {len(medians)} link(s) "
+                  f"({', '.join(f'{k}={v}m' for k, v in sorted(medians.items()))})")
+        if roundabouts:
+            print(f"Geometry: roundabout at node(s) "
+                  f"{', '.join(f'{k} (r={v}m)' for k, v in sorted(roundabouts.items()))}")
+
     def _read_network(self) -> None:
         try:
             with open(self.input_path("link.txt"), "r") as reader:
@@ -1437,8 +1516,14 @@ class Processor:
                         node.add_link(self._get_link_index(int(token)))
                     if node.number_of_links() > 1:
                         node.create_bundles()
+                        radius = Parameters.ROUNDABOUTS.get(node_id, 0.0)
+                        if radius > 0:
+                            node.set_roundabout(radius)
                         self.intersection_list.append(node)
                     self.node_list.append(node)
+
+            self._validate_network()
+            self._setup_roundabouts()
 
             left = DOUBLE_MAX_VALUE
             right = 0
@@ -1497,6 +1582,65 @@ class Processor:
         except OSError:
             pass
         Parameters.VEHICLE_MIX = mix
+
+    def _validate_network(self) -> None:
+        """Warn about node/link wiring that does not agree.
+
+        Every link a node claims must actually name that node as one of its
+        endpoints. Getting this wrong silently attaches an arm to the wrong
+        road, which is easy to miss because the simulation still runs -- it just
+        models a different network than intended.
+        """
+        for node in self.node_list:
+            for j in range(node.number_of_links()):
+                link_index = node.get_link(j)
+                if link_index < 0 or link_index >= len(self.link_list):
+                    print(f"WARNING: node {node.get_id()} refers to unknown "
+                          f"link index {link_index}")
+                    continue
+                link = self.link_list[link_index]
+                if node.get_id() not in (link.get_up_node(), link.get_down_node()):
+                    print(f"WARNING: node {node.get_id()} lists link "
+                          f"{link.get_id()}, but that link runs "
+                          f"{link.get_up_node()} -> {link.get_down_node()} and "
+                          f"does not touch node {node.get_id()}")
+
+    def _setup_roundabouts(self) -> None:
+        """Give every roundabout node its circulation order.
+
+        The order is the incident arms sorted by compass bearing, measured from
+        the junction outwards. Bearings increase clockwise, and clockwise is the
+        direction traffic circulates where driving is on the left.
+        """
+        for node in self.intersection_list:
+            if not node.is_roundabout():
+                continue
+            arms = []
+            for j in range(node.number_of_links()):
+                link_index = node.get_link(j)
+                link = self.link_list[link_index]
+                if link.get_up_node() == node.get_id():
+                    seg = link.get_first_segment()
+                    near = (seg.get_start_x(), seg.get_start_y())
+                    far = (seg.get_end_x(), seg.get_end_y())
+                else:
+                    seg = link.get_last_segment()
+                    near = (seg.get_end_x(), seg.get_end_y())
+                    far = (seg.get_start_x(), seg.get_start_y())
+                arms.append((link_index, near, far))
+            if not arms:
+                continue
+            cx = sum(a[1][0] for a in arms) / len(arms)
+            cy = sum(a[1][1] for a in arms) / len(arms)
+            node.set_centre(cx, cy)
+            ordered = []
+            for link_index, _near, far in arms:
+                # screen y grows downward, so -dy points north
+                bearing = math.degrees(math.atan2(far[0] - cx,
+                                                  -(far[1] - cy))) % 360
+                ordered.append((bearing, link_index))
+            ordered.sort()
+            node.set_circulation_order([li for _b, li in ordered])
 
     def _get_link_index(self, link_id: int) -> int:
         for link in self.link_list:

@@ -113,7 +113,8 @@ Car-following models & 13 selectable \\
 Lane-changing models & 4 selectable \\
 Dependencies & none --- standard library only, \code{tkinter} for the GUI \\
 Python & 3.10+ \\
-Code size & $\approx 8{,}200$ lines across 29 files \\
+Code size & $\approx 10{,}100$ lines across 31 files \\
+Bundled networks & 5 surveyed Dhaka junctions + the synthetic demo \\
 \bottomrule
 \end{tabularx}
 \caption{Key characteristics of the simulator.}
@@ -368,24 +369,42 @@ that the whole simulator is built on. See Section~\ref{sec:compat}.
 
 \begin{lstlisting}[caption=Repository layout]
 DhakaSIM_python/
-|-- input/                          scenario definition (read at startup)
-|   |-- parameter.txt               all runtime settings
-|   |-- link.txt                    links and their segments (geometry, width)
-|   |-- node.txt                    intersections and boundary nodes
-|   |-- path.txt                    routes (link sequences) per OD pair
-|   |-- demand.txt                  vehicles/hour per OD pair
-|   |-- demand_all.txt              unthinned demand from run_sim.py
-|   `-- demand-low/medium/high.txt  alternative demand levels
+|-- input/
+|   |-- parameter.txt               runtime settings (global, not per-network)
+|   |-- junctions.txt               surveyed junction centres (lat/lon)
+|   |-- demand-low/medium/high.txt  legacy alternative demand levels
+|   |-- kakrail_corridor/           -- one folder per network --
+|   |   |-- link.txt                links and their segments (geometry, width)
+|   |   |-- node.txt                intersections and boundary nodes
+|   |   |-- node_names.txt          human-readable name per node
+|   |   |-- path.txt                routes (link sequences) per OD pair
+|   |   |-- demand.txt              vehicles/hour per OD pair (peak hour)
+|   |   |-- demand_by_hour.txt      surveyed demand for all 24 hours
+|   |   |-- vehicle_mix.txt         surveyed vehicle composition
+|   |   |-- vehicle_mix_by_hour.txt surveyed composition, all 24 hours
+|   |   `-- geometry.txt            medians and roundabouts (GeometryMode)
+|   |-- khamarbari/ banani_23/ banani_27/ bijoy_sarani/
+|   `-- demo_backup/                the original synthetic demo network
 |-- dhakasim/                       the simulator package
 |-- run_dhakasim.py                 launcher
 |-- run_sim.py                      route + demand generator (Floyd-Warshall)
 |-- tests/test_javacompat.py        numeric regression tests
+|-- Traffic Flow Data/              survey workbooks the networks derive from
+|-- DhakaSIM Papers/                the published DhakaSim literature
 |-- README.md                       user-facing quick start
 `-- DhakaSIM_Python_Codebase_Analysis.{md,tex}   this document
 \end{lstlisting}
 
-Generated at run time (git-ignored): \code{statistics/}, \code{trace.txt},
-\code{debug/}.
+Generated at run time (git-ignored): \code{statistics/} (CSVs under
+\code{statistics/csv/}, HTML reports at
+\code{statistics/report\_<timestamp>.html}), \code{trace.txt}, \code{debug/}.
+
+The network is chosen by \code{Network} in \code{parameter.txt} or
+\code{--network} on the command line. \code{Processor.input\_path()} resolves
+each file inside the selected folder and falls back to \code{input/<filename>}
+when the network does not provide it; \code{parameter.txt} is deliberately
+\emph{not} resolved that way --- it is always read from
+\code{input/parameter.txt} so one settings file governs every network.
 
 %======================================================================
 \section{Module Reference}
@@ -396,11 +415,11 @@ Generated at run time (git-ignored): \code{statistics/}, \code{trace.txt},
 \toprule
 \textbf{Module} & \textbf{Lines} & \textbf{Purpose / Functionality} \\
 \midrule
-\code{node.py} & 277 & Intersections. Owns \code{IntersectionStripBundle}s (one per incoming link) carrying signal state, the list of \code{IntersectionStrip}s (turn paths through the junction), and the vehicles currently inside. Runs separating-axis collision detection between vehicles in the junction. A node with more than one link is a signalised junction. \\
+\code{node.py} & 365 & Intersections. Owns \code{IntersectionStripBundle}s (one per incoming link) carrying signal state, the list of \code{IntersectionStrip}s (turn paths through the junction), and the vehicles currently inside. Runs separating-axis collision detection between vehicles in the junction. A node with more than one link is a signalised junction; a node listed in \code{geometry.txt} becomes a \textbf{roundabout} and uses give-way priority instead of phases. \\
 \code{link.py} & 57 & Connects two nodes (\code{upNode}, \code{downNode}); an ordered list of \code{Segment}s. \\
-\code{segment.py} & 293 & A straight road stretch: start/end coordinates, width, the strip array, a mid-point sensor, and per-segment counters (throughput, average speed, waiting time, accidents). Computes the strip layout of Section~\ref{sec:strips}. \\
-\code{strip.py} & 528 & The spatial unit. Holds the vehicle, pedestrian and object lists occupying it, and answers every neighbour query: \code{probable\_leader}, \code{probable\_follower}, \code{probable\_object\_leader}, \code{has\_gap\_for\_adding\_vehicle}, \code{has\_gap\_for\_strip\_change} (where the lane-changing models live), \code{get\_gap\_for\_forward\_movement}, \code{has\_collision\_occurred}, \code{check\_for\_accident}. \\
-\code{intersection\_strip.py} & 35 & One turn path across a junction: entry strip $\rightarrow$ exit strip, with the two pixel-space endpoints defining its centre line. \\
+\code{segment.py} & 328 & A straight road stretch: start/end coordinates, width, the strip array, a mid-point sensor, and per-segment counters (throughput, average speed, waiting time, accidents). Computes the strip layout of Section~\ref{sec:strips}, and under \code{GeometryMode} consumes centre strips for a physical median. \\
+\code{strip.py} & 539 & The spatial unit. Holds the vehicle, pedestrian and object lists occupying it, and answers every neighbour query: \code{probable\_leader}, \code{probable\_follower}, \code{probable\_object\_leader}, \code{has\_gap\_for\_adding\_vehicle}, \code{has\_gap\_for\_strip\_change} (where the lane-changing models live), \code{get\_gap\_for\_forward\_movement}, \code{has\_collision\_occurred}, \code{check\_for\_accident}. \\
+\code{intersection\_strip.py} & 90 & One turn path across a junction: entry strip $\rightarrow$ exit strip, with the two pixel-space endpoints defining its centre line. Inside a roundabout the path is bent into a clockwise arc (\code{set\_arc}, \code{point\_at}, \code{is\_curved}) and \code{get\_length()} returns arc length, so going round the island genuinely costs more distance than cutting across it. \\
 \code{intersection\_strip\_bundle.py} & 58 & All turn paths that \emph{enter} the junction from one link, sharing a single signal state. Signal control operates on bundles, not individual turns. \\
 \code{link\_segment\_orientation.py} & 45 & Given a point and a link, decides whether the vehicle traverses the link forwards or backwards (\code{reverseLink}) and whether the segment is entered from its start or its end (\code{reverseSegment}). Everything directional keys off these two flags. \\
 \bottomrule
@@ -412,7 +431,7 @@ Generated at run time (git-ignored): \code{statistics/}, \code{trace.txt},
 \toprule
 \textbf{Module} & \textbf{Lines} & \textbf{Purpose / Functionality} \\
 \midrule
-\code{vehicle.py} & 2{,}309 & The main entity. Physical properties from type; longitudinal control (13 car-following models); lateral control (strip changing); junction traversal including deadlock escape; fuel consumption; collision/accident bookkeeping; drawing geometry. \\
+\code{vehicle.py} & 2{,}315 & The main entity. Physical properties from type; longitudinal control (13 car-following models); lateral control (strip changing); junction traversal including deadlock escape; fuel consumption; collision/accident bookkeeping; drawing geometry. \\
 \code{pedestrian.py} & 218 & A \textbf{road-crossing} pedestrian: moves laterally across the strips one at a time (\code{move\_forward}), and shuffles longitudinally (\code{move\_length\_wise}) when blocked. Removed on reaching the far side or when stuck longer than $\text{segmentWidth}/\text{speed}$. \\
 \code{roadside\_object.py} & 207 & A stationary side-friction element: standing pedestrian, parked car, parked rickshaw, parked CNG. Occupies a contiguous block of strips from the footpath inwards for a randomly drawn parking duration. \\
 \bottomrule
@@ -430,12 +449,14 @@ user.
 \toprule
 \textbf{Module} & \textbf{Lines} & \textbf{Purpose / Functionality} \\
 \midrule
-\code{processor.py} & 1{,}367 & The engine. Network/route/demand parsing, per-step orchestration, vehicle and pedestrian and object generation, signal control, junction entry/exit, flow measurement, final statistics output. \\
-\code{parameters.py} & 98 & Every runtime setting as class attributes (Java \code{static} fields), plus the three model enumerations. \\
-\code{constants.py} & 130 & Fixed physical constants, colours, and the empirical Gaussian-mixture blockage distributions for the four roadside object types, derived from Dhaka field survey data. \\
+\code{processor.py} & 1{,}699 & The engine. Network/route/demand parsing, per-step orchestration, vehicle and pedestrian and object generation, signal control, junction entry/exit, flow measurement, final statistics output. \\
+\code{parameters.py} & 120 & Every runtime setting as class attributes (Java \code{static} fields), plus the three model enumerations. \\
+\code{constants.py} & 160 & Fixed physical constants, colours, and the empirical Gaussian-mixture blockage distributions for the four roadside object types, derived from Dhaka field survey data. \\
 \code{statistics.py} & 60 & Global accumulators, reset per run. \\
 \code{vehicle\_stats.py} & 37 & Per-vehicle speed and trajectory time series (written out only when \code{Processor.write\_speed()} is enabled). \\
-\code{dhaka\_sim.py} & 37 & Entry point: initialise, then branch on GUI mode. \\
+\code{report.py} & 390 & Builds a self-contained HTML report after every run: per-type table, inline SVG bar charts, plain-language explanation of each metric, and the embedded animation from \code{visualize.py}. No third-party dependencies. \\
+\code{visualize.py} & 355 & Captures \code{ReportAnimationFrames} frames during the run and emits an inline animated SVG (a pure-CSS flip-book) plus a static snapshot for the report, reusing the simulator's own drawing geometry through an SVG-emitting graphics backend. \\
+\code{dhaka\_sim.py} & 50 & Entry point: initialise, apply \code{--network} / \code{--hour} / \code{--gui} / \code{--headless}, then branch on GUI mode. \\
 \bottomrule
 \end{tabularx}
 
@@ -445,7 +466,7 @@ user.
 \toprule
 \textbf{Module} & \textbf{Lines} & \textbf{Purpose / Functionality} \\
 \midrule
-\code{utilities.py} & 658 & Parameter file parsing; 2-D geometry helpers (\code{return\_x3} \dots \code{return\_y6} compute the perpendicular offsets used for road and vehicle corners); the error function and Gaussian CDF; per-type vehicle dimensions and performance; blockage sampling from the Gaussian mixtures; the strip-weight function used by the strip-based car-following model. \\
+\code{utilities.py} & 669 & Parameter file parsing; 2-D geometry helpers (\code{return\_x3} \dots \code{return\_y6} compute the perpendicular offsets used for road and vehicle corners); the error function and Gaussian CDF; per-type vehicle dimensions and performance; blockage sampling from the Gaussian mixtures; the strip-weight function used by the strip-based car-following model. \\
 \code{javacompat.py} & 640 & Exact numeric semantics and the seeded RNG. See Section~\ref{sec:compat}. \\
 \code{demand.py} & 40 & An OD pair with its flow rate and the routes serving it. \\
 \code{path.py} & 33 & A route: source node, destination node, ordered link ids. \\
@@ -459,11 +480,77 @@ user.
 \toprule
 \textbf{Module} & \textbf{Lines} & \textbf{Purpose / Functionality} \\
 \midrule
-\code{gui.py} & 549 & \code{DhakaSimFrame} (window), \code{OptionPanel} (parameter form), \code{DhakaSimPanel} (animated canvas), and \code{CanvasGraphics} --- an adapter applying the pan/zoom transform and drawing onto a \code{tkinter.Canvas}. Also writes and replays \code{trace.txt}. \\
-\code{run\_sim.py} & 281 & Floyd--Warshall route generator: builds node adjacency from \code{link.txt}/\code{node.txt}, computes shortest paths between all boundary node pairs, writes \code{path.txt} + \code{demand.txt}. \\
+\code{gui.py} & 908 & \code{DhakaSimFrame} (window), \code{OptionPanel} (parameter form), \code{DhakaSimPanel} (animated canvas), and \code{CanvasGraphics} --- an adapter applying the pan/zoom transform and drawing onto a \code{tkinter.Canvas}. Also writes and replays \code{trace.txt}. \\
+\code{road\_geometry.py} & 217 & \textbf{The single road painter.} Builds the segment quads, junction hull patches and roundabout island discs, and paints road surface, kerb outlines, junction patches and islands onto any graphics surface. Called by both \code{gui.py} and \code{visualize.py}, so the live animation and the report's animation are the same picture (Section~\ref{sec:onepicture}). \\
+\code{run\_sim.py} & 371 & Floyd--Warshall route generator: builds node adjacency from \code{link.txt}/\code{node.txt}, computes shortest paths between all boundary node pairs, writes \code{path.txt} + \code{demand.txt}. \\
 \code{tests/test\_javacompat.py} & 131 & Pins the numeric layer to reference values. \\
 \bottomrule
 \end{tabularx}
+
+\subsection{Running more than once per session}
+\label{sec:rerun}
+
+\code{DhakaSimFrame} can go back to the setup form and start another run, which
+is what the \textbf{New simulation} button in the simulation toolbar does. That
+only works if a second \code{Processor} really is a fresh start, and several
+pieces of state are process-wide:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{State} & \textbf{How it is reset} \\
+\midrule
+Every \code{Parameters} field & \code{DhakaSimFrame} snapshots the configuration once, straight after \code{Utilities.initialize()}, and \code{show\_options()} restores it. Needed because a run mutates it: the form converts \code{MaximumSpeed} from km/h, \code{EncounterPerAccident} is transformed again, \code{along\_pedestrian\_mode} is left wherever the 20-step toggle stopped, and \code{GeometryMode} fills in the median and roundabout tables \\
+\code{Parameters.simulation\_step} & set back to 1 by \code{show\_options()} \\
+\code{Processor}'s roadside-object counters & zeroed in \code{Processor.\_\_init\_\_}; they are class-level (Java \code{static}), and a fresh JVM always started them at zero \\
+\code{Strip.\_rand} & cleared in \code{Processor.\_\_init\_\_} so the strips capture the new run's generator \\
+\code{Statistics} & already reset per run by \code{Statistics.reset()} \\
+The timer and \code{trace.txt} & released by \code{DhakaSimPanel.dispose()} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+With every unseeded source switched off, running the same seeded scenario twice
+in one process gives byte-identical results. With side friction on the runs
+differ, as they should --- pedestrian arrivals and roadside objects are sampled
+from clock-seeded generators (Section~\ref{sec:quirks}) --- but the object
+population still starts from zero each time.
+
+\subsection{One picture, two renderers}
+\label{sec:onepicture}
+
+The GUI is what you watch while a run is in progress; the report's embedded
+animation is what everybody else sees afterwards. Those have to be the same
+picture, so neither the shapes nor the colours are duplicated:
+
+\begin{itemize}
+    \item \textbf{Geometry} lives only in \code{road\_geometry.py}.
+          \code{build()} returns the segment quads, junction hulls and island
+          discs; \code{paint()} draws them in the order that makes an
+          intersection read as one smooth area (surfaces $\rightarrow$ kerbs
+          $\rightarrow$ junction patches on top $\rightarrow$ islands last).
+          \code{gui.py} and \code{visualize.py} both call it.
+    \item \textbf{Colours} come only from \code{Constants}
+          (\code{road\_fill\_color}, \code{island\_fill\_color},
+          \code{road\_border\_color}, \code{background\_color}).
+    \item \textbf{Scale} is handled by the graphics surface, not by the
+          geometry. Everything is built in \emph{simulation pixel space} ---
+          metres $\times$ \code{PixelPerMeter}, the space
+          \code{IntersectionStrip} endpoints and vehicle bodies already live in
+          --- and each backend applies one uniform transform on the way out: an
+          \code{AffineTransform} in the GUI, a scale-and-translate in the SVG
+          writer. Building at one scale and scaling once is what makes the two
+          outputs congruent rather than merely similar.
+    \item \textbf{Vehicles} are drawn by \code{Vehicle.draw\_vehicle()} in both,
+          with the real \code{Parameters.pixel\_per\_strip} /
+          \code{pixel\_per\_meter} / \code{pixel\_per\_footpath\_strip}. That
+          matters for vehicles inside a junction, whose position comes from the
+          \code{IntersectionStrip} arc built at the simulation scale.
+\end{itemize}
+
+Only the report's own chrome --- node name labels with leader lines, the north
+arrow, the scale bar --- is drawn in output pixels with its own palette, because
+the simulation has no equivalent of it.
 
 %======================================================================
 \section{The Simulation Loop, Step by Step}
@@ -978,6 +1065,176 @@ $\text{TOTAL\_NETWORK\_ROAD\_LENGTH} = 3.83$\,km.
 \end{itemize}
 
 %======================================================================
+\section{Networks, Time of Day \& Survey Data}
+\label{sec:networks}
+
+\subsection{Selecting a network}
+
+\code{Network} in \code{parameter.txt} (or \code{--network <name>} on the command
+line) names a folder under \code{input/}. Five networks are built from real
+intersection surveys in the \code{Traffic Flow Data/} workbooks, and
+\code{demo\_backup/} holds the original synthetic network the port was validated
+against.
+
+\begin{table}[h!]
+\centering
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Network} & \textbf{Junction} & \textbf{Notes} \\
+\midrule
+\code{kakrail\_corridor} & Kakrail Church + Mosque & two-junction corridor; the Church is a roundabout, $r = 16.3$\,m \\
+\code{khamarbari} & Khamar Bari Goal Chottor & roundabout, $r = 28.8$\,m; two dual carriageways with medians \\
+\code{banani\_23} & Banani 23 / Super Market & \\
+\code{banani\_27} & Banani 27 / Kacha Bazar & Kamal Ataturk Ave dual carriageway \\
+\code{bijoy\_sarani} & Bijoy Sarani & \\
+\code{demo\_backup} & synthetic & 23 links, 110 routes; the Java-parity reference \\
+\bottomrule
+\end{tabularx}
+\caption{The bundled networks.}
+\end{table}
+
+\code{input/junctions.txt} records the surveyed junction centres in WGS84 as
+provenance for the coordinates, and supersedes the GPS fields inside the
+workbooks (which were wrong for Banani 23 and Bijoy Sarani).
+
+\subsection{Node names}
+
+\code{node\_names.txt} maps each node id to a street name (\code{0 Indira Road}).
+Purely cosmetic --- it makes the HTML report and the GUI readable instead of
+numeric.
+
+\subsection{Time of day}
+
+Survey networks carry demand and vehicle composition for all 24 hours:
+
+\begin{itemize}
+    \item \code{demand\_by\_hour.txt} ---
+          \code{hour source destination vehiclesPerHour} per line;
+    \item \code{vehicle\_mix\_by\_hour.txt} ---
+          \code{hour vehicleType percentage} per line.
+\end{itemize}
+
+\code{TimeOfDay} in \code{parameter.txt}, or \code{--hour <0-23>}, selects the
+hour. The default $-1$ means \emph{peak hour}, which falls back to the flat
+\code{demand.txt} and \code{vehicle\_mix.txt}. This is what makes a diurnal study
+possible:
+
+\begin{lstlisting}[language=bash]
+python run_dhakasim.py --headless --network khamarbari --hour 8    # morning peak
+python run_dhakasim.py --headless --network khamarbari --hour 14   # midday
+\end{lstlisting}
+
+\subsection{Surveyed vehicle composition}
+
+\code{vehicle\_mix.txt} is \code{vehicleType percentage} per line, e.g.\ for
+Khamarbari:
+
+\begin{lstlisting}
+0 2.231     bicycle
+1 8.572     rickshaw
+2 0.761     van / cart
+3 29.266    motorbike
+4 33.780    car
+7 20.994    CNG
+8 2.491     bus
+10 1.906    truck
+\end{lstlisting}
+
+When present it replaces the built-in 25/25/50 distribution of
+Section~\ref{sec:mix} entirely: \code{Parameters.VEHICLE\_MIX} holds cumulative
+thresholds per 10{,}000 and a single draw picks the type. An empty mix falls back
+to the built-in behaviour, which is what keeps the demo network byte-identical to
+the Java reference.
+
+%======================================================================
+\section{GeometryMode: Medians \& Roundabouts}
+\label{sec:geometry}
+
+\code{GeometryMode Off} (the default) keeps the simulator byte-identical to the
+Java reference. Turning it on reads the selected network's \code{geometry.txt}
+and applies real-world geometry the original model could not express.
+
+\code{geometry.txt} takes one directive per line; \code{\#} starts a comment:
+
+\begin{lstlisting}[caption=Sample geometry.txt (Khamarbari)]
+# Khamarbari / Bangabandhu Square -- real geometry from OpenStreetMap.
+median 2 2.0        # Manik Mia Avenue  (7 + 4 lanes)
+median 5 2.0        # Sangsad Avenue / Begum Rokeya Sharani (3 + 3 lanes)
+roundabout 6 28.8   # Khamar Bari Goal Chottor
+\end{lstlisting}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Directive} & \textbf{Arguments} & \textbf{Effect} \\
+\midrule
+\code{median} & \code{linkId widthMetres} & a physical central reservation on that link \\
+\code{roundabout} & \code{nodeId radiusMetres} & that junction circulates instead of signalling \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Medians}
+
+\code{Segment.\_apply\_median()} converts a median of width $w$ into
+$\lceil w / \text{StripWidth} \rceil$ strips centred on the carriageway centre
+line, marks them unusable through the same \code{Strip.is\_fp()} test that
+already excludes footpath strips, and moves \code{middleLowStripIndex} /
+\code{middleHighStripIndex} outward. The median therefore \emph{takes road space
+away} from traffic rather than being a free dividing line. If the median would
+swallow the carriageway it is ignored.
+
+\subsection{Roundabouts}
+
+\begin{itemize}
+    \item \textbf{Geometry.} Each turn path through the node is bent into a
+          clockwise arc about the island centre
+          (\code{IntersectionStrip.set\_arc}). Bangladesh circulates clockwise,
+          so the sweep is the positive angular difference; screen $y$ grows
+          downward, which makes increasing angle clockwise.
+          \code{get\_length()} returns $r \times \text{sweep}$, and
+          \code{Vehicle.draw\_vehicle} places the body along the arc via
+          \code{point\_at()} instead of along the chord.
+    \item \textbf{Speed.} Circulating speed is
+          $\text{ROUNDABOUT\_SPEED\_FACTOR} \times \sqrt{r}$\,m/s with the factor
+          at 1.7 --- the usual side-friction form for a curve, putting a 16\,m
+          island at $\approx$24\,km/h and a 29\,m one at $\approx$33\,km/h.
+    \item \textbf{Priority.} \code{Node.roundabout\_signal\_change()} replaces
+          phases with the give-way rule: traffic already circulating keeps
+          moving, and an approach may enter only when no circulating vehicle is
+          about to cross it. Approaches are judged independently, so
+          non-conflicting entries proceed simultaneously --- which is exactly
+          where a roundabout's capacity advantage over a signal comes from. If
+          the circulation order is unknown it blocks every approach, the
+          capacity-conservative reading.
+    \item \textbf{Drawing.} The central island is filled with
+          \code{Constants.island\_fill\_color}, a muted green, so it reads as
+          planted ground.
+\end{itemize}
+
+Effect on the shipped networks, 90-second runs:
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{l r r r}
+\toprule
+\textbf{Network} & \textbf{Off (km/h)} & \textbf{On (km/h)} & \textbf{Change} \\
+\midrule
+\code{kakrail\_corridor} & 26.20 & 26.26 & $+0.2$\,\% \\
+\code{khamarbari}        & 23.43 & 26.77 & $+14.3$\,\% \\
+\code{banani\_23}        & 16.74 & 16.98 & $+1.4$\,\% \\
+\code{banani\_27}        & 18.83 & 22.14 & $+17.6$\,\% \\
+\code{bijoy\_sarani}     & 32.80 & 28.69 & $-12.5$\,\% \\
+\bottomrule
+\end{tabular}
+\caption{Mean speed with GeometryMode off and on.}
+\end{table}
+
+The two largest movements are the networks whose \code{geometry.txt} actually
+carries a roundabout or a dual carriageway; the others shift only through
+second-order effects.
+
+%======================================================================
 \section{Intersections \& Signals}
 \label{sec:signals}
 
@@ -1000,6 +1257,8 @@ Turn paths entering the junction from the same link share an
 bundle is green at a time; \code{constant\_signal\_change()} advances to the next
 bundle once
 $\text{simulationTime} - \text{timePassed} \geq \text{SignalChangeDuration}$.
+Roundabout nodes bypass this entirely and use give-way priority instead ---
+see Section~\ref{sec:geometry}.
 
 \begin{quote}
 With the shipped \code{SignalChangeDuration 1}, the green phase advances
@@ -1040,8 +1299,11 @@ call is a one-line change.
 \section{The Input File System --- Scenario Specification}
 \label{sec:input}
 
-Every scenario is defined purely by plain-text files in \code{input/}. No code
-changes are required to model a new location.
+Every scenario is defined purely by plain-text files. \code{parameter.txt} lives
+at the top of \code{input/}; everything describing a network lives in
+\code{input/<network>/}, selected by \code{Network} or \code{--network}
+(Section~\ref{sec:networks}). No code changes are required to model a new
+location.
 
 \subsection{\code{node.txt} --- intersections and boundaries}
 
@@ -1117,6 +1379,30 @@ silently unusable.
 One \code{Name Value} pair per line; unknown names are ignored, so you can leave
 comments. See Section~\ref{sec:params}.
 
+\subsection{The rest of a network folder}
+
+Beyond the four files above, a network folder may carry:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l c X}
+\toprule
+\textbf{File} & \textbf{Req.} & \textbf{Contents} \\
+\midrule
+\code{node\_names.txt} & no & \code{nodeId name} --- street names for reports and the GUI \\
+\code{demand\_by\_hour.txt} & no & \code{hour src dst vehiclesPerHour} --- surveyed 24-hour demand \\
+\code{vehicle\_mix.txt} & no & \code{vehicleType percentage} --- surveyed composition \\
+\code{vehicle\_mix\_by\_hour.txt} & no & \code{hour vehicleType percentage} \\
+\code{geometry.txt} & no & \code{median}/\code{roundabout} directives, read only under \code{GeometryMode On} \\
+\code{demand\_all.txt} & no & the unthinned demand \code{run\_sim.py} produced \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+All are described in Sections~\ref{sec:networks} and~\ref{sec:geometry}. A
+network needs only \code{node.txt}, \code{link.txt}, \code{path.txt} and
+\code{demand.txt} to run --- \code{Processor.available\_networks()} lists every
+\code{input/} subfolder containing a \code{node.txt}.
+
 \subsection{Regenerating routes and demand}
 
 \code{run\_sim.py} builds the node adjacency matrix from the link/node files,
@@ -1186,7 +1472,7 @@ Defaults are the shipped values.
 \code{ConsiderMinimum} & On & MY\_MODEL: minimum over leaders instead of weighted average \\
 \code{DensityPercentage} & 50 & MY\_MODEL: density threshold for widening attention \\
 \code{PedestrianWeight} & 2 & MY\_MODEL: how strongly pedestrians restrain vehicles \\
-\code{MaximumSpeed} & 100.0 & network speed limit --- \textbf{m/s headless, km/h in the GUI} \\
+\code{MaximumSpeed} & 100.0 & network speed limit in \textbf{km/h}; held internally in m/s, and the GUI field round-trips it exactly \\
 \code{ALPHA} / \code{BETA} / \code{ETA} & 0.92 / 0.1 / 0 & KFTM calibration constants \\
 \code{TTC\_Threshold} & 0.6 & time-to-collision threshold for near-crash counting \\
 \code{PenaltyWait} & On & collided vehicles wait out a penalty before removal \\
@@ -1223,6 +1509,18 @@ Defaults are the shipped values.
 \bottomrule
 \end{tabularx}
 
+\subsection{Network \& reporting}
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Name} & \textbf{Default} & \textbf{Meaning} \\
+\midrule
+\code{Network} & \code{kakrail\_corridor} & folder under \code{input/} holding the network; \code{--network} overrides \\
+\code{TimeOfDay} & $-1$ & hour of the survey day to simulate, 0--23; $-1$ = peak hour. \code{--hour} overrides \\
+\code{GeometryMode} & Off & apply \code{geometry.txt}: medians and roundabouts (Section~\ref{sec:geometry}). Off keeps Java parity \\
+\code{ReportAnimationFrames} & 24 & frames captured for the animated SVG in the HTML report \\
+\bottomrule
+\end{tabularx}
+
 \subsection{Signals \& measurement}
 \begin{tabularx}{\textwidth}{l l X}
 \toprule
@@ -1246,19 +1544,19 @@ Defaults are the shipped values.
 Six lines are printed at the end of the run:
 
 \begin{lstlisting}
-speed: 7.5465...
-waiting time: 4.7762...
-motorized speed: 9.2665...
-motorized waiting time: 4.6145...
-non-motorized speed: 2.1864...
-non-motorized waiting time: 5.2801...
+speed: 26.200045524864382 km/h
+waiting time: 0.4381625441696113 s (avg per vehicle)
+motorized speed: 27.9931... km/h
+motorized waiting time: 0.5272727272727272 s
+non-motorized speed: 11.4218... km/h
+non-motorized waiting time: 0.12698412698412698 s
 \end{lstlisting}
 
 \begin{tabularx}{\textwidth}{l X l}
 \toprule
 \textbf{Metric} & \textbf{Definition} & \textbf{Unit} \\
 \midrule
-\code{speed} & mean over vehicles of (distance travelled $\div$ time alive) & \textbf{m/s} \\
+\code{speed} & mean over vehicles of (distance travelled $\div$ time alive) & \textbf{km/h} \\
 \code{waiting time} & mean over vehicles of the number of steps with zero speed & \textbf{seconds} \\
 \code{motorized \dots} & the same, restricted to types 3--11 & \\
 \code{non-motorized \dots} & the same, restricted to types 0--2 & \\
@@ -1266,17 +1564,21 @@ non-motorized waiting time: 5.2801...
 \end{tabularx}
 
 \medskip
-Type 12 (pedestrians) is excluded from all six. Note the unit mismatch with the
-CSVs: \textbf{stdout speeds are m/s, \code{avg\_speed\_vehicle.csv} is km/h.}
+Type 12 (pedestrians) is excluded from all six. The units are printed explicitly,
+and the speeds agree with \code{avg\_speed\_vehicle.csv} (both km/h).
+
+When a network selects an hour, a \code{Time of day: 08:00-09:00 (4715 veh/h)}
+line precedes the metrics; \code{GeometryMode On} similarly announces the
+roundabouts it found.
 
 \code{Accident: SimStep: \dots Vehicle \dots Pedestrian \dots} lines are also
 printed as they happen --- counting these lines is currently the only way to get
 the accident total (quirk~\ref{quirk:accidents}).
 
-\subsection{\code{statistics/*.csv}}
+\subsection{\code{statistics/csv/*.csv}}
 
-All files are \textbf{appended}, one row per run, so a directory accumulates an
-experiment. Every per-type file has 13 comma-separated columns in vehicle-type
+The CSVs live in \code{statistics/csv/}. All files are \textbf{appended}, one row
+per run, so a directory accumulates an experiment. Every per-type file has 13 comma-separated columns in vehicle-type
 order with a trailing comma. Empty cells print as \code{NaN}.
 
 \begin{tabularx}{\textwidth}{l X}
@@ -1316,6 +1618,17 @@ the sensor is never reached. To use it, edit \code{link\_id},
 \code{\_update\_flow()} to a location that exists. The per-segment sensor used by
 the average-speed statistics is unrelated and sits at each segment's mid-point.
 \end{quote}
+
+\subsection{\code{statistics/report\_<timestamp>.html}}
+
+Every run also writes a self-contained HTML report (\code{report.py}), named with
+the run's local timestamp so runs do not overwrite each other. It contains the
+per-type table, inline SVG bar charts, a plain-language explanation of every
+metric, and an embedded animated SVG of the run itself (\code{visualize.py},
+\code{ReportAnimationFrames} frames). It has no external dependencies --- it
+opens in any browser with no server and no network access, and can be attached to
+a report as-is. The GUI offers to open the newest one when a run finishes;
+\code{report.LAST\_REPORT\_PATH} holds the path.
 
 \subsection{The fuel model}
 
@@ -1416,11 +1729,23 @@ before interpreting any output.}
     are unconditionally overwritten with 25/25/50 at the end of parsing, so the
     file values have no effect on the vehicle mix.
 
-    \item \textbf{\code{MaximumSpeed} changes units between modes.} Headless
-    reads it as m/s; the GUI option form reads it as km/h and divides by 3.6. The
-    shipped \code{100.0} therefore caps speeds at 100\,m/s headless but
-    27.78\,m/s in the GUI --- the same scenario yields different results in the
-    two modes.
+    \item \textbf{\code{MaximumSpeed} is in km/h.} It is written in km/h ---
+    the unit the GUI field is labelled with, and the unit a speed limit is
+    actually quoted in --- and held internally in m/s. The option form is
+    populated from it and \code{start\_simulation} converts back, so the round
+    trip is an identity and both modes apply the same limit. The shipped
+    \code{100.0} is a realistic 100\,km/h network limit.
+    \emph{Two things used to be wrong here.} The Java original read the field as
+    \textbf{m/s}, so the same \code{100.0} meant 360\,km/h --- no limit at all,
+    since the fastest vehicle type manages 110\,km/h. And the GUI ignored the
+    file entirely, hardcoding \code{60}\,km/h, so the two modes silently
+    disagreed. Both are fixed; set \code{MaximumSpeed 360} for the old no-limit
+    reference behaviour. The limit is not merely a ceiling on achieved speed:
+    \code{currentMaxSpeed} feeds the Gipps free-flow term $(1 - v/V)$, so it
+    shapes acceleration throughout. On a 120-step seeded run, moving from no
+    limit to 100\,km/h changed mean speed from 25.97 to 29.88\,km/h.
+    \textbf{Runs recorded before this change are not comparable with runs after
+    it.}
 
     \item \label{quirk:accprob} \textbf{\code{Probability of Accident} is
     transformed twice in the GUI.} Startup turns
@@ -1448,6 +1773,14 @@ before interpreting any output.}
     \code{waiting time} and \code{waiting\_percentage\_vehicle.csv} are biased
     upwards by the vehicles in flight at the end --- a smaller effect the longer
     the run.
+
+    \item \textbf{The $+30$\,veh/h demand offset also applies to measured
+    survey demand.} \code{\_read\_demand()} adds 30\,veh/h to every OD row,
+    whether it came from the synthetic \code{demand.txt} or from a surveyed
+    \code{demand\_by\_hour.txt} (Section~\ref{sec:demand}). On a large movement
+    of 621\,veh/h that is a 5\,\% inflation; on a small one of 60\,veh/h it is
+    50\,\%. If you are calibrating against the survey counts, this offset is the
+    first thing to account for --- or to remove.
 
     \item \textbf{\code{Segment.get\_accident\_count()} mutates.} The Java
     original is \code{return accidentCount++}, so reading the counter increments
@@ -1479,10 +1812,10 @@ No code changes are required.
     intersection positions and road widths in metres. Pick any convenient local
     origin; coordinates are plain metres, not lat/lon.
 
-    \item \textbf{Step 2 --- Write \code{input/node.txt}.} Number nodes from 0.
-    Give each boundary node its real \code{x y} and the single link id attached
-    to it. Give each interior junction \code{0 0} and the list of link ids
-    meeting there.
+    \item \textbf{Step 2 --- Create the network folder and write
+    \code{input/<name>/node.txt}.} Number nodes from 0. Give each boundary node
+    its real \code{x y} and the single link id attached to it. Give each interior
+    junction \code{0 0} and the list of link ids meeting there.
 \begin{lstlisting}
 5
 0 0 0 0 1 2 3        <- interior junction, four approaches
@@ -1492,8 +1825,9 @@ No code changes are required.
 4 0 -500 3
 \end{lstlisting}
 
-    \item \textbf{Step 3 --- Write \code{input/link.txt}.} One header per link,
-    then one line per straight segment. Split curves into several segments.
+    \item \textbf{Step 3 --- Write \code{input/<name>/link.txt}.} One header per
+    link, then one line per straight segment. Split curves into several
+    segments.
 \begin{lstlisting}
 4
 0 0 1 1
@@ -1511,24 +1845,31 @@ No code changes are required.
 
     \item \textbf{Step 4 --- Generate routes and demand.}
 \begin{lstlisting}[language=bash]
-python run_sim.py
+python run_sim.py --network <name>
 \end{lstlisting}
-    This writes \code{input/path.txt} and \code{input/demand.txt} (and keeps the
-    unthinned demand as \code{input/demand\_all.txt}). Set \code{DemandType},
-    \code{LowRate}, \code{MediumRate} and \code{HighRate} in
-    \code{parameter.txt} \emph{before} running it --- they control the output.
+    This writes \code{input/<name>/path.txt} and \code{input/<name>/demand.txt}
+    (keeping the unthinned demand as \code{input/<name>/demand\_all.txt}). Set
+    \code{DemandType}, \code{LowRate}, \code{MediumRate} and \code{HighRate} in
+    \code{input/parameter.txt} \emph{before} running it --- they control the
+    output. If the folder already holds surveyed counts
+    (\code{demand\_by\_hour.txt}), \code{run\_sim.py} refuses to overwrite
+    \code{demand.txt}; use \code{--paths-only} to regenerate just the routes, or
+    \code{--force} to override.
 
     \item \textbf{Step 5 --- Configure the run.} In \code{input/parameter.txt}
-    set \code{SimulationEndTime}, the model choices, the side-friction switches,
-    and either \code{CenteredView On} or a manual
-    \code{DefaultTranslateX/Y}.
+    set \code{Network <name>}, \code{SimulationEndTime}, the model choices, the
+    side-friction switches, and either \code{CenteredView On} or a manual
+    \code{DefaultTranslateX/Y}. Add a \code{geometry.txt} and set
+    \code{GeometryMode On} if the location has medians or a roundabout.
 
     \item \textbf{Step 6 --- Run.}
 \begin{lstlisting}[language=bash]
-python run_dhakasim.py --gui
+python run_dhakasim.py --gui --network <name>
 \end{lstlisting}
     Watch it once in the GUI to confirm the geometry looks right and vehicles
-    route sensibly, then switch to \code{--headless} for the measured runs.
+    route sensibly, then switch to \code{--headless} for the measured runs. The
+    HTML report in \code{statistics/} is the quickest way to sanity-check the
+    result.
 \end{enumerate}
 
 \subsection*{Common pitfalls}
@@ -1548,15 +1889,17 @@ python run_dhakasim.py --gui
 
 \subsection{Full closure}
 
-Remove the link from \code{input/link.txt}, remove its id from the affected nodes
-in \code{input/node.txt}, and re-run \code{run\_sim.py}. Floyd--Warshall
-re-routes the traffic around the closure automatically.
+Remove the link from the network's \code{link.txt}, remove its id from the
+affected nodes in its \code{node.txt}, and re-run
+\code{run\_sim.py --network <name>}. Floyd--Warshall re-routes the traffic around
+the closure automatically. On a survey network add \code{--paths-only} so the
+measured demand survives.
 
 \subsection{Road narrowing (construction, flyover works)}
 
-Reduce the \code{width} field of the affected segment(s) in
-\code{input/link.txt}. Strip count --- and therefore capacity --- follows
-directly. No route regeneration needed.
+Reduce the \code{width} field of the affected segment(s) in the network's
+\code{link.txt}. Strip count --- and therefore capacity --- follows directly. No
+route regeneration needed.
 
 \begin{lstlisting}
 2 10 18 2
@@ -1734,6 +2077,13 @@ Vehicle / object / pedestrian draw geometry (\code{trace.txt}) & identical \\
 \end{tabularx}
 \end{center}
 
+Parity is defined with \code{GeometryMode Off}, no \code{vehicle\_mix.txt} and
+\code{MaximumSpeed 360} (the Java reading of the shipped value, i.e.\ no
+effective speed limit), i.e.\ the \code{demo\_backup} network as the Java build
+ran it: medians, roundabouts, surveyed vehicle
+mixes and hourly demand are extensions with no Java counterpart, and are
+deliberately gated so a default run still reproduces the reference exactly.
+
 The side-friction paths use unseeded generators in the original, so they were
 compared by seeding both sides identically in a scratch build. Unseeded, repeated
 runs of the two implementations agree within statistical noise (all metrics
@@ -1766,6 +2116,7 @@ within 1.3 standard errors over 8 runs each).
 \code{NormalDistribution.java} & \code{dhakasim/normal\_distribution.py} \\
 \code{Point2D.java}, \code{SIGNAL.java} & \code{dhakasim/point2d.py}, \code{signal.py} \\
 \code{DhakaSimFrame/Panel.java}, \code{OptionPanel.java} & \code{dhakasim/gui.py} \\
+--- & \code{dhakasim/report.py}, \code{visualize.py} (HTML report + SVG) \\
 --- & \code{dhakasim/javacompat.py} (Java numeric semantics) \\
 \bottomrule
 \end{longtable}
@@ -1784,7 +2135,10 @@ attributes.
 \toprule
 \textbf{Scenario Goal} & \textbf{What to change} & \textbf{Code edit?} \\
 \midrule
-New map / location & \code{input/node.txt}, \code{input/link.txt}, then \code{run\_sim.py} & No \\
+Switch network & \code{Network} in \code{parameter.txt}, or \code{--network <name>} & No \\
+Simulate a different hour & \code{TimeOfDay}, or \code{--hour <0-23>} & No \\
+Enable medians / roundabouts & \code{GeometryMode On} + the network's \code{geometry.txt} & No \\
+New map / location & new \code{input/<name>/} with \code{node.txt} + \code{link.txt}, then \code{run\_sim.py --network <name>} & No \\
 Road diversion / closure & remove link from \code{link.txt} + \code{node.txt}, re-run \code{run\_sim.py} & No \\
 Lane reduction / narrowing & reduce \code{width} in \code{link.txt} & No \\
 Adjust traffic volume & \code{input/demand.txt}, or \code{DemandType} + \code{*Rate} then \code{run\_sim.py} & No \\
@@ -1808,11 +2162,13 @@ Reproducible runs & \code{Utilities.initialize()} \code{RandomSeed} branch & \te
 \subsection{Commands}
 
 \begin{lstlisting}[language=bash]
-python run_dhakasim.py              # honour GUIMode in parameter.txt
-python run_dhakasim.py --headless   # force batch mode
-python run_dhakasim.py --gui        # force the animation
-python run_sim.py                   # regenerate path.txt + demand.txt
-python tests/test_javacompat.py     # verify numeric fidelity
+python run_dhakasim.py                               # honour parameter.txt
+python run_dhakasim.py --headless                    # force batch mode
+python run_dhakasim.py --gui                         # force the animation
+python run_dhakasim.py --network khamarbari --hour 8  # pick network and hour
+python run_sim.py --network demo_backup              # regenerate routes + demand
+python run_sim.py --paths-only                       # routes only, keep survey demand
+python tests/test_javacompat.py                      # verify numeric fidelity
 \end{lstlisting}
 
 \subsection{Key constants}
@@ -1834,6 +2190,7 @@ max braking & $-6$\,m/s\textsuperscript{2} (all types) & \code{vehicle.py} \\
 \code{TIME\_WINDOW} / \code{GAP\_WINDOW} & 4 / 3 steps of memory & \code{vehicle.py} \\
 \code{SIDE\_STRIPS\_TO\_CONSIDER} & 1 & \code{parameters.py} \\
 \code{TOTAL\_NETWORK\_ROAD\_LENGTH} & 3.83\,km & \code{constants.py} \\
+\code{ROUNDABOUT\_SPEED\_FACTOR} & 1.7 ($v = k\sqrt{r}$) & \code{constants.py} \\
 \bottomrule
 \end{tabular}
 \caption{Constants most often needed when reading the code.}

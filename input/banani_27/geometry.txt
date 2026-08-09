@@ -1,0 +1,5 @@
+# Real-world geometry, derived from OpenStreetMap (export.geojson).
+# Kamal Ataturk Avenue is a dual carriageway: two one-way carriageways
+# separated by a central median.
+median 0 1.5   # Kamal Ataturk Ave -> Banani Kakoli
+median 3 1.5   # Kamal Ataturk Ave -> Gulshan 2

@@ -264,15 +264,22 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
     generated_at = (now_bd.strftime("%d %B %Y, ") + hour12
                     + now_bd.strftime(":%M %p") + " BDT")
 
-    # Embedded run animation and snapshot (self-contained SVG, produced during
-    # the run -- no third-party dependencies).
+    # Embedded run animations (self-contained SVG, produced during the run --
+    # no third-party dependencies).  Two views of the same frames of the same
+    # run: the plan view the operator watches, and the 3D view the GUI can be
+    # switched to.
     viz_html = ""
     if visual and visual.get("animation"):
-        viz_html += ('<h2>Run animation</h2>\n<div class="viz">'
+        viz_html += ('<h2>Run animation &mdash; plan view</h2>\n'
+                     '<p class="sub">The network from above, each vehicle a '
+                     'rectangle in its type colour.</p>\n<div class="viz">'
                      + visual["animation"] + "</div>\n")
-    if visual and visual.get("snapshot"):
-        viz_html += ('<h2>Snapshot</h2>\n<div class="viz">'
-                     + visual["snapshot"] + "</div>\n")
+    if visual and visual.get("animation_3d"):
+        viz_html += ('<h2>Run animation &mdash; 3D view</h2>\n'
+                     '<p class="sub">The same frames of the same run through '
+                     'the 3D camera, with each vehicle modelled to its real '
+                     'size. Looking north.</p>\n<div class="viz">'
+                     + visual["animation_3d"] + "</div>\n")
     if not viz_html:
         viz_html = ('<p class="sub">Run animation not available for this run '
                     '(a replay/trace run, or animation frames set to 0).</p>')

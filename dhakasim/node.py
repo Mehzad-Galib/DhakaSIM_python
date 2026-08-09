@@ -13,7 +13,8 @@ class Node:
     __slots__ = ("_index", "_id", "x", "y", "_time_passed", "_link_list",
                  "intersection_strip_list", "_vehicle_list",
                  "_intersection_strip_bundles", "_active_bundle_index",
-                 "_pressure_on_active_bundle")
+                 "_pressure_on_active_bundle", "_roundabout_radius",
+                 "_circulation_order", "_centre_x", "_centre_y")
 
     MIN_VEHICLES_TO_MAKE_A_SIGNAL_GREEN = 1
 
@@ -25,11 +26,27 @@ class Node:
         self._time_passed = 0
         self._active_bundle_index = 0
         self._pressure_on_active_bundle = 0
+        # > 0 marks this node as a roundabout of that radius in metres
+        # (GeometryMode only). See ``roundabout_signal_change``.
+        self._roundabout_radius = 0.0
+        # incident link indices in circulation order (see set_circulation_order)
+        self._circulation_order = []
+        # true centre of a junction, in metres; junction nodes are stored at
+        # (0, 0) so this is recovered from the incident link geometry
+        self._centre_x = 0.0
+        self._centre_y = 0.0
 
         self._link_list = []
         self.intersection_strip_list = []
         self._vehicle_list = []
         self._intersection_strip_bundles = []
+
+    def set_centre(self, x: float, y: float) -> None:
+        self._centre_x = x
+        self._centre_y = y
+
+    def get_centre(self):
+        return self._centre_x, self._centre_y
 
     def create_bundles(self) -> None:
         """Completes the bundle creation task."""
@@ -104,6 +121,77 @@ class Node:
                         < self.MIN_VEHICLES_TO_MAKE_A_SIGNAL_GREEN):
                     break
             self._time_passed = Parameters.simulation_step
+
+    def set_roundabout(self, radius: float) -> None:
+        self._roundabout_radius = radius
+
+    def is_roundabout(self) -> bool:
+        return self._roundabout_radius > 0
+
+    def get_roundabout_radius(self) -> float:
+        return self._roundabout_radius
+
+    def set_circulation_order(self, link_indices) -> None:
+        """Incident links ordered the way traffic circulates.
+
+        Bangladesh drives on the left, so roundabout traffic circulates
+        **clockwise** and an entering driver gives way to the right. The
+        processor supplies the incident links sorted by compass bearing, which
+        is exactly that clockwise order.
+        """
+        self._circulation_order = list(link_indices)
+
+    def _approaches_passed(self, from_link: int, to_link: int):
+        """Entries a circulating vehicle will cross going from *from* to *to*.
+
+        Walking clockwise from the entry arm to the exit arm, every arm strictly
+        in between has its entry blocked by that vehicle. The entry arm is
+        behind it and the exit arm is where it leaves, so neither conflicts.
+        """
+        order = self._circulation_order
+        if from_link not in order or to_link not in order:
+            return []
+        start = order.index(from_link)
+        end = order.index(to_link)
+        passed = []
+        i = (start + 1) % len(order)
+        while i != end:
+            passed.append(order[i])
+            i = (i + 1) % len(order)
+        return passed
+
+    def roundabout_signal_change(self) -> None:
+        """Priority rule for a roundabout: give way to circulating traffic.
+
+        A roundabout has no phases. Traffic already on the circulatory
+        carriageway keeps moving, and an approach may enter only when no
+        circulating vehicle is about to cross that entry. Each approach is
+        judged separately, so entries that do not conflict with the vehicles
+        currently going round may proceed at the same time -- which is what
+        gives a roundabout its capacity advantage over a signal.
+
+        Falls back to blocking every approach whenever the circulation order is
+        unknown, which is the safe (capacity-conservative) reading.
+        """
+        if not self._circulation_order:
+            signal = SIGNAL.GREEN if self._is_node_clear() else SIGNAL.RED
+            for bundle in self._intersection_strip_bundles:
+                bundle.set_signal(signal)
+            return
+
+        blocked = set()
+        for vehicle in self._vehicle_list:
+            try:
+                strip = self.get_intersection_strip(
+                    vehicle.get_intersection_strip_index())
+            except (IndexError, AttributeError, TypeError):
+                continue
+            blocked.update(self._approaches_passed(strip.start_link_index,
+                                                   strip.end_link_index))
+        for bundle in self._intersection_strip_bundles:
+            link_index = bundle.get_intersection_bundle_index()
+            bundle.set_signal(SIGNAL.RED if link_index in blocked
+                              else SIGNAL.GREEN)
 
     def constant_signal_change(self, simulation_time: int) -> None:
         """Non adaptive signal changing scheme; does not consider load on a link."""

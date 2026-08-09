@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
-"""Route and demand generator -- writes ``input/path.txt`` and ``input/demand.txt``.
+"""Route and demand generator -- writes ``path.txt`` and ``demand.txt``.
 
-Reads the network from ``input/link.txt`` / ``input/node.txt``, runs
-Floyd-Warshall to get shortest paths between every pair of boundary (single
-link) nodes, writes one path and one demand row per ordered pair, then thins
-the demand file down according to ``DemandType``.  The full unthinned demand is
-kept as ``input/demand_all.txt``.
+Reads the network from ``link.txt`` / ``node.txt``, runs Floyd-Warshall to get
+shortest paths between every pair of boundary (single link) nodes, writes one
+path and one demand row per ordered pair, then thins the demand down according
+to ``DemandType``.  The full unthinned demand is kept as ``demand_all.txt``.
 
-Only needed when the network or ``DemandType`` changes -- ``input/`` already
-ships with matching ``path.txt`` and ``demand.txt``.  Run it from this folder::
+Files are read and written inside the selected network folder
+(``input/<Network>/``), the same one the simulator itself uses, falling back to
+``input/`` when no network is selected.  Run it from this folder::
 
-    python run_sim.py
+    python run_sim.py                          # the network named in parameter.txt
+    python run_sim.py --network khamarbari     # override the selection
+    python run_sim.py --paths-only             # regenerate path.txt, keep demand.txt
+    python run_sim.py --force                  # allow overwriting survey demand
+
+Only needed when the network geometry or ``DemandType`` changes; every shipped
+network already has a matching ``path.txt`` and ``demand.txt``.
+
+The survey-based networks derive ``demand.txt`` from real traffic counts, so it
+is measured input rather than something this tool can recompute.  Those are
+refused unless ``--force`` is given; use ``--paths-only`` to regenerate the
+routes after a geometry edit while leaving the counts alone.
 """
 
 from __future__ import annotations
@@ -21,8 +32,24 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dhakasim.javacompat import JavaRandom, jround  # noqa: E402
+from dhakasim.parameters import Parameters  # noqa: E402
+from dhakasim.processor import Processor  # noqa: E402
 
 INF = 99999
+
+
+def output_dir() -> str:
+    """The folder generated files belong in.
+
+    Reads go through :meth:`Processor.input_path`, which falls back to
+    ``input/`` for files a network folder does not override; writes must not
+    fall back, or regenerating one network would clobber another's files.
+    """
+    if Parameters.NETWORK_DIR:
+        candidate = os.path.join("input", Parameters.NETWORK_DIR)
+        if os.path.isdir(candidate):
+            return candidate
+    return "input"
 
 
 class Sim:
@@ -31,13 +58,15 @@ class Sim:
     HIGH_RATE = 1200
     demand_type = 0  # 0 low; 1 mid; 2 high
 
-    def __init__(self):
+    def __init__(self, network_override: str | None = None, paths_only: bool = False):
         self.out_node = []
         self.demand = 100
         self.adj_matrix = None
         self.path_matrix = None
         self.next = None
         self.rand = JavaRandom()
+        self._network_override = network_override
+        self._paths_only = paths_only
 
         self.out_path = ""
         self.out_demand = ""
@@ -65,11 +94,16 @@ class Sim:
         # newline="" keeps the bare LF that Java's BufferedWriter.write and
         # PrintWriter.printf emit here (Python text mode would translate it to
         # the platform separator, unlike the CSV writers which mirror println)
-        with open("input/path.txt", "w", newline="") as bw:
+        with open(os.path.join(output_dir(), "path.txt"), "w", newline="") as bw:
             bw.write(self.out_path)
         print(self.out_path)
 
-        with open("input/demand.txt", "w", newline="") as bw:
+        if self._paths_only:
+            print(f"Wrote {os.path.join(output_dir(), 'path.txt')} "
+                  f"({i} routes); demand.txt left untouched.")
+            return
+
+        with open(os.path.join(output_dir(), "demand.txt"), "w", newline="") as bw:
             bw.write(self.out_demand)
         print(self.out_demand)
 
@@ -134,19 +168,24 @@ class Sim:
         self.out_path = f"{i * 2}\n" + self.out_path
         self.out_demand = f"{i * 2}\n" + self.out_demand
 
-        with open("input/path.txt", "w", newline="") as bw:
+        with open(os.path.join(output_dir(), "path.txt"), "w", newline="") as bw:
             bw.write(self.out_path)
         print(self.out_path)
 
-        with open("input/demand.txt", "w", newline="") as bw:
+        with open(os.path.join(output_dir(), "demand.txt"), "w", newline="") as bw:
             bw.write(self.out_demand)
         print(self.out_demand)
 
     def _read_file(self) -> None:
-        with open("input/link.txt", "r") as f:
+        # parameter.txt first: it names the network, which decides where
+        # link.txt and node.txt are read from.  It draws no random numbers, so
+        # moving it ahead of the network read changes nothing else.
+        self._read_parameters()
+
+        with open(Processor.input_path("link.txt"), "r") as f:
             num_of_links = int(f.readline())
 
-        with open("input/node.txt", "r") as br:
+        with open(Processor.input_path("node.txt"), "r") as br:
             num_of_nodes = int(br.readline())
 
             temp_matrix = [[0] * num_of_nodes for _ in range(num_of_links)]
@@ -180,8 +219,13 @@ class Sim:
                 self.path_matrix[row][col] = i
                 self.path_matrix[col][row] = i
 
+    def _read_parameters(self) -> None:
+        # parameter.txt is global, not per-network: Utilities.initialize reads
+        # exactly this path, so resolving it through the network folder here
+        # would let a stale copy inside input/<network>/ diverge from the
+        # settings the simulator actually runs with.
         try:
-            with open("input/parameter.txt", "r") as br:
+            with open(os.path.join("input", "parameter.txt"), "r") as br:
                 for data_line in br:
                     tokens = data_line.split()
                     if not tokens:
@@ -199,8 +243,14 @@ class Sim:
                         Sim.MEDIUM_RATE = int(value)
                     elif name.lower() == "highrate":
                         Sim.HIGH_RATE = int(value)
+                    elif name.lower() == "network":
+                        # --network on the command line wins over the file
+                        if self._network_override is None:
+                            Parameters.NETWORK_DIR = value.strip()
         except OSError as e:
             print(e)
+        if self._network_override is not None:
+            Parameters.NETWORK_DIR = self._network_override
 
     def _floyd_warshall(self) -> None:
         n = len(self.adj_matrix)
@@ -246,10 +296,12 @@ class Sim:
         i = len(self.out_node) - 1
         acceptable_node = self._set_demand()
 
+        out = output_dir()
         count = 0
+        limit = 0
         try:
-            with open("input/demand.txt", "r") as br, \
-                    open("input/demand_mod.txt", "w", newline="") as pw:
+            with open(os.path.join(out, "demand.txt"), "r") as br, \
+                    open(os.path.join(out, "demand_mod.txt"), "w", newline="") as pw:
                 limit = int(br.readline())
                 sb = []
                 for _ in range(limit):
@@ -262,15 +314,53 @@ class Sim:
         except OSError as e:
             print(e)
 
-        if os.path.exists("input/demand_all.txt"):
-            os.remove("input/demand_all.txt")
-        os.replace("input/demand.txt", "input/demand_all.txt")
-        os.replace("input/demand_mod.txt", "input/demand.txt")
+        if os.path.exists(os.path.join(out, "demand_all.txt")):
+            os.remove(os.path.join(out, "demand_all.txt"))
+        os.replace(os.path.join(out, "demand.txt"), os.path.join(out, "demand_all.txt"))
+        os.replace(os.path.join(out, "demand_mod.txt"), os.path.join(out, "demand.txt"))
+        print(f"Wrote {os.path.join(out, 'path.txt')} and "
+              f"{os.path.join(out, 'demand.txt')} ({count} routes kept of {limit}); "
+              f"unthinned demand kept as {os.path.join(out, 'demand_all.txt')}.")
 
 
-def main() -> int:
+def _flag_value(argv, flag):
+    if flag in argv:
+        i = argv.index(flag)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    network = _flag_value(argv, "--network")
+    paths_only = "--paths-only" in argv
+    force = "--force" in argv
+
+    # Resolving the network needs parameter.txt, which Sim reads itself; do a
+    # cheap pre-pass so the guard below can report the right folder before any
+    # file is written.
+    probe = Sim.__new__(Sim)
+    probe.rand = JavaRandom()
+    probe._network_override = network
+    probe._read_parameters()
+    out = output_dir()
+
+    if not paths_only and not force:
+        # demand.txt of a survey network comes from measured traffic counts, so
+        # it is input data this tool cannot recompute -- refuse to replace it.
+        survey = os.path.exists(os.path.join(out, "demand_by_hour.txt"))
+        if survey:
+            print(f"Refusing to overwrite {os.path.join(out, 'demand.txt')}: "
+                  f"'{Parameters.NETWORK_DIR}' is a survey network and its demand "
+                  f"comes from measured counts (demand_by_hour.txt is present).\n"
+                  f"  --paths-only  regenerate path.txt only, keep the counts\n"
+                  f"  --force       overwrite the measured demand anyway")
+            return 1
+
+    print(f"Network: {Parameters.NETWORK_DIR or '(none)'}  ->  writing into {out}/")
     try:
-        Sim()
+        Sim(network_override=network, paths_only=paths_only)
     except Exception:  # noqa: BLE001 - Java prints the stack trace and exits 0
         import traceback
         traceback.print_exc()

@@ -9,7 +9,8 @@ from .parameters import DLC_MODEL, Parameters
 
 class Strip:
     __slots__ = ("_segment_index", "_strip_index", "_is_foot_path_strip",
-                 "_parent_link_id", "_vehicle_list", "_pedestrian_list", "_object_list")
+                 "_parent_link_id", "_vehicle_list", "_pedestrian_list",
+                 "_object_list", "_is_median")
 
     #: ``private static final Random rand = Parameters.random`` -- captured
     #: once, when the class is initialised (i.e. at the first Strip creation,
@@ -24,6 +25,8 @@ class Strip:
         self._strip_index = str_index
         self._is_foot_path_strip = is_foot_path_strip
         self._parent_link_id = parent_link_id
+        # Physical median strip (GeometryMode only); never carries traffic.
+        self._is_median = False
 
         # we maintain lists for vehicles, pedestrians and roadside objects
         # present in the strip
@@ -32,7 +35,15 @@ class Strip:
         self._object_list = []
 
     def is_fp(self) -> bool:
-        return self._is_foot_path_strip
+        # Median strips are unusable for exactly the same reason footpath
+        # strips are, so they reuse this test rather than a parallel one.
+        return self._is_foot_path_strip or self._is_median
+
+    def is_median(self) -> bool:
+        return self._is_median
+
+    def set_blocked(self, blocked: bool) -> None:
+        self._is_median = blocked
 
     def get_strip_index(self) -> int:
         return self._strip_index

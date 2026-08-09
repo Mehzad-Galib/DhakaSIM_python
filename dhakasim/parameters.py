@@ -46,11 +46,25 @@ class Parameters:
     NODE_NAMES = {}
     # Number of frames captured for the report's embedded animation (0 = off).
     REPORT_ANIMATION_FRAMES = 24
+    # Open the GUI in the 3D perspective view rather than the 2D plan view.
+    # Purely a matter of how the animation is drawn -- the simulation itself is
+    # identical either way, and the view can be switched at any time while a
+    # run is going.
+    RENDER_3D = False
     # Sub-folder of input/ holding the selected network's files ("" = input/).
     NETWORK_DIR = ""
     # Hour of the survey day to simulate, 0-23. -1 = the network's peak hour
     # (the default demand.txt / vehicle_mix.txt).
     TIME_OF_DAY = -1
+    # Real-world geometry extensions (physical medians, and later one-way links,
+    # roundabout circulation and turn-lane channelisation). OFF by default: with
+    # GEOMETRY_MODE False the simulator stays byte-identical to the Java
+    # reference. Read from the selected network's geometry.txt.
+    GEOMETRY_MODE = False
+    # link id -> median width in metres
+    MEDIAN_WIDTHS = {}
+    # node id -> roundabout radius in metres
+    ROUNDABOUTS = {}
     # Survey vehicle mix: list of (cumulative_threshold_per_10000, type_index).
     # Empty means fall back to the built-in distribution.
     VEHICLE_MIX = []
@@ -109,3 +123,24 @@ class Parameters:
     #: Set by the GUI; the headless run never touches it.
     show_progress_slider = None
     simulation_step_line_nos = None
+
+    @classmethod
+    def snapshot(cls) -> dict:
+        """Copy the whole configuration.
+
+        A run mutates these: the option form converts ``MaximumSpeed`` from
+        km/h and transforms ``EncounterPerAccident``, ``along_pedestrian_mode``
+        is toggled every 20 steps, and ``GeometryMode`` fills in the median and
+        roundabout tables.  Taking a snapshot straight after
+        ``Utilities.initialize()`` lets the GUI put all of that back before
+        offering the form again, so a second run starts from the same place the
+        first one did instead of from the first one's leftovers.
+        """
+        return {k: (v.copy() if isinstance(v, (dict, list)) else v)
+                for k, v in vars(cls).items()
+                if not k.startswith("_") and k not in ("snapshot", "restore")}
+
+    @classmethod
+    def restore(cls, snap: dict) -> None:
+        for k, v in snap.items():
+            setattr(cls, k, v.copy() if isinstance(v, (dict, list)) else v)

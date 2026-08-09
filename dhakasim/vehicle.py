@@ -2206,20 +2206,26 @@ class Vehicle:
             length = jint(self.get_length() * pixel_per_meter)
 
             dis = self._distance_in_intersection * pixel_per_meter
-            # Using the internal section (ratio) formula, find the coordinates
-            # along which vehicles are
-            xp = jdiv(dis * intersection_strip.end_point_x
-                      + (intersection_strip_length - dis) * intersection_strip.start_point_x,
-                      intersection_strip_length)
-            yp = jdiv(dis * intersection_strip.end_point_y
-                      + (intersection_strip_length - dis) * intersection_strip.start_point_y,
-                      intersection_strip_length)
-            xq = jdiv((dis + length) * intersection_strip.end_point_x
-                      + (intersection_strip_length - (dis + length))
-                      * intersection_strip.start_point_x, intersection_strip_length)
-            yq = jdiv((dis + length) * intersection_strip.end_point_y
-                      + (intersection_strip_length - (dis + length))
-                      * intersection_strip.start_point_y, intersection_strip_length)
+            if intersection_strip.is_curved():
+                # Inside a roundabout the path bends round the island, so the
+                # body is placed along the arc instead of along the chord.
+                xp, yp = intersection_strip.point_at(dis)
+                xq, yq = intersection_strip.point_at(dis + length)
+            else:
+                # Using the internal section (ratio) formula, find the coordinates
+                # along which vehicles are
+                xp = jdiv(dis * intersection_strip.end_point_x
+                          + (intersection_strip_length - dis) * intersection_strip.start_point_x,
+                          intersection_strip_length)
+                yp = jdiv(dis * intersection_strip.end_point_y
+                          + (intersection_strip_length - dis) * intersection_strip.start_point_y,
+                          intersection_strip_length)
+                xq = jdiv((dis + length) * intersection_strip.end_point_x
+                          + (intersection_strip_length - (dis + length))
+                          * intersection_strip.start_point_x, intersection_strip_length)
+                yq = jdiv((dis + length) * intersection_strip.end_point_y
+                          + (intersection_strip_length - (dis + length))
+                          * intersection_strip.start_point_y, intersection_strip_length)
 
             x1 = jint(jround(xp))
             y1 = jint(jround(yp))

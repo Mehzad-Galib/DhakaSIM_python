@@ -5,7 +5,7 @@ PixelPerMeter 15
 EncounterPerAccident 0.01
 StripWidth 0.5
 FootpathStripWidth 0.5
-MaximumSpeed 100.0
+MaximumSpeed 100.0   # km/h (network speed limit)
 GUIMode On
 DebugMode Off
 ObjectMode On
@@ -49,3 +49,5 @@ BrakeHard Off
 ReportAnimationFrames 24
 Network kakrail_corridor
 TimeOfDay -1
+GeometryMode Off
+Render3D Off
