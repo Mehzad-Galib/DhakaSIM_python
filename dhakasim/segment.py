@@ -129,6 +129,7 @@ class Segment:
         self.last_vehicle_strip_index = self._strip_count - 2
 
         self._apply_median()
+        self._apply_oneway()
 
     def _apply_median(self) -> None:
         """Consume centre strips for a physical median (GeometryMode only).
@@ -162,6 +163,45 @@ class Segment:
         # Traffic now stops short of the median on each side.
         self.middle_low_strip_index = first - 1
         self.middle_high_strip_index = last + 1
+
+    def _apply_oneway(self) -> None:
+        """Let a one-way link use its whole carriageway (GeometryMode only).
+
+        A two-way link splits its strips down the middle, one half per
+        direction. Where traffic only ever runs one way -- Khamar Bari Road
+        feeds into Khamarbari Circle and Indira Road only takes traffic out --
+        that split leaves half the road permanently empty and halves the
+        capacity of the direction that is actually used.
+
+        Rather than pick a direction (which depends on where a vehicle entered
+        from), both limits are opened to the full carriageway. Only one
+        direction has demand, so the two never meet; on a link that does carry
+        both, this is refused and a warning is printed instead.
+
+        Disabled unless ``GeometryMode On``; with it off this is a no-op.
+        """
+        if not Parameters.GEOMETRY_MODE:
+            return
+        if self._parent_link_id not in Parameters.ONEWAY_LINKS:
+            return
+        # first and last usable strips, respecting any median already applied
+        first = 1
+        last = self._strip_count - 2
+        for i in range(first, last + 1):
+            if self._strip_list[i].is_fp():
+                first = i + 1
+            else:
+                break
+        for i in range(last, first - 1, -1):
+            if self._strip_list[i].is_fp():
+                last = i - 1
+            else:
+                break
+        if last < first:
+            return
+        self.middle_low_strip_index = last
+        self.middle_high_strip_index = first
+        self.last_vehicle_strip_index = last
 
     def get_link_index(self) -> int:
         return self._link_index

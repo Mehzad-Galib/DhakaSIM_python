@@ -7,7 +7,8 @@ import math
 from .constants import Constants
 from .javacompat import (Color, GammaDistribution, JavaRandom, jbool, jexp, jint,
                          jmin, jround, lines_intersect)
-from .parameters import CAR_FOLLOWING_MODEL, DLC_MODEL, Parameters, VEHICLE_GENERATION_RATE
+from .parameters import (CAR_FOLLOWING_MODEL, DLC_MODEL, Parameters,
+                         VEHICLE_GENERATION_RATE, scratch_random)
 from .point2d import Point2D
 
 #: ``Utilities.gb`` -- static, so it is built while ``Parameters.seed`` is
@@ -315,7 +316,7 @@ def get_random_from_multiple_gaussian_distribution_of_objects_blockage(object_ty
         _blockage_cache[object_type] = cached
     densities, random_multiplier = cached
 
-    r = JavaRandom()
+    r = scratch_random()
     random_double = r.next_double() * random_multiplier
 
     # For each possible return value, subtract the function value for that
@@ -467,15 +468,7 @@ def get_collision_penalty() -> float:
 
 
 def initialize() -> None:
-    """Read ``input/parameter.txt`` into :class:`Parameters`.
-
-    The Java ``switch`` in ``Utilities.initialize`` is missing ``break``
-    statements after ``DLC_model``, ``CF_model`` and ``VehicleGenerationRate``,
-    so those lines also execute the following case(s).  That fall-through is
-    reproduced below because it changes the configuration the simulation runs
-    with (a ``DLC_model`` line, for instance, also sets the car-following
-    model from the same value).
-    """
+    """Read ``input/parameter.txt`` into :class:`Parameters`."""
     try:
         with open("input/parameter.txt", "r") as bufferedReader:
             for data_line in bufferedReader:
@@ -485,146 +478,195 @@ def initialize() -> None:
                     # Java's StringTokenizer would throw here; the shipped
                     # files have no blank lines.
                     raise IndexError("empty line in input/parameter.txt")
-                name = string_tokenizer[0]
-                value = string_tokenizer[1]
-                if name == "SimulationEndTime":
-                    Parameters.simulation_end_time = int(value)
-                elif name == "PixelPerMeter":
-                    Parameters.pixel_per_meter = int(value)
-                elif name == "SimulationSpeed":
-                    Parameters.simulation_speed = int(value)
-                elif name == "EncounterPerAccident":
-                    Parameters.encounter_per_accident = float(value)
-                elif name == "StripWidth":
-                    Parameters.strip_width = float(value)
-                elif name == "FootpathStripWidth":
-                    Parameters.footpath_strip_width = float(value)
-                elif name == "MaximumSpeed":
-                    # Written in km/h -- the unit a speed limit is actually
-                    # quoted in, and the unit the GUI field is labelled with --
-                    # and held internally in m/s like every other speed.
-                    # The Java original read this field as m/s, which made the
-                    # shipped 100 mean 360 km/h: no limit at all, since the
-                    # fastest vehicle type manages 110 km/h.  Set 360 here to
-                    # reproduce that.
-                    Parameters.maximum_speed = precision2(float(value) * 1000 / 3600)
-                elif name == "AcrossPedestrianMode":
-                    Parameters.across_pedestrian_mode = value.lower() == "on"
-                elif name == "AlongPedestrianMode":
-                    Parameters.along_pedestrian_mode = value.lower() == "on"
-                elif name == "DebugMode":
-                    Parameters.DEBUG_MODE = value.lower() == "on"
-                elif name == "ObjectMode":
-                    Parameters.OBJECT_MODE = value.lower() == "on"
-                elif name == "TraceMode":
-                    Parameters.TRACE_MODE = value.lower() == "on"
-                elif name == "RandomSeed":
-                    # the value in the file is deliberately ignored
-                    Parameters.seed = JavaRandom().next_int_bound(101)
-                elif name == "SignalChangeDuration":
-                    Parameters.SIGNAL_CHANGE_DURATION = int(value)
-                    Parameters.SIGNAL_CHANGE_DURATION = jint(jround(
-                        Parameters.SIGNAL_CHANGE_DURATION / Constants.TIME_STEP))
-                elif name == "DefaultTranslateX":
-                    Parameters.DEFAULT_TRANSLATE_X = float(value)
-                elif name == "DefaultTranslateY":
-                    Parameters.DEFAULT_TRANSLATE_Y = float(value)
-                elif name == "CenteredView":
-                    Parameters.CENTERED_VIEW = value.lower() == "on"
-                elif name == "DLC_model":
-                    _apply_dlc_model(value)
-                    _apply_cf_model(value)       # Java switch falls through
-                    _apply_slow_vehicle(value)   # Java switch falls through
-                elif name == "CF_model":
-                    _apply_cf_model(value)
-                    _apply_slow_vehicle(value)   # Java switch falls through
-                elif name == "SlowVehicle":
-                    _apply_slow_vehicle(value)
-                elif name == "MediumVehicle":
-                    Parameters.medium_vehicle_percentage = float(value)
-                elif name == "FastVehicle":
-                    Parameters.fast_vehicle_percentage = float(value)
-                elif name == "TTC_Threshold":
-                    Parameters.TTC_THRESHOLD = float(value)
-                elif name == "VehicleGenerationRate":
-                    _apply_vehicle_generation_rate(value)
-                    _apply_error_mode(value)     # Java switch falls through
-                elif name == "ErrorMode":
-                    _apply_error_mode(value)
-                elif name == "FTMethod":
-                    Parameters.FT_METHOD = int(value)
-                elif name == "NoOfReadings":
-                    Parameters.NO_OF_READINGS = int(value)
-                elif name == "MFactor":
-                    Parameters.M_FACTOR = float(value)
-                elif name == "GUIMode":
-                    Parameters.GUI_MODE = value.lower() == "on"
-                elif name == "ALPHA":
-                    Parameters.ALPHA = float(value)
-                elif name == "BETA":
-                    Parameters.BETA = float(value)
-                elif name == "ETA":
-                    Parameters.ETA = float(value)
-                elif name == "AcrossPedestrianLimit":
-                    Parameters.ACROSS_PEDESTRIAN_LIMIT = int(value)
-                elif name == "AcrossPedestrianPerHour":
-                    Parameters.ACROSS_PEDESTRIAN_PER_HOUR = float(value)
-                elif name == "AlongPedestrianPerHour":
-                    Parameters.ALONG_PEDESTRIAN_PER_HOUR = float(value)
-                elif name == "AlongPedestrianPercentage":
-                    Parameters.ALONG_PEDESTRIAN_PERCENTAGE = int(value)
-                elif name == "DensityPercentage":
-                    Parameters.DENSITY_PERCENTAGE = int(value)
-                elif name == "PedestrianWeight":
-                    Parameters.PEDESTRIAN_WEIGHT = float(value)
-                elif name == "PedestrianRandomLaneChangePercentage":
-                    Parameters.PEDESTRIAN_RANDOM_LANE_CHANGE_PERCENTAGE = int(value)
-                elif name == "PedestrianLeftBiasPercentage":
-                    Parameters.PEDESTRIAN_LEFT_BIAS_PERCENTAGE = int(value)
-                elif name == "PenaltyWait":
-                    Parameters.PENALTY_WAIT = value.lower() == "on"
-                elif name == "ConsiderMinimum":
-                    Parameters.CONSIDER_MINIMUM = value.lower() == "on"
-                elif name == "NoOfRoutes":
-                    Parameters.NO_OF_ROUTES_FOR_STAT = int(value)
-                elif name == "ReportAnimationFrames":
-                    Parameters.REPORT_ANIMATION_FRAMES = int(value)
-                elif name == "Network":
-                    Parameters.NETWORK_DIR = value.strip()
-                elif name == "GeometryMode":
-                    Parameters.GEOMETRY_MODE = value.lower() == "on"
-                elif name == "Render3D":
-                    Parameters.RENDER_3D = value.lower() == "on"
-                elif name == "TimeOfDay":
-                    try:
-                        Parameters.TIME_OF_DAY = int(value)
-                    except ValueError:
-                        Parameters.TIME_OF_DAY = -1
-                elif name == "BrakeHard":
-                    Parameters.BRAKE_HARD = value.lower() == "on"
-                elif name == "AcrossPedestrianPercentage":
-                    print("Should change the parameter name: AcrossPedestrianPerHour")
-                else:
-                    pass
+                apply_setting(string_tokenizer[0], string_tokenizer[1])
 
+        # Not in finalise_settings(): this transform feeds on its own output,
+        # so running it twice would give a different answer.
         value = Parameters.encounter_per_accident
         if value < 1:
             value = 100 / value
         else:
             value = 100 - value + 1
         Parameters.encounter_per_accident = value
-        Parameters.pixel_per_footpath_strip = (Parameters.pixel_per_meter
-                                              * Parameters.footpath_strip_width)
-        Parameters.pixel_per_strip = Parameters.pixel_per_meter * Parameters.strip_width
-        Parameters.random = (JavaRandom() if Parameters.seed < 0
-                             else JavaRandom(Parameters.seed))
+
+        finalise_settings()
+    except OSError as ex:
+        print(f"SEVERE: {ex}")
+
+
+def apply_setting(name: str, value: str) -> bool:
+    """Apply one ``Name Value`` pair to :class:`Parameters`.
+
+    Split out of :func:`initialize` so that the same dispatch serves both
+    ``input/parameter.txt`` and a command-line ``--set Name=Value``; there is
+    one definition of what a setting means, not two.
+
+    The Java ``switch`` in ``Utilities.initialize`` is missing ``break``
+    statements after ``DLC_model``, ``CF_model`` and ``VehicleGenerationRate``,
+    so those lines also execute the following case(s).  That fall-through is
+    reproduced below because it changes the configuration the simulation runs
+    with (a ``DLC_model`` line, for instance, also sets the car-following
+    model from the same value).
+
+    :return: whether the name was recognised.  Unknown names are ignored, so
+        ``parameter.txt`` can carry notes; the caller decides whether to warn.
+    """
+    if name == "SimulationEndTime":
+        Parameters.simulation_end_time = int(value)
+    elif name == "PixelPerMeter":
+        Parameters.pixel_per_meter = int(value)
+    elif name == "SimulationSpeed":
+        Parameters.simulation_speed = int(value)
+    elif name == "EncounterPerAccident":
+        Parameters.encounter_per_accident = float(value)
+    elif name == "StripWidth":
+        Parameters.strip_width = float(value)
+    elif name == "FootpathStripWidth":
+        Parameters.footpath_strip_width = float(value)
+    elif name == "MaximumSpeed":
+        # Written in km/h -- the unit a speed limit is actually quoted in, and
+        # the unit the GUI field is labelled with -- and held internally in m/s
+        # like every other speed.  The Java original read this field as m/s,
+        # which made the shipped 100 mean 360 km/h: no limit at all, since the
+        # fastest vehicle type manages 110 km/h.  Set 360 here to reproduce that.
+        Parameters.maximum_speed = precision2(float(value) * 1000 / 3600)
+    elif name == "AcrossPedestrianMode":
+        Parameters.across_pedestrian_mode = value.lower() == "on"
+    elif name == "AlongPedestrianMode":
+        Parameters.along_pedestrian_mode = value.lower() == "on"
+    elif name == "DebugMode":
+        Parameters.DEBUG_MODE = value.lower() == "on"
+    elif name == "ObjectMode":
+        Parameters.OBJECT_MODE = value.lower() == "on"
+    elif name == "TraceMode":
+        Parameters.TRACE_MODE = value.lower() == "on"
+    elif name == "RandomSeed":
+        # the value in the file is deliberately ignored -- see `Seed` below
+        Parameters.seed = JavaRandom().next_int_bound(101)
+    elif name == "Seed":
+        # Unlike RandomSeed, this one is honoured, which is what makes a run
+        # repeatable and a seeded experiment sweep possible.
+        Parameters.seed = int(value)
+    elif name == "VehicleMixOverride":
+        Parameters.VEHICLE_MIX_OVERRIDE = value.lower() == "on"
+    elif name == "StatsDir":
+        Parameters.STATS_DIR = value.strip()
+    elif name == "DemandOverride":
+        Parameters.DEMAND_OVERRIDE = float(value)
+    elif name == "DemandOffset":
+        Parameters.DEMAND_OFFSET = int(value)
+    elif name == "NetworkRoadLength":
+        # "auto" (or any negative value) measures it from the network
+        Parameters.NETWORK_ROAD_LENGTH = (
+            -1.0 if value.lower() == "auto" else float(value))
+    elif name == "SignalChangeDuration":
+        Parameters.SIGNAL_CHANGE_DURATION = int(value)
+        Parameters.SIGNAL_CHANGE_DURATION = jint(jround(
+            Parameters.SIGNAL_CHANGE_DURATION / Constants.TIME_STEP))
+    elif name == "DefaultTranslateX":
+        Parameters.DEFAULT_TRANSLATE_X = float(value)
+    elif name == "DefaultTranslateY":
+        Parameters.DEFAULT_TRANSLATE_Y = float(value)
+    elif name == "CenteredView":
+        Parameters.CENTERED_VIEW = value.lower() == "on"
+    elif name == "DLC_model":
+        _apply_dlc_model(value)
+        _apply_cf_model(value)       # Java switch falls through
+        _apply_slow_vehicle(value)   # Java switch falls through
+    elif name == "CF_model":
+        _apply_cf_model(value)
+        _apply_slow_vehicle(value)   # Java switch falls through
+    elif name == "SlowVehicle":
+        _apply_slow_vehicle(value)
+    elif name == "MediumVehicle":
+        Parameters.medium_vehicle_percentage = float(value)
+    elif name == "FastVehicle":
+        Parameters.fast_vehicle_percentage = float(value)
+    elif name == "TTC_Threshold":
+        Parameters.TTC_THRESHOLD = float(value)
+    elif name == "VehicleGenerationRate":
+        _apply_vehicle_generation_rate(value)
+        _apply_error_mode(value)     # Java switch falls through
+    elif name == "ErrorMode":
+        _apply_error_mode(value)
+    elif name == "FTMethod":
+        Parameters.FT_METHOD = int(value)
+    elif name == "NoOfReadings":
+        Parameters.NO_OF_READINGS = int(value)
+    elif name == "MFactor":
+        Parameters.M_FACTOR = float(value)
+    elif name == "GUIMode":
+        Parameters.GUI_MODE = value.lower() == "on"
+    elif name == "ALPHA":
+        Parameters.ALPHA = float(value)
+    elif name == "BETA":
+        Parameters.BETA = float(value)
+    elif name == "ETA":
+        Parameters.ETA = float(value)
+    elif name == "AcrossPedestrianLimit":
+        Parameters.ACROSS_PEDESTRIAN_LIMIT = int(value)
+    elif name == "AcrossPedestrianPerHour":
+        Parameters.ACROSS_PEDESTRIAN_PER_HOUR = float(value)
+    elif name == "AlongPedestrianPerHour":
+        Parameters.ALONG_PEDESTRIAN_PER_HOUR = float(value)
+    elif name == "AlongPedestrianPercentage":
+        Parameters.ALONG_PEDESTRIAN_PERCENTAGE = int(value)
+    elif name == "DensityPercentage":
+        Parameters.DENSITY_PERCENTAGE = int(value)
+    elif name == "PedestrianWeight":
+        Parameters.PEDESTRIAN_WEIGHT = float(value)
+    elif name == "PedestrianRandomLaneChangePercentage":
+        Parameters.PEDESTRIAN_RANDOM_LANE_CHANGE_PERCENTAGE = int(value)
+    elif name == "PedestrianLeftBiasPercentage":
+        Parameters.PEDESTRIAN_LEFT_BIAS_PERCENTAGE = int(value)
+    elif name == "PenaltyWait":
+        Parameters.PENALTY_WAIT = value.lower() == "on"
+    elif name == "ConsiderMinimum":
+        Parameters.CONSIDER_MINIMUM = value.lower() == "on"
+    elif name == "NoOfRoutes":
+        Parameters.NO_OF_ROUTES_FOR_STAT = int(value)
+    elif name == "ReportAnimationFrames":
+        Parameters.REPORT_ANIMATION_FRAMES = int(value)
+    elif name == "Network":
+        Parameters.NETWORK_DIR = value.strip()
+    elif name == "GeometryMode":
+        Parameters.GEOMETRY_MODE = value.lower() == "on"
+    elif name == "Render3D":
+        Parameters.RENDER_3D = value.lower() == "on"
+    elif name == "TimeOfDay":
+        try:
+            Parameters.TIME_OF_DAY = int(value)
+        except ValueError:
+            Parameters.TIME_OF_DAY = -1
+    elif name == "BrakeHard":
+        Parameters.BRAKE_HARD = value.lower() == "on"
+    elif name == "AcrossPedestrianPercentage":
+        print("Should change the parameter name: AcrossPedestrianPerHour")
+    else:
+        return False
+    return True
+
+
+def finalise_settings() -> None:
+    """Recompute everything derived from the raw settings.
+
+    Split out of :func:`initialize` so an override applied after the file has
+    been read -- ``--seed 7``, ``--set StripWidth=2.5`` -- still gets the
+    derived values it implies: a new strip width changes the pixels per strip,
+    a new seed means a new RNG.  Safe to call repeatedly, which is why the
+    ``EncounterPerAccident`` transform stays behind in :func:`initialize`.
+    """
+    Parameters.pixel_per_footpath_strip = (Parameters.pixel_per_meter
+                                          * Parameters.footpath_strip_width)
+    Parameters.pixel_per_strip = Parameters.pixel_per_meter * Parameters.strip_width
+    Parameters.random = (JavaRandom() if Parameters.seed < 0
+                         else JavaRandom(Parameters.seed))
+    if Parameters.VEHICLE_MIX_OVERRIDE:
         # assert round(slow + medium + fast) == 100.0 -- assertions are
         # disabled in the Java build, and the values are overwritten anyway
         Parameters.slow_vehicle_percentage = 25
         Parameters.medium_vehicle_percentage = 25
         Parameters.fast_vehicle_percentage = 50
-    except OSError as ex:
-        print(f"SEVERE: {ex}")
 
 
 def _apply_dlc_model(value: str) -> None:
@@ -657,6 +699,7 @@ def _apply_cf_model(value: str) -> None:
         10: CAR_FOLLOWING_MODEL.HDM_MODEL,    # 22742
         11: CAR_FOLLOWING_MODEL.SBM_MODEL,    # 8363
         12: CAR_FOLLOWING_MODEL.MY_MODEL,     # no collision
+        13: CAR_FOLLOWING_MODEL.MODIFIED_NEWTONIAN_MODEL,
     }
     Parameters.car_following_model = models.get(p, CAR_FOLLOWING_MODEL.HYBRID_MODEL)
 

@@ -8,12 +8,12 @@ import os
 from .constants import Constants
 from .demand import Demand
 from .intersection_strip import IntersectionStrip
-from .javacompat import (Color, DOUBLE_MAX_VALUE, JavaRandom, jabs_int, jdiv, jformat,
+from .javacompat import (Color, DOUBLE_MAX_VALUE, jabs_int, jdiv, jformat,
                          jint, jlog, jmax, jmin, jround, jround_to_int, jstr)
 from .link import Link
 from .link_segment_orientation import get_link_and_segment_orientation
 from .node import Node
-from .parameters import Parameters, VEHICLE_GENERATION_RATE
+from .parameters import Parameters, VEHICLE_GENERATION_RATE, scratch_random
 from .path import Path
 from .pedestrian import Pedestrian
 from .point2d import Point2D
@@ -71,12 +71,14 @@ class Processor:
 
         self._read_geometry()   # must precede _read_network: strips depend on it
         self._read_network()
+        self._calibrate_roadside_object_density()
         self._read_path()
         self._read_demand()
         self._add_path_to_demand()
+        self._validate_oneway()
 
         Statistics.reset(len(self.demand_list))
-        os.makedirs("statistics", exist_ok=True)
+        os.makedirs(Parameters.STATS_DIR, exist_ok=True)
 
         for demand1 in self.demand_list:
             self.next_generation_time.append(1)
@@ -216,6 +218,18 @@ class Processor:
             avg_speed_in_link[index] = jdiv(avg_speed_in_link[index], index2)
             avg_waiting_time_in_link[index] = (jdiv(1.0 * waiting_in_segment, leaving)
                                                if leaving > 0 else 0)
+
+        # The three link-level measures, one row per run and one column per
+        # link.  They have always been computed here and then dropped on the
+        # floor -- nothing downstream read them -- which left the per-vehicle
+        # CSVs as the only output and made a link-by-link comparison
+        # impossible.  Speed is accumulated in m/s (segment length over time to
+        # cross it); the other two are already in the units they are reported
+        # in, seconds per vehicle and vehicles per hour.
+        self._print_data([s * 3.6 for s in avg_speed_in_link],
+                         "statistics/link_avg_speed.csv")
+        self._print_data(avg_waiting_time_in_link, "statistics/link_avg_waiting.csv")
+        self._print_data(sensor_vehicle_count, "statistics/link_flow.csv")
 
         percentage_of_waiting = [0.0] * Constants.TYPES_OF_CARS
         for vehicle in self.vehicle_list:
@@ -357,6 +371,14 @@ class Processor:
         avg_trip_time = [[0.0] * types for _ in range(n_demands)]
 
         no_of_trip_times = min(Parameters.NO_OF_ROUTES_FOR_STAT, n_demands)
+        # Mean trip time per route for the two vehicle classes a travel-time
+        # validation is usually quoted in.  A car is three type indices, so the
+        # mean has to be pooled over their trip times and completion counts
+        # together: averaging the three avg_tt columns instead would give a
+        # type that completed two trips the same weight as one that completed
+        # two hundred.
+        route_avg_tt_car = [0.0] * no_of_trip_times
+        route_avg_tt_bike = [0.0] * no_of_trip_times
         for i in range(no_of_trip_times):
             for j in range(types):
                 avg_fuel_consumption[i][j] = jdiv(
@@ -366,12 +388,26 @@ class Processor:
                     jdiv(1.0 * Statistics.trip_time[i][j],
                          Statistics.no_of_vehicles_completing_trip[i][j]),
                     60.0 / Constants.TIME_STEP)
+            car_time = 0.0
+            car_trips = 0.0
+            for j in range(4, 7):
+                car_time += 1.0 * Statistics.trip_time[i][j]
+                car_trips += Statistics.no_of_vehicles_completing_trip[i][j]
+            route_avg_tt_car[i] = jdiv(jdiv(car_time, car_trips),
+                                       60.0 / Constants.TIME_STEP)
+            route_avg_tt_bike[i] = jdiv(
+                jdiv(1.0 * Statistics.trip_time[i][3],
+                     Statistics.no_of_vehicles_completing_trip[i][3]),
+                60.0 / Constants.TIME_STEP)
             self._print_data(avg_fuel_consumption[i], f"statistics/fuel{i}.csv")
             self._print_data(avg_trip_time[i], f"statistics/avg_tt{i}.csv")
             self._print_data(Statistics.no_of_vehicles_completing_trip[i],
                              f"statistics/trip_complete{i}.csv")
             self._print_data(Statistics.no_collisions_per_demand[i],
                              f"statistics/collisions{i}.csv")
+
+        self._print_data(route_avg_tt_car, "statistics/route_avg_tt_car.csv")
+        self._print_data(route_avg_tt_bike, "statistics/route_avg_tt_motorbike.csv")
 
         # flow rate statistics
         self._print_data(Statistics.flow, "statistics/flow.csv")
@@ -423,10 +459,11 @@ class Processor:
 
     @staticmethod
     def _print_data(data, filename: str) -> None:
-        # Keep raw CSVs out of the statistics/ root, which now holds only the
-        # human-readable HTML reports; write them under statistics/csv/.
+        # Keep raw CSVs out of the run's root, which holds only the
+        # human-readable HTML reports; write them under <StatsDir>/csv/.
         if filename.startswith("statistics/") and filename.endswith(".csv"):
-            filename = "statistics/csv/" + filename[len("statistics/"):]
+            filename = os.path.join(Parameters.STATS_DIR, "csv",
+                                    filename[len("statistics/"):])
         os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
         with open(filename, "a") as writer:
             for d in data:
@@ -549,7 +586,7 @@ class Processor:
 
     def _generate_new_objects(self) -> None:
         for link in self.link_list:
-            random = JavaRandom()
+            random = scratch_random()
             factor = 0.1
 
             # We generate objects using a cumulative Gaussian distribution.  As
@@ -1242,7 +1279,11 @@ class Processor:
                                           cy * Parameters.pixel_per_meter)
                     node.add_intersection_strip(new_strip)
 
-                if node.is_bundle_active(old_link_index):
+                if not self._turn_lane_allows(vehicle, old_link_index,
+                                              new_link_index, old_strip_index):
+                    # wrong lane for this turn: hold at the stop line
+                    vehicle.set_speed(0)
+                elif node.is_bundle_active(old_link_index):
                     vehicle.set_intersection_strip_index(node.get_my_intersection_strip(
                         old_link_index, old_strip_index, new_link_index, new_strip_index))
                     vehicle.set_node(node)
@@ -1435,12 +1476,19 @@ class Processor:
         ``geometry.txt`` holds one directive per line; blank lines and lines
         starting with ``#`` are ignored. Currently understood::
 
-            median <linkId> <widthMetres>
+            median     <linkId> <widthMetres>
+            roundabout <nodeId> <radiusMetres>
+            oneway     <linkId>
 
         The file is only consulted when ``GeometryMode On`` is set, so a default
         run is unaffected and remains byte-identical to the Java reference.
         """
         Parameters.MEDIAN_WIDTHS = {}
+        Parameters.ROUNDABOUTS = {}
+        Parameters.ONEWAY_LINKS = set()
+        Parameters.TURN_LANES = {}
+        self.turn_lane_held = 0
+        self.turn_lane_forced = 0
         if not Parameters.GEOMETRY_MODE:
             return
         path = self.input_path("geometry.txt")
@@ -1448,6 +1496,8 @@ class Processor:
             return
         medians = {}
         roundabouts = {}
+        oneways = set()
+        turn_lanes = {}
         try:
             with open(path, "r") as reader:
                 for line in reader:
@@ -1459,11 +1509,25 @@ class Processor:
                         medians[int(tokens[1])] = float(tokens[2])
                     elif len(tokens) >= 3 and tokens[0].lower() == "roundabout":
                         roundabouts[int(tokens[1])] = float(tokens[2])
+                    elif len(tokens) == 2 and tokens[0].lower() == "oneway":
+                        oneways.add(int(tokens[1]))
+                    elif len(tokens) == 5 and tokens[0].lower() == "turnlane":
+                        turn_lanes[(int(tokens[1]), int(tokens[2]))] = (
+                            int(tokens[3]), int(tokens[4]))
         except (OSError, ValueError) as ex:
             print(f"geometry.txt ignored: {ex}")
             return
         Parameters.MEDIAN_WIDTHS = medians
         Parameters.ROUNDABOUTS = roundabouts
+        Parameters.ONEWAY_LINKS = oneways
+        Parameters.TURN_LANES = turn_lanes
+        if turn_lanes:
+            print(f"Geometry: turn lanes on {len(turn_lanes)} movement(s) "
+                  + ", ".join(f"{a}->{b} strips {lo}-{hi}"
+                              for (a, b), (lo, hi) in sorted(turn_lanes.items())))
+        if oneways:
+            print(f"Geometry: one-way link(s) "
+                  f"{', '.join(str(k) for k in sorted(oneways))}")
         if medians:
             print(f"Geometry: medians on {len(medians)} link(s) "
                   f"({', '.join(f'{k}={v}m' for k, v in sorted(medians.items()))})")
@@ -1583,6 +1647,89 @@ class Processor:
             pass
         Parameters.VEHICLE_MIX = mix
 
+    def _calibrate_roadside_object_density(self) -> None:
+        """Size the roadside-object population to the network just loaded.
+
+        Object targets are compared against one network-wide counter, so a
+        fixed target spread the same absolute number of parked cars and
+        standing pedestrians over whatever road there was.  On the 3.83 km demo
+        network that meant roughly a kilometre's worth of side friction across
+        four -- a large understatement of the very thing the simulator is for.
+        Measuring the length makes every network self-calibrating.
+        """
+        if Parameters.NETWORK_ROAD_LENGTH >= 0:
+            length_km = Parameters.NETWORK_ROAD_LENGTH
+        else:
+            total = 0.0
+            for link in self.link_list:
+                for index in range(link.get_number_of_segments()):
+                    total += link.get_segment(index).get_length()
+            length_km = total / 1000.0
+        Constants.calibrate_to_network(length_km)
+        print(f"Road length: {jformat(length_km, 2)} km"
+              f" ({Constants.AVG_NUMBER_OF_STANDING_PEDESTRIANS} standing pedestrians,"
+              f" {Constants.AVG_NUMBER_OF_PARKED_CARS} cars,"
+              f" {Constants.AVG_NUMBER_OF_PARKED_RICKSHAWS} rickshaws,"
+              f" {Constants.AVG_NUMBER_OF_PARKED_CNGS} CNGs)")
+
+    def _turn_lane_allows(self, vehicle, from_link_index, to_link_index,
+                          strip_index) -> bool:
+        """Is this vehicle in a lane permitted to make this turn?
+
+        Channelisation reserves a band of strips for a movement -- a left-turn
+        pocket, say -- so a driver in the wrong lane cannot take the turn and
+        has to wait. DhakaSim's lane changing is not destination-aware, so a
+        vehicle can arrive in the wrong band with no way to correct; to stop
+        that deadlocking the whole approach, a driver held longer than
+        ``TURN_LANE_PATIENCE`` forces the turn anyway. That is also the more
+        honest model of Dhaka, where lane discipline is advisory at best.
+        """
+        if not (Parameters.GEOMETRY_MODE and Parameters.TURN_LANES):
+            return True
+        from_id = self.link_list[from_link_index].get_id()
+        to_id = self.link_list[to_link_index].get_id()
+        band = Parameters.TURN_LANES.get((from_id, to_id))
+        if band is None:
+            return True
+        first, last = band
+        if first <= strip_index <= last:
+            return True
+        if vehicle.get_waiting_time() >= Constants.TURN_LANE_PATIENCE:
+            self.turn_lane_forced += 1
+            return True
+        self.turn_lane_held += 1
+        return False
+
+    def _validate_oneway(self) -> None:
+        """Check that every link declared one-way really carries one direction.
+
+        Opening the full carriageway to both directions is only safe because
+        the demand runs one way. If a declared link turns out to carry traffic
+        both ways, opposing streams would share the same strips, so say so
+        loudly rather than quietly simulating a head-on road.
+        """
+        if not (Parameters.GEOMETRY_MODE and Parameters.ONEWAY_LINKS):
+            return
+        for link in self.link_list:
+            if link.get_id() not in Parameters.ONEWAY_LINKS:
+                continue
+            # the terminal this arm serves: the end node with only this link
+            terminal = None
+            for node_id in (link.get_up_node(), link.get_down_node()):
+                node = self.node_list[self._get_node_index(node_id)]
+                if node.number_of_links() == 1:
+                    terminal = node
+            if terminal is None:
+                continue        # internal link; direction is not a terminal OD
+            out = sum(d.get_demand() for d in self.demand_list
+                      if d.get_source() == terminal.get_index())
+            into = sum(d.get_demand() for d in self.demand_list
+                       if d.get_destination() == terminal.get_index())
+            if out > 0 and into > 0:
+                print(f"WARNING: link {link.get_id()} is declared one-way but "
+                      f"carries demand both ways (out {out} / in {into}); "
+                      f"opposing traffic would share the full carriageway")
+
     def _validate_network(self) -> None:
         """Warn about node/link wiring that does not agree.
 
@@ -1679,9 +1826,11 @@ class Processor:
                                      int(tokens[2])))
 
             for node_id1, node_id2, demand in rows:
+                if Parameters.DEMAND_OVERRIDE >= 0:
+                    demand = Parameters.DEMAND_OVERRIDE
                 self.demand_list.append(Demand(self._get_node_index(node_id1),
                                                self._get_node_index(node_id2),
-                                               jint(demand + 30)))
+                                               jint(demand + Parameters.DEMAND_OFFSET)))
         except OSError as ex:
             print(f"SEVERE: {ex}")
 

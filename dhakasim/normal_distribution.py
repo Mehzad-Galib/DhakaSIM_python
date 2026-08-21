@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import math
 
-from .javacompat import JavaRandom, jexp
+from .javacompat import jexp
+from .parameters import scratch_random
 
 
 class NormalDistribution:
@@ -21,10 +22,10 @@ class NormalDistribution:
         self.standard_deviation = standard_deviation
 
     def get_a_random_value(self) -> float:
-        return JavaRandom().next_gaussian() * self.standard_deviation + self.mean
+        return scratch_random().next_gaussian() * self.standard_deviation + self.mean
 
     def get_a_random_value_with_factor(self) -> float:
-        return self.factor * (JavaRandom().next_gaussian() * self.standard_deviation
+        return self.factor * (scratch_random().next_gaussian() * self.standard_deviation
                               + self.mean)
 
     def get_probability_density(self, x: float) -> float:

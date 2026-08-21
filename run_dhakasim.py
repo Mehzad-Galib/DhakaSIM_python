@@ -7,6 +7,9 @@ current directory, so run it from this folder::
     python run_dhakasim.py            # honours GUIMode in input/parameter.txt
     python run_dhakasim.py --headless # force the no-GUI run
     python run_dhakasim.py --gui      # force the GUI
+
+Also accepted: ``--network <name>``, ``--hour <0-23>``, ``--seed <n>`` and
+``--set Name=Value`` (repeatable, for any setting ``parameter.txt`` understands).
 """
 
 from __future__ import annotations

@@ -15,6 +15,8 @@ import math
 import os
 from datetime import datetime, timezone, timedelta
 
+from .parameters import Parameters
+
 LAST_REPORT_PATH = None
 
 # DhakaSim's 13 vehicle types, in index order.
@@ -385,12 +387,12 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
 </html>
 """
 
-    os.makedirs("statistics", exist_ok=True)
+    os.makedirs(Parameters.STATS_DIR, exist_ok=True)
     # e.g. report_29July_2026_11.30PM_BDT.html  (colon is illegal in Windows
     # filenames, so the time uses a dot separator).
     stamp = (f"{now_bd.day}{now_bd.strftime('%B')}_{now_bd.year}_"
              f"{hour12}.{now_bd.strftime('%M%p')}_BDT")
-    path = os.path.join("statistics", f"report_{stamp}.html")
+    path = os.path.join(Parameters.STATS_DIR, f"report_{stamp}.html")
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
     LAST_REPORT_PATH = os.path.abspath(path)

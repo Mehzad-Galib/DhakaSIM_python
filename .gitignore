@@ -7,6 +7,13 @@ statistics/
 debug/
 trace.txt
 
+# Experiment sweep output (the harness itself is tracked, its results are not)
+experiments/results/
+experiments/results_paper/
+experiments/smoke/
+experiments/*.log
+experiments/*.err
+
 # Editors / OS
 .vscode/
 .idea/

@@ -3,3 +3,6 @@
 # separated by a central median.
 median 0 1.5   # Kamal Ataturk Ave -> Banani Kakoli
 median 3 1.5   # Kamal Ataturk Ave -> Gulshan 2
+
+# Banani Road No.27 is entry-only in the survey demand (out=0).
+oneway 2

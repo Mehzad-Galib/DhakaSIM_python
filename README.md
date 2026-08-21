@@ -30,6 +30,15 @@ python run_dhakasim.py --headless
 python run_dhakasim.py --gui
 ```
 
+`--seed <n>` pins the random number generator so a run can be repeated, and
+`--set Name=Value` overrides any setting `parameter.txt` understands, repeatably
+— together these let a batch of runs vary one factor at a time without editing
+the file between them:
+
+```bash
+python run_dhakasim.py --headless --seed 4 --set StripWidth=2.5 --set CF_model=2
+```
+
 In the GUI the option form lets you change the seed, end time, speed and road
 geometry before starting. Once running: drag to pan, mouse wheel or the
 right-hand slider to zoom, the bottom slider shows progress.
@@ -204,7 +213,17 @@ into `statistics/csv/` (paths in the table are relative to that folder), all
 | `agg_total_collision.csv` | `collisions, accidents, vehiclesGenerated, pedestriansGenerated` |
 | `avg_tt<i>.csv`, `fuel<i>.csv`, `trip_complete<i>.csv`, `collisions<i>.csv` | the same, per route `i` (first `NoOfRoutes` routes) |
 | `flow.csv` | vehicles past the sensor per minute |
+| `link_avg_speed.csv` | mean speed on each link (km/h); one column per link |
+| `link_avg_waiting.csv` | mean waiting time on each link (seconds per vehicle leaving it) |
+| `link_flow.csv` | flow rate on each link (vehicles/hour) |
+| `route_avg_tt_car.csv`, `route_avg_tt_motorbike.csv` | mean trip time per route (minutes) for cars and for motorbikes, over the first `NoOfRoutes` routes |
 | `accident_log.csv` | `simStep, vehicleId, type, speed, acceleration, leaderType, leaderSpeed, leaderAcc` |
+
+The three `link_*.csv` files are indexed by link, not by vehicle type. Cars span
+three type indices, so `route_avg_tt_car.csv` pools their trip times and
+completion counts rather than averaging the three `avg_tt<i>.csv` columns, which
+would weight a type that completed two trips the same as one that completed two
+hundred.
 
 Every per-type file has 13 columns indexed by vehicle type: 0 bicycle,
 1 rickshaw, 2 van/cart, 3 motorbike, 4–6 car, 7 CNG, 8–9 bus, 10–11 truck,
@@ -244,11 +263,26 @@ touch:
 | `Network` | which `input/` sub-folder to simulate (e.g. `bijoy_sarani`); the GUI dropdown and `--network` override it |
 | `TimeOfDay` | hour of the surveyed day to simulate, `0`-`23`; `-1` uses the busiest hour. The GUI dropdown and `--hour` override it |
 | `GeometryMode` | `On` applies the network's `geometry.txt`: physical medians and roundabouts. `Off` (default) keeps byte-identical parity with the Java reference |
+| `Seed` | pins the RNG to this value, unlike `RandomSeed` (below), which discards it. `--seed` sets the same thing |
+| `NetworkRoadLength` | km of road used to size the roadside-object population. `auto` (the default) measures it from the loaded network; a number pins it, and `1.01` reproduces the Java original |
+| `StatsDir` | where this run writes its CSVs and report (default `statistics`). Give each run of a batch its own, since every CSV is appended to |
+| `DemandOverride` | vehicles/hour for every OD pair, replacing `demand.txt`. Negative (the default) uses the file |
+| `DemandOffset` | added to every demand row (default `30`, the Java constant). Set `0` so a requested rate is the rate |
+| `VehicleMixOverride` | `On` (default) keeps the Java behaviour of forcing the speed-class split to 25/25/50; `Off` lets `SlowVehicle`/`MediumVehicle`/`FastVehicle` take effect |
 | `TraceMode` | `On` replays a recorded `trace.txt` instead of simulating |
 | `DebugMode` | `On` writes per-vehicle traces into `debug/` |
 
 `CF_model`: 0 hybrid (default), 1 naive, 2 Gipps, 3 Krauss, 4 GFM, 5 IDM,
-6 RVF, 7 VFIAC, 8 OVCM, 9 KFTM, 10 HDM, 11 SBM, 12 strip-based weighted model.
+6 RVF, 7 VFIAC, 8 OVCM, 9 KFTM, 10 HDM, 11 SBM, 12 strip-based weighted model,
+13 modified Newtonian.
+
+Model 1 is Newtonian motion with explicit braking: full acceleration, or
+whatever deceleration closes the remaining gap in one step. Model 13 replaces
+both branches with a single continuous acceleration — the rate that would leave
+the vehicle exactly at its leader's tail — bounded below at 8.5 m/s², a
+vehicle's physical braking floor. It therefore decelerates smoothly where the
+naive model slams. Run it with `BrakeHard Off` (the shipped default): `BrakeHard
+On` reimposes the explicit-braking branch afterwards and cancels the difference.
 
 ## Behaviour worth knowing about
 
@@ -257,16 +291,46 @@ commented at the point in the code where it happens — but they will surprise y
 otherwise.
 
 - **`RandomSeed` in the file is ignored.** The simulator picks a random seed in
-  `[0, 101)` at startup, so runs are not reproducible. The RNG underneath *is*
-  seed-faithful, so for repeatable runs change the `RandomSeed` branch in
-  `dhakasim/utilities.py:initialize` to use the file value. The GUI's seed field
-  does apply the value you type.
+  `[0, 101)` at startup, so a plain run is not reproducible. Use `--seed <n>`
+  (or a `Seed` line) for a repeatable one. The GUI's seed field applies the
+  value you type to the main generator, but not to the object and pedestrian
+  generators below, so a GUI run is only partly reproducible.
+- **Object and pedestrian generation used its own unseeded RNG.** Roadside
+  object placement, parking times, blockage draws and pedestrian arrivals each
+  built a fresh clock-seeded generator per call, following the Java original,
+  so the seed never controlled them — and with `ObjectMode On` those objects are
+  most of what the traffic negotiates. `--seed` now routes them through the
+  seeded generator (`parameters.scratch_random`); without it they behave as
+  before. Only the distributions were ever reproducible here, never the stream.
+- **Every demand row gets `+30` vehicles/hour.** Negligible on an 8-row
+  junction, but `demo_backup` has 110 OD pairs, so it adds 3,300 veh/h.
+  `DemandOffset 0` removes it.
+- **`DLC_model 1` used to crash with `ObjectMode On`.** The GHR branch of
+  `is_object_in_proximity` evaluated the GHR acceleration against the cached
+  `leader` field, which is null there, so the combination threw instead of
+  running — invisible because the shipped `DLC_model 0` never reaches it. GHR
+  now falls through to the same object-gap test the other models use, which is
+  what the equivalent method for vehicles already did. GHR has no sensible
+  reading against a roadside object anyway: an object never moves, so the
+  closing speed is the follower's own and the acceleration is negative at any
+  distance, which would read as "obstructed" always.
+- **Roadside-object density used to ignore network size.** The object counts are
+  a density — 19.77 parked cars, 15.61 rickshaws, 15.61 standing pedestrians and
+  4.67 CNGs per kilometre — but they were baked against a fixed 1.01 km, and
+  they are compared against one network-wide counter. So every network got the
+  same absolute number of objects: on the 3.83 km `demo_backup` that spread
+  roughly a kilometre's worth of side friction over four. The length is now
+  measured from the loaded network, so all six are correctly provisioned;
+  `NetworkRoadLength 1.01` restores the old fixed value.
 - **Parameter parsing falls through.** A `DLC_model` line also sets the
   car-following model from the same value and then assigns `SlowVehicle`; a
   `CF_model` line also assigns `SlowVehicle`. Because `parameter.txt` lists
   `DLC_model` before `CF_model`, the `CF_model` line wins — keep that order.
-  `SlowVehicle`/`MediumVehicle`/`FastVehicle` are overwritten with 25/25/50 at
-  the end of parsing regardless of what the file says.
+  It also means anything setting `SlowVehicle` must come *after* `CF_model`, or
+  the `CF_model` value silently becomes the slow-vehicle percentage.
+  `SlowVehicle`/`MediumVehicle`/`FastVehicle` are then overwritten with 25/25/50
+  at the end of parsing, so all three settings have never done anything; set
+  `VehicleMixOverride Off` to let them through.
 - **`MaximumSpeed` is in km/h**, the unit the GUI field is labelled with and
   the unit a speed limit is actually quoted in. It is held internally in m/s.
   The shipped `100.0` is a realistic 100 km/h network limit. *The Java original
@@ -289,6 +353,170 @@ otherwise.
   `statistics/` root are per-run, time-stamped files and are not overwritten.)
 - **The GUI writes `trace.txt` every frame**, which grows quickly.
 
+## Building a network from OpenStreetMap
+
+The shipped networks were transcribed by hand from overpass-turbo GeoJSON
+exports. `make_network.py` does it mechanically:
+
+```bash
+python make_network.py export.geojson --out input/miami --centre 25.48,-80.47 --radius 1500
+```
+
+Get the GeoJSON from [overpass-turbo](https://overpass-turbo.eu) — a
+`way["highway"~"..."](bbox); (._;>;); out geom;` query, then Export → GeoJSON.
+The tool projects to local metres, splits ways where they meet, collapses
+degree-2 bends into multi-segment links, drops short dead ends and
+disconnected fragments, and writes `node.txt`, `link.txt` and `geometry.txt`.
+Run `run_sim.py --network <name>` afterwards for the routes and demand.
+
+The part that matters most is dual carriageways. OSM maps a divided road as two
+one-way ways, but this simulator's links are bidirectional with the median
+expressed in `geometry.txt` — so importing both sides verbatim would give the
+road twice the capacity at half the width each. Antiparallel one-way pairs are
+detected and fused, taking the centreline between them, a width from kerb to
+kerb, and the measured gap as the median. `--no-merge-dual` turns that off,
+`--max-separation` sets how far apart two carriageways may be and still count
+as one road.
+
+Widths come from the `width` tag, else `lanes` × 3.25 m, else a default per
+road class. Checked against the hand-built `banani_23`: Kemal Ataturk Avenue
+converts to 17.9 m wide with a 4.9 m median, against 15.5 m and 1.5 m read off
+a satellite image by hand — the same road at the same order of magnitude, which
+is about as close as an automatic derivation gets.
+
+### Miami and Riyadh
+
+`input/miami` and `input/riyadh` exist so the lane / non-lane comparison can be
+run against developed-country road layouts, but they are **idealised grids, not
+surveyed topology** — each `geometry.txt` says so at the top. They come from
+`make_grid.py`, which writes a GeoJSON street grid and feeds it through the same
+converter real data goes through, so the fusion, width and splitting logic is
+identical:
+
+```bash
+python make_grid.py riyadh --out riyadh.geojson
+```
+
+What they reproduce faithfully is the carriageway widths the paper states —
+Miami 10 m and 20 m, Riyadh 18 m and 24 m, with divided arterials — because
+that, not the street pattern, is what its conclusion rests on: wide long roads
+reward lane discipline and narrow ones do not. Miami's area is inferred from the
+paper's Figure 3(d); Riyadh's district could not be identified from Figure 3(h),
+so Al Malaz stands in. Swap either for a real extract with one command.
+
+Note that roadside objects are still Dhaka's — parked rickshaws and CNGs appear
+in Miami and Riyadh too, since `ObjectMode` models one city's side friction. Run
+those cities with `ObjectMode Off`, or accept it as a known difference from the
+paper.
+
+## Experiment sweeps
+
+`experiments/roadbird.py` runs the lane / non-lane comparison as a batch,
+sweeping strip width, demand, vehicle mix and pedestrians over a range of seeds:
+
+```bash
+python experiments/roadbird.py --dry-run
+```
+
+```bash
+python experiments/roadbird.py --seeds 10 --jobs 8
+```
+
+The full grid is 24 scenarios — 2 lane modes × 3 demands × 2 mixes × 2
+pedestrian settings — so 240 runs at ten seeds. Each is a separate process with
+its own `StatsDir`, because `Parameters` is process-wide state and every CSV is
+appended to rather than truncated. Interrupted sweeps resume: a run whose
+directory holds a `done` marker is skipped.
+
+Results land under `experiments/results/` — each run's own CSVs untouched, plus
+`results.csv` (one row per scenario × seed × metric × link) and `summary.csv`
+(averaged over links and seeds, with a count of the NaNs dropped so a mean
+resting on very little is visible as one). Narrow the grid with `--demands`,
+`--mixes`, `--lane-modes`, `--pedestrians`, and shorten runs with `--end-time`
+while iterating.
+
+### Demand rates are not the simulator's own
+
+`--demands` selects a label; `--rates LOW MEDIUM HIGH` sets what those labels
+mean, in **vehicles per hour per OD pair**. The harness's defaults are
+100 / 400 / 800, which are *not* the rates `run_sim.py` builds a network's
+`demand.txt` from. Those come from `DemandType` and divide a total across the
+boundary nodes — `LOW_RATE // acceptable_node` and so on — which for
+`demo_backup` (11 boundary nodes, 110 OD pairs) works out to:
+
+| DemandType | total | per OD pair |
+| --- | --- | --- |
+| 0 low | 200 | 66 |
+| 1 medium | 700 | 100 |
+| 2 high | 1200 | 120 |
+
+The shipped `input/demo_backup/demand.txt` is a uniform 100, i.e. the medium
+one. So the harness's default "low" already equals the simulator's *medium*,
+and its medium and high sit three to seven times beyond the simulator's *high*.
+That is a legitimate stress test, but it is a different demand range from the
+one the shipped networks are built around — pass `--rates 66 100 120` to sweep
+the range the simulator itself uses.
+
+**A change of `--rates` needs a fresh `--out`.** A run's identity is its label,
+not its rate, so a `done` marker written at one rate will be silently reused for
+a different one. Resumability cannot tell the two apart.
+
+`experiments/stats.py` tests whether a difference in those results is real:
+
+```bash
+python experiments/stats.py experiments/results/results.csv --by lane_mode
+```
+
+It splits `results.csv` on any factor column and reports, per metric, both
+means, a two-sample t-test and a two-sample Kolmogorov–Smirnov test. It is also
+importable, offering the five error measures a validation against field data
+needs — `ME`, `MAE`, `RMSE`, `MAPE`, `RMSPE` via `error_summary`, plus
+`t_test_ind` (pooled or Welch) and `ks_test_2samp`.
+
+Since there is no SciPy here, the t distribution and the Kolmogorov
+distribution are implemented directly — a continued fraction for the
+regularised incomplete beta, and the alternating exponential series. Both
+reproduce published critical values to five decimal places, and
+`tests/test_stats.py` pins them to closed forms that hold exactly at particular
+parameters. One limitation is worth knowing: the K-S p-value is the asymptotic
+approximation, dependable once `n1·n2/(n1+n2)` exceeds about 10 and optimistic
+below that. The statistic `D` itself is exact.
+
+## The paper comparison report
+
+`experiments/paper_report.py` turns a sweep into one self-contained HTML page
+comparing it against the RoadBird paper:
+
+```bash
+python experiments/paper_report.py experiments/results/results.csv --out report.html
+```
+
+It tests ten claims the paper makes about Dhaka — non-lane beating lane on
+speed, waiting time and flow; each of those worsening as demand rises; the
+speed crossover the paper predicts at high demand; the gain from removing slow
+vehicles; and the pedestrian asymmetry between mixes — and marks each
+*supported*, *not reproduced* or *no data*. Every claim is quoted from the
+paper's prose rather than read off one of its bar charts, since a value
+eyeballed from a figure is not evidence.
+
+Charts are hand-built SVG, per-link bars in the shape of the paper's Figures
+10–12 with each system's average drawn as a dashed line. Two things about how
+it aggregates are worth knowing:
+
+- The lane-versus-non-lane claims are judged on the **heterogeneous mix with
+  pedestrians present** alone, which is the slice the paper's Dhaka figures
+  plot. Pooling the homogeneous runs into those means would average two
+  different cities' traffic together.
+- Error bars are the spread **across seeds**, not across links. Links within a
+  run share a traffic stream and are not independent, so the t-test and K-S
+  p-values — which run over per-link values, the unit the paper's own figures
+  plot — are optimistic. They indicate effect size rather than proving it.
+
+The report says what it cannot test, too: the paper's Table IV validates
+simulated travel times against observed ones from real Dhaka routes, and
+without that field data the five error measures in `stats.py` have nothing to
+compare to.
+
 ## Performance
 
 Roughly 7–8 minutes for the shipped 1800-step Dhaka network on a desktop CPU.
@@ -302,6 +530,18 @@ default `SimulationSpeed 1`.
 python tests/test_javacompat.py
 ```
 
+```bash
+python tests/test_modified_newtonian.py
+```
+
+```bash
+python tests/test_stats.py
+```
+
+```bash
+python tests/test_make_network.py
+```
+
 `dhakasim/javacompat.py` reproduces the arithmetic of the original
 implementation, because Python's defaults differ from it in ways that change
 simulation results: `min`/`max` must propagate NaN (Gipps braking produces NaN
@@ -312,6 +552,12 @@ negatives keeps the dividend's sign, and `"%.3f"` rounds the shortest
 round-tripping decimal half-up. The test file pins all of this to reference
 values — if it fails, the numerics have drifted.
 
+`tests/test_modified_newtonian.py` pins `CF_model 13` instead. That model has no
+Java counterpart to compare against, so what it pins is the arithmetic its
+defining equations imply: the acceleration cap, the 8.5 m/s² braking floor, the
+intermediate rates between them, and the fact that the existing Boole-rule
+distance integrator already supplies the `½a∆t²` term for every model.
+
 ## Provenance
 
 Translated from the Java implementation of DhakaSim, one module per original
@@ -321,6 +567,12 @@ models, all 4 lane-changing models, the pedestrian and roadside-object paths
 including the per-step accident log, the route/demand generator output, and the
 drawing geometry written to `trace.txt`. Unseeded, repeated runs agree within
 statistical noise.
+
+Two later changes deviate from that reference on purpose, both listed under
+**Behaviour worth knowing about** above and both revertible with a setting:
+roadside-object density now scales with network size (`NetworkRoadLength 1.01`
+pins it back), and `CF_model 13` is new here with no Java counterpart. Set those
+two and parity is unchanged.
 
 ## Further reading
 

@@ -5,3 +5,10 @@
 median 2 2.0   # Manik Mia Avenue  (7 + 4 lanes)
 median 5 2.0   # Sangsad Avenue / Begum Rokeya Sharani (3 + 3 lanes)
 roundabout 6 28.8   # Khamar Bari Goal Chottor
+
+# One-way arms, confirmed from the survey demand: Khamar Bari Rd only feeds
+# INTO the circle (out=0) and Indira Rd only takes traffic OUT (in=0), so each
+# uses its whole carriageway rather than reserving half for a direction that
+# carries no traffic.
+oneway 0   # Indira Road   (exit only)
+oneway 1   # Khamarbari Rd (entry only)

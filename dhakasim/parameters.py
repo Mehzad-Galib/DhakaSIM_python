@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from enum import Enum
 
+from .javacompat import JavaRandom
+
 
 class DLC_MODEL(Enum):
     """Discretionary lane changing models."""
@@ -33,6 +35,7 @@ class CAR_FOLLOWING_MODEL(Enum):
     HDM_MODEL = 10
     SBM_MODEL = 11
     MY_MODEL = 12
+    MODIFIED_NEWTONIAN_MODEL = 13
 
 
 class VEHICLE_GENERATION_RATE(Enum):
@@ -65,9 +68,39 @@ class Parameters:
     MEDIAN_WIDTHS = {}
     # node id -> roundabout radius in metres
     ROUNDABOUTS = {}
+    # link ids that carry traffic in one direction only, so the whole
+    # carriageway serves that direction instead of half being reserved
+    ONEWAY_LINKS = set()
+    # (fromLinkId, toLinkId) -> (firstStrip, lastStrip): the band of strips a
+    # movement must be in to take that turn (turn pockets / lane arrows)
+    TURN_LANES = {}
     # Survey vehicle mix: list of (cumulative_threshold_per_10000, type_index).
     # Empty means fall back to the built-in distribution.
     VEHICLE_MIX = []
+    # The Java original ends parameter parsing by overwriting the slow/medium/
+    # fast split with 25/25/50, whatever the file said, so those three settings
+    # have never actually done anything.  True keeps that (and with it byte
+    # parity); False lets SlowVehicle/MediumVehicle/FastVehicle through, which
+    # is what a study varying the speed-class mix needs.
+    VEHICLE_MIX_OVERRIDE = True
+    # Set by --seed. See scratch_random() below for what it changes.
+    DETERMINISTIC = False
+    # Road length in km used to size the roadside-object population. Negative
+    # (the default) measures it from the loaded network; a value pins it, which
+    # is what reproducing the Java original needs -- it always used 1.01.
+    NETWORK_ROAD_LENGTH = -1.0
+    # Root for this run's outputs. Every CSV is appended to, never truncated,
+    # so a batch of runs sharing one directory produces files whose rows cannot
+    # be told apart; the experiment harness gives each run its own.
+    STATS_DIR = "statistics"
+    # Vehicles/hour for every OD pair, overriding demand.txt. Negative uses the
+    # file. A study that varies demand wants one rate across the network, which
+    # is otherwise only reachable by rewriting demand.txt between runs.
+    DEMAND_OVERRIDE = -1.0
+    # Added to every demand row. The Java original hardcodes 30, which is
+    # nothing on an 8-row junction and +3300 veh/h across demo_backup's 110
+    # rows, so a demand sweep usually wants this at 0.
+    DEMAND_OFFSET = 30
     simulation_step = 1
     simulation_end_time = 0
     pixel_per_strip = 0.0
@@ -144,3 +177,23 @@ class Parameters:
     def restore(cls, snap: dict) -> None:
         for k, v in snap.items():
             setattr(cls, k, v.copy() if isinstance(v, (dict, list)) else v)
+
+
+def scratch_random() -> JavaRandom:
+    """The RNG for sites the Java original gave a fresh ``new Random()``.
+
+    Roadside-object placement and parking times, pedestrian arrivals and the
+    blockage draws all build a generator per call, seeded from the clock.  That
+    is faithful -- but it means ``Parameters.seed`` never controlled them, so a
+    run with ``ObjectMode On`` could not be repeated even with the seed pinned,
+    and the difference is large: those objects are what the traffic has to
+    negotiate around.
+
+    There is no reference stream to protect here, because an unseeded generator
+    never had one; only the distributions matter.  So with ``DETERMINISTIC``
+    set these draw from the one seeded generator and the run becomes
+    repeatable, and without it they behave exactly as they always have.
+    """
+    if Parameters.DETERMINISTIC and Parameters.random is not None:
+        return Parameters.random
+    return JavaRandom()

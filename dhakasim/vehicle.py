@@ -36,6 +36,12 @@ class Vehicle:
     ALPHA = 15.0                                   # sensitivity co-efficient for GHR/General Motors DLC model
     M = 1.0                                        # speed exponent of GHR/General Motors DLC model
     L = 2.0                                        # speed exponent of GHR/General Motors DLC model
+    # Emergency-braking limit for the modified Newtonian model only, from
+    # Kudarauskas' measurements.  Deliberately not `_max_braking` (-6, per
+    # vehicle): that one is the comfortable deceleration the other twelve
+    # models negotiate around, whereas this is the physical floor a vehicle
+    # cannot brake harder than.
+    MAX_DECELERATION = -8.5                        # m/s^2
 
     __slots__ = ("_vehicle_id", "_start_time", "_type", "_length", "_width",
                  "_number_of_strips", "_speed", "_acceleration", "_strip_index",
@@ -236,6 +242,30 @@ class Vehicle:
             acc = b
 
         return acc
+
+    @staticmethod
+    def _get_modified_newtonian_acceleration(leader, follower) -> float:
+        """Acceleration for the modified Newtonian model.
+
+        The plain Newtonian model moves at full acceleration or brakes by
+        whatever it takes to close the remaining gap in one step -- two
+        branches, and the braking one is unbounded.  This model replaces both
+        with a single continuous acceleration, which is what lets it decelerate
+        smoothly, and bounds it below at :data:`Vehicle.MAX_DECELERATION`.
+
+        The value comes from asking what constant acceleration would leave the
+        vehicle exactly at the leader's tail after one step: solving
+        ``v*dt + 0.5*a*dt^2 = dx`` for ``a``.  ``get_dx`` already nets off the
+        leader's effective length and the standstill threshold, so ``dx`` is
+        the free space ahead.
+        """
+        dt = Vehicle.TIME_STEP
+        dx = Vehicle.get_dx(leader, follower, 1)
+        acc = jdiv(2 * (dx - follower._speed * dt), dt * dt)
+        # Never accelerate harder than the vehicle can, nor brake harder than
+        # physics allows; between those it is free to pick any rate, unlike the
+        # naive model's all-or-nothing.
+        return jmax(Vehicle.MAX_DECELERATION, jmin(follower._max_acceleration, acc))
 
     @staticmethod
     def _get_krauss_acceleration(leader, follower) -> float:
@@ -1201,11 +1231,27 @@ class Vehicle:
 
         return Utilities.precision2(jmax(0.0, jmin(v_a, v_b)))
 
+    def _get_new_speed_modified_newtonian_model(self) -> float:
+        v_a = self._speed + self._max_acceleration * Vehicle.TIME_STEP
+
+        leader = self._get_a_leader_as_necessary()
+
+        if leader is None:
+            v_b = v_a
+        else:
+            self._acceleration = Vehicle._get_modified_newtonian_acceleration(
+                leader, self)
+            v_b = self._speed + self._acceleration * Vehicle.TIME_STEP
+
+        return Utilities.precision2(jmax(0.0, jmin(v_a, v_b)))
+
     def get_new_speed(self) -> float:
         """:return: new speed according to the configured car-following model"""
         model = Parameters.car_following_model
         if model == CAR_FOLLOWING_MODEL.NAIVE_MODEL:
             return self._speed + self._max_acceleration * Vehicle.TIME_STEP
+        if model == CAR_FOLLOWING_MODEL.MODIFIED_NEWTONIAN_MODEL:
+            return self._get_new_speed_modified_newtonian_model()
         if model in (CAR_FOLLOWING_MODEL.GIPPS_MODEL, CAR_FOLLOWING_MODEL.HYBRID_MODEL):
             return self._get_new_speed_gipps_model()
         if model == CAR_FOLLOWING_MODEL.KRAUSS_MODEL:
@@ -1334,8 +1380,9 @@ class Vehicle:
             leader_type = -1 if leader is None else leader.get_type()
             leader_speed = NaN if leader is None else leader.get_speed()
             leader_acc = NaN if leader is None else leader.get_acceleration()
-            os.makedirs("statistics/csv", exist_ok=True)
-            with open("statistics/csv/accident_log.csv", "a") as writer:
+            log_dir = os.path.join(Parameters.STATS_DIR, "csv")
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.join(log_dir, "accident_log.csv"), "a") as writer:
                 # sim_step, vehicle_id, type, speed, leader_type, leader_speed,
                 # acceleration, collision_penalty
                 writer.write("%d, %d, %d, %s, %s, %d, %s, %s\n"
@@ -1570,9 +1617,17 @@ class Vehicle:
                 return (object_leader.get_distance_in_segment()
                         < self.get_distance_in_segment() + self._length
                         + self._current_max_speed + threshold_distance)
-            if self._dlc_model == DLC_MODEL.GHR_MODEL:
-                # Java dereferences the (usually null) `leader` field here
-                return Vehicle.get_acceleration_ghr_model(self._leader, self) < 0
+            # case GHR_MODEL -> falls through to the gap test below.
+            #
+            # Java evaluates the GHR acceleration here against the cached
+            # `leader` field, which is null at this point, so `DLC_model 1`
+            # with `ObjectMode On` throws rather than running -- a combination
+            # the shipped `DLC_model 0` never reaches.  There is no behaviour
+            # to reproduce, and GHR has no meaningful reading here anyway: a
+            # roadside object never moves, so its closing speed is the
+            # follower's own and the acceleration comes out negative at any
+            # distance, which would mean "obstructed" always.  The sibling
+            # method above drops GHR to the same gap test for the same reason.
             return (Vehicle.get_object_gap(object_leader, self)
                     < Vehicle._get_object_distance_for_desired_speed(self))
         return False

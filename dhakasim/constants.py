@@ -15,7 +15,7 @@ import math
 
 from .javacompat import Color, PoissonDistribution, jint
 from .normal_distribution import NormalDistribution
-from .parameters import Parameters
+from .parameters import Parameters, scratch_random
 
 
 class Constants:
@@ -26,6 +26,11 @@ class Constants:
     # usual side-friction form for a curve. k = 1.7 puts a 16 m island at
     # ~24 km/h and a 29 m one at ~33 km/h, which matches observed practice.
     ROUNDABOUT_SPEED_FACTOR = 1.7
+
+    # Simulation steps a driver will wait in the wrong lane before forcing the
+    # turn anyway. Prevents a mis-positioned vehicle deadlocking its approach,
+    # since lane changing here is not destination-aware.
+    TURN_LANE_PATIENCE = 20
 
     # Fixed display colour per vehicle type, so the animation and the report
     # legend agree. Indexes match the 13 vehicle types (see report.TYPE_NAMES):
@@ -62,6 +67,17 @@ class Constants:
     MAX_NUMBER_OF_OBJECTS = 2147483647
     MAX_NUMBER_OF_VEHICLES = 2147483647
 
+    # Roadside-object density per kilometre of road, from the field study
+    # behind the simulator.  The absolute counts below are these rates times
+    # the length of the network actually loaded -- see calibrate_to_network().
+    STANDING_PEDESTRIANS_PER_KM = 15.61
+    PARKED_CARS_PER_KM = 19.77
+    PARKED_RICKSHAWS_PER_KM = 15.61
+    PARKED_CNGS_PER_KM = 4.67
+
+    # Replaced by the measured length once a network is read.  The value here
+    # is only what the counts start at beforehand, and is what the Java
+    # original used for every network regardless of size.
     TOTAL_NETWORK_ROAD_LENGTH = 1.01
 
     ROAD_BORDER_COLOR = Color.BLACK
@@ -87,7 +103,8 @@ class Constants:
         NormalDistribution(0.0640, 3.710, 0.35),
         NormalDistribution(0.0070, 5.750, 0.40),
     )
-    AVG_NUMBER_OF_STANDING_PEDESTRIANS = jint(math.ceil(15.61 * TOTAL_NETWORK_ROAD_LENGTH))
+    AVG_NUMBER_OF_STANDING_PEDESTRIANS = jint(math.ceil(
+        STANDING_PEDESTRIANS_PER_KM * TOTAL_NETWORK_ROAD_LENGTH))
 
     PARKED_CAR_COLOR = Color(216, 150, 0)
     PARKED_CAR_LENGTH = 4.5  # Unit: meter
@@ -103,7 +120,8 @@ class Constants:
         NormalDistribution(0.042, 4.48, 0.300),
         NormalDistribution(0.010, 5.92, 0.310),
     )
-    AVG_NUMBER_OF_PARKED_CARS = jint(math.ceil(19.77 * TOTAL_NETWORK_ROAD_LENGTH))
+    AVG_NUMBER_OF_PARKED_CARS = jint(math.ceil(
+        PARKED_CARS_PER_KM * TOTAL_NETWORK_ROAD_LENGTH))
 
     PARKED_RICKSHAW_COLOR = Color(216, 150, 0)
     PARKED_RICKSHAW_LENGTH = 3.0  # Unit: meter
@@ -118,7 +136,8 @@ class Constants:
         NormalDistribution(0.046, 4.65, 0.380),
         NormalDistribution(0.009, 5.88, 0.380),
     )
-    AVG_NUMBER_OF_PARKED_RICKSHAWS = jint(math.ceil(15.61 * TOTAL_NETWORK_ROAD_LENGTH))
+    AVG_NUMBER_OF_PARKED_RICKSHAWS = jint(math.ceil(
+        PARKED_RICKSHAWS_PER_KM * TOTAL_NETWORK_ROAD_LENGTH))
 
     PARKED_CNG_COLOR = Color(216, 150, 0)
     PARKED_CNG_LENGTH = 2.6  # Unit: meter
@@ -132,7 +151,8 @@ class Constants:
         NormalDistribution(0.065, 3.81, 0.27),
         NormalDistribution(0.015, 4.65, 0.32),
     )
-    AVG_NUMBER_OF_PARKED_CNGS = jint(math.ceil(4.67 * TOTAL_NETWORK_ROAD_LENGTH))
+    AVG_NUMBER_OF_PARKED_CNGS = jint(math.ceil(
+        PARKED_CNGS_PER_KM * TOTAL_NETWORK_ROAD_LENGTH))
 
     WALKING_PEDESTRIAN_MIN_BLOCKAGE = 0.50  # Unit: meter
     WALKING_PEDESTRIAN_MAX_BLOCKAGE = 7.75  # Unit: meter
@@ -153,8 +173,31 @@ class Constants:
         if cls._initialized:
             return
         cls.p = (Parameters.ACROSS_PEDESTRIAN_PER_HOUR * 1.0) / 3600
+        # PoissonDistribution defaults to its own unseeded generator, matching
+        # commons-math; hand it the shared one so pedestrian arrivals follow
+        # the seed too (see parameters.scratch_random).
         cls.road_crossing_ped_poisson = PoissonDistribution(
-            Parameters.ACROSS_PEDESTRIAN_PER_HOUR / 3600)
+            Parameters.ACROSS_PEDESTRIAN_PER_HOUR / 3600, scratch_random())
         cls.road_along_ped_poisson = PoissonDistribution(
-            Parameters.ALONG_PEDESTRIAN_PER_HOUR / 3600)
+            Parameters.ALONG_PEDESTRIAN_PER_HOUR / 3600, scratch_random())
         cls._initialized = True
+
+    @classmethod
+    def calibrate_to_network(cls, total_road_length_km: float) -> None:
+        """Scale the roadside-object targets to the network that was loaded.
+
+        The counts are a density -- so many parked cars per kilometre, from the
+        field study -- but they were baked in against one fixed road length, so
+        every network got the same absolute number of objects however large it
+        was.  Unlike :meth:`initialize` this runs per simulation, since the GUI
+        can load a different network without restarting.
+        """
+        cls.TOTAL_NETWORK_ROAD_LENGTH = total_road_length_km
+        cls.AVG_NUMBER_OF_STANDING_PEDESTRIANS = jint(math.ceil(
+            cls.STANDING_PEDESTRIANS_PER_KM * total_road_length_km))
+        cls.AVG_NUMBER_OF_PARKED_CARS = jint(math.ceil(
+            cls.PARKED_CARS_PER_KM * total_road_length_km))
+        cls.AVG_NUMBER_OF_PARKED_RICKSHAWS = jint(math.ceil(
+            cls.PARKED_RICKSHAWS_PER_KM * total_road_length_km))
+        cls.AVG_NUMBER_OF_PARKED_CNGS = jint(math.ceil(
+            cls.PARKED_CNGS_PER_KM * total_road_length_km))

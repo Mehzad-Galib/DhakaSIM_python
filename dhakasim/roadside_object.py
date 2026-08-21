@@ -5,8 +5,8 @@ from __future__ import annotations
 import math
 
 from .constants import Constants
-from .javacompat import JavaRandom, jint, jround
-from .parameters import Parameters
+from .javacompat import jint, jround
+from .parameters import Parameters, scratch_random
 from .utilities import return_x3, return_x4, return_y3, return_y4
 
 
@@ -43,7 +43,7 @@ class Object:
         self._object_width = 0.0
         self._parking_time = 0.0
 
-        random = JavaRandom()
+        random = scratch_random()
         self._random_double = random.next_double()
 
         # Initialize other fields; the parking time is estimated from a uniform
@@ -52,19 +52,19 @@ class Object:
         if object_type == 1:
             self._object_length = Constants.STANDING_PEDESTRIAN_LENGTH
             self._object_width = Constants.STANDING_PEDESTRIAN_WIDTH
-            self._parking_time = JavaRandom().next_double_range(10, 60)
+            self._parking_time = scratch_random().next_double_range(10, 60)
         elif object_type == 2:
             self._object_length = Constants.PARKED_CAR_LENGTH
             self._object_width = Constants.PARKED_CAR_WIDTH
-            self._parking_time = JavaRandom().next_double_range(100, 500)
+            self._parking_time = scratch_random().next_double_range(100, 500)
         elif object_type == 3:
             self._object_length = Constants.PARKED_RICKSHAW_LENGTH
             self._object_width = Constants.PARKED_RICKSHAW_WIDTH
-            self._parking_time = JavaRandom().next_double_range(30, 150)
+            self._parking_time = scratch_random().next_double_range(30, 150)
         elif object_type == 4:
             self._object_length = Constants.PARKED_CNG_LENGTH
             self._object_width = Constants.PARKED_CNG_WIDTH
-            self._parking_time = JavaRandom().next_double_range(60, 300)
+            self._parking_time = scratch_random().next_double_range(60, 300)
 
         self._distance_from_footpath = distance_from_footpath
 
