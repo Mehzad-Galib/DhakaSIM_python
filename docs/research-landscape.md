@@ -227,9 +227,15 @@ error measures plus t-test and Kolmogorov-Smirnov test with no SciPy
 dependency, and an HTML report that compares a sweep against the 2024 paper's
 claims.
 
+The 2025 scheduling work is ported too: `dhakasim/signal_schedule.py` carries a
+real-encoded NSGA-II, both versions of the paper's objective functions, its
+numerical simulator for scoring candidates, and the fixed-time and
+biased-random baselines it compares against. What it does *not* reproduce is
+the paper's result -- version 2 of the objective functions is the weaker of the
+two here, not the stronger. README has the numbers and the mechanism.
+
 What is missing relative to the papers:
 
-- No NSGA-II or any signal optimisation. The 2025 scheduling work is not ported.
 - No polygonal GIS parser. The converter reads polyline GeoJSON, which is the
   format the 2020 paper argues against, and infers width from tags rather than
   geometry.

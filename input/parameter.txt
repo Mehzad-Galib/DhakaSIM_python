@@ -1,11 +1,11 @@
 RandomSeed 0
-SimulationSpeed 1
-SimulationEndTime 1800
+SimulationSpeed 50
+SimulationEndTime 480
 PixelPerMeter 15
 EncounterPerAccident 0.01
 StripWidth 0.5
 FootpathStripWidth 0.5
-MaximumSpeed 100.0   # km/h (network speed limit)
+MaximumSpeed 60.0   # km/h; Miami and Riyadh override to 100 in defaults.txt
 GUIMode On
 DebugMode Off
 ObjectMode On
@@ -49,5 +49,18 @@ BrakeHard Off
 ReportAnimationFrames 24
 Network kakrail_corridor
 TimeOfDay -1
-GeometryMode Off
+GeometryMode On
+# Traffic signal scheduling (Rahaman et al., IEEE Access 2025).  One of
+# fixed, biased-random, moo-v1, moo-v2.  "fixed" is the original behaviour:
+# every approach gets SignalChangeDuration seconds of green, in turn.
+SignalMode fixed
+SignalObjectiveWeight 0.5   # W in Eq 6; the paper finds this barely matters
+SignalMotorizedWeight 0.2   # w in Eq 3; this one matters, lower is better
+SignalGreenMin 5.0
+SignalGreenMax 600.0
+SignalPopulation 50
+SignalEvaluations 2000
 Render3D Off
+# How the 3D view draws vehicles: line (outlined silhouettes) or solid
+# (shaded faces).  Line is about a third fewer canvas items per frame.
+Render3DStyle line

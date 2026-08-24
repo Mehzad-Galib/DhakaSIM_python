@@ -42,6 +42,7 @@ from __future__ import annotations
 import math
 
 from .constants import Constants
+from .parameters import Parameters
 from . import utilities as Utilities
 
 # --------------------------------------------------------------------------
@@ -63,6 +64,42 @@ SKY_COLOR = "#dae7f2"
 GROUND_COLOR = "#e6e3da"          # the ground plane the network sits on
 SHADOW_COLOR = "#9aa0a8"          # roughly the road fill at 72% brightness
 HORIZON_COLOR = "#c3ccd6"
+
+#: Line-art style.  The face a part shows the camera is not painted in its own
+#: shaded colour; the part is drawn once as its outline over a pale wash of
+#: the same colour.  The wash is not decoration -- it is what stops the drawing
+#: turning into a thicket the moment two vehicles overlap, because an unfilled
+#: outline hides nothing behind it -- and keeping the vehicle's own hue in it
+#: is what lets a bus still read as purple and a CNG as green.
+#:
+#: The outline is darkened to a *luminance ceiling* rather than by a fixed
+#: factor.  Simply multiplying leaves a white truck or a silver car drawn in
+#: near-white on a near-white road, where it disappears; capping how bright
+#: the line may be guarantees every type holds against the road whatever its
+#: body colour.
+LINE_LUMA_CEILING = 118.0   # 0-255, the brightest an outline may be
+LINE_OUTLINE = 0.55         # and never brighter than this fraction of the body
+LINE_FILL_BLEND = 0.84      # how far the wash is carried towards white
+LINE_SHADOW = "#c3c8cf"
+
+_line_cache: dict = {}
+
+
+def _line_colours(rgb):
+    """``(fill, outline)`` for one part in line style, cached like _shaded."""
+    hexed = _line_cache.get(rgb)
+    if hexed is None:
+        luma = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+        factor = min(LINE_OUTLINE, LINE_LUMA_CEILING / max(luma, 1.0))
+        outline = "#%02x%02x%02x" % tuple(
+            int(_clamp(component * factor, 0, 255)) for component in rgb)
+        blend = LINE_FILL_BLEND
+        fill = "#%02x%02x%02x" % tuple(
+            int(_clamp(component + (255 - component) * blend, 0, 255))
+            for component in rgb)
+        hexed = (fill, outline)
+        _line_cache[rgb] = hexed
+    return hexed
 
 GLASS = (58, 76, 92)
 TYRE = (34, 34, 38)
@@ -373,6 +410,15 @@ class Scene3D:
     #: anyway, so it is drawn as one.
     LOD_PIXELS = 13.0
 
+    #: Shortest a *lone* line may project to and still be drawn, in pixels.
+    #: Aimed squarely at the lane markings.  Painting a network's dividers
+    #: costs 979 canvas items at Khamarbari against 204 for every kerb in the
+    #: network put together, and the median dash lands three pixels long -- so
+    #: the majority of a 3D frame goes on marks the eye cannot resolve.  Lines
+    #: that chain into a kerb are never dropped however short they are, only
+    #: ones that stand alone, so an outline can never come out gapped.
+    MIN_LINE_PIXELS = 3.0
+
     def __init__(self, canvas):
         self.canvas = canvas
         self.camera = Camera()
@@ -380,11 +426,20 @@ class Scene3D:
         self.width = 1
         self.height = 1
         self.show_shadows = True
+        # "solid" is the original shaded-face look; "line" draws every prop as
+        # an outline instead.  Read once, here, so that a scene handed to the
+        # report renders in whatever style the run used.
+        self.style = getattr(Parameters, "RENDER_3D_STYLE", "solid")
         self._color = (0, 0, 0)
         self._stroke = 1.0
         self._font = ("Serif", 12)
         self._prop = None
-        self._props = []       # (depth, [(screen points, colour), ...])
+        # A kerb arrives as a run of separate draw_line calls, each starting
+        # where the last one ended.  Held here until the chain breaks, then
+        # drawn as a single polyline: one canvas item for a whole kerb rather
+        # than one per point pair.
+        self._chain = None     # (colour, width, [x0, y0, x1, y1, ...])
+        self._props = []       # (depth, [(screen points, fill, outline), ...])
         self._labels = []      # (depth, x, y, text, colour, anchor, size)
         self._extent = None
         self._focal = 1.0
@@ -450,11 +505,12 @@ class Scene3D:
 
     def flush(self) -> None:
         """Paint the raised geometry, farthest vehicle first."""
+        self._flush_chain()
         canvas = self.canvas
         self._props.sort(key=lambda item: -item[0])
         for _depth, faces in self._props:
-            for points, colour in faces:
-                canvas.create_polygon(points, fill=colour, outline="")
+            for points, fill, outline in faces:
+                canvas.create_polygon(points, fill=fill, outline=outline)
         for _depth, x, y, text, colour, anchor, size in sorted(
                 self._labels, key=lambda item: -item[0]):
             font = ("Segoe UI", size, "bold")
@@ -541,6 +597,14 @@ class Scene3D:
     def set_color(self, color) -> None:
         self._color = (color.get_red(), color.get_green(), color.get_blue())
 
+    def set_alpha(self, fraction) -> None:
+        """Ignored: the 3D scene paints solid models, not washes.
+
+        Present because the drawing-surface protocol requires every surface to
+        answer every call -- trace replay drives all three through the same
+        code path.
+        """
+
     def set_stroke(self, width) -> None:
         self._stroke = width
 
@@ -579,6 +643,7 @@ class Scene3D:
                                     (x2 - hx, y2 - hy, 0.0),
                                     (x1 - hx, y1 - hy, 0.0)])
             if ribbon:
+                self._flush_chain()
                 self.canvas.create_polygon(ribbon, fill=_shaded(self._color, 1.0),
                                            outline="")
             return
@@ -593,11 +658,50 @@ class Scene3D:
             size = max(4.0, min(14.0, width * 3.0))
             opts["arrow"] = "last"
             opts["arrowshape"] = (size * 1.6, size * 2.0, size * 0.7)
-        self.canvas.create_line(points[0], points[1], points[2], points[3],
-                                fill=_shaded(self._color, 1.0), width=width,
-                                **opts)
+        colour = _shaded(self._color, 1.0)
+        if arrow:
+            self._flush_chain()
+            self.canvas.create_line(points[0], points[1], points[2], points[3],
+                                    fill=colour, width=width, **opts)
+            return
+
+        chain = self._chain
+        if (chain is not None and chain[0] == colour
+                and abs(chain[1] - width) < 0.51
+                and abs(chain[2][-2] - points[0]) < 0.01
+                and abs(chain[2][-1] - points[1]) < 0.01):
+            chain[2].append(points[2])
+            chain[2].append(points[3])
+            return
+        self._flush_chain()
+        self._chain = (colour, width, [points[0], points[1],
+                                       points[2], points[3]])
+
+    def _flush_chain(self) -> None:
+        """Draw the kerb run being collected, if it is worth drawing.
+
+        Called before anything else reaches the canvas, so that buffering a
+        kerb cannot move it above the junction patch that is meant to cover
+        it.  Paint order in this renderer is the order the calls arrive in.
+        """
+        chain = self._chain
+        if chain is None:
+            return
+        self._chain = None
+        colour, width, points = chain
+        if len(points) < 4:
+            return
+        if len(points) == 4:
+            # A line on its own is road paint, not a kerb: drop it when it is
+            # too small to read.  A chain of two or more is structure and is
+            # always drawn.
+            if math.hypot(points[2] - points[0],
+                          points[3] - points[1]) < self.MIN_LINE_PIXELS:
+                return
+        self.canvas.create_line(*points, fill=colour, width=width)
 
     def fill_polygon(self, xs, ys, n) -> None:
+        self._flush_chain()
         if self._prop is not None and n == 4:
             self._fill_prop(xs, ys)
             return
@@ -607,6 +711,7 @@ class Scene3D:
                                        outline="")
 
     def fill_oval(self, x, y, w, h) -> None:
+        self._flush_chain()
         cx, cy = x + w / 2.0, y + h / 2.0
         if self._prop is not None:
             # A pedestrian arrives as a circle; stand a person on its centre.
@@ -620,6 +725,7 @@ class Scene3D:
                                        outline="")
 
     def draw_oval(self, x, y, w, h) -> None:
+        self._flush_chain()
         points = self._project(_disc(x + w / 2.0, y + h / 2.0, w / 2.0, h / 2.0))
         if len(points) < 6:
             return
@@ -703,7 +809,15 @@ class Scene3D:
                 (ox + fx + rx + sx, oy + fy + ry + sy, 0.0),
                 (ox + rx + sx, oy + ry + sy, 0.0)])
             if shadow:
-                self.canvas.create_polygon(shadow, fill=SHADOW_COLOR, outline="")
+                # In line style the shadow is an outline too, or a solid grey
+                # blob is the heaviest mark on the page and every vehicle
+                # looks like it is sitting in a puddle.
+                if self.style == "line":
+                    self.canvas.create_polygon(shadow, fill="",
+                                               outline=LINE_SHADOW)
+                else:
+                    self.canvas.create_polygon(shadow, fill=SHADOW_COLOR,
+                                               outline="")
 
         if not detailed:
             # Too small to resolve: one block, and no shadow either -- at this
@@ -713,12 +827,49 @@ class Scene3D:
         base = self._color
         ppm = self.pixel_per_meter
         eye = self._eye
+        line = self.style == "line"
         faces = []
         for part in model:
             _emit_box(faces, self._project, eye, base, ppm,
-                      ox, oy, fx, fy, rx, ry, part)
+                      ox, oy, fx, fy, rx, ry, part, line)
         if faces:
             self._props.append((depth, faces))
+
+
+def _silhouette(points):
+    """Outline of a projected box: the convex hull of the points it shows.
+
+    A box is convex, so the hull of the corners on its camera-facing faces is
+    exactly its silhouette -- one closed outline in place of three filled
+    faces.  Monotone chain, on at most twelve points, which is cheaper than
+    the three polygons it replaces are to hand to the canvas.
+
+    Written here rather than borrowed from road_geometry because a drawing
+    surface should not need to know about road geometry; the dependency runs
+    the other way round.
+    """
+    pts = sorted(set(points))
+    if len(pts) < 3:
+        return []
+    def half(order):
+        chain = []
+        for point in order:
+            while len(chain) >= 2:
+                (ax, ay), (bx, by) = chain[-2], chain[-1]
+                if ((bx - ax) * (point[1] - ay)
+                        - (by - ay) * (point[0] - ax)) > 0:
+                    break
+                chain.pop()
+            chain.append(point)
+        return chain[:-1]
+    hull = half(pts) + half(reversed(pts))
+    if len(hull) < 3:
+        return []
+    out = []
+    for x, y in hull:
+        out.append(x)
+        out.append(y)
+    return out
 
 
 def _disc(cx, cy, rx, ry, steps=28):
@@ -728,11 +879,19 @@ def _disc(cx, cy, rx, ry, steps=28):
             for i in range(steps)]
 
 
-def _emit_box(faces, project, eye, base, ppm, ox, oy, fx, fy, rx, ry, part):
-    """Append the camera-facing faces of one model part to ``faces``.
+def _emit_box(faces, project, eye, base, ppm, ox, oy, fx, fy, rx, ry, part,
+              line=False):
+    """Append one model part to ``faces`` as ``(points, fill, outline)``.
 
-    The bottom face is never emitted: a part either sits on the road or sits on
-    another part, so it is never the thing you see.
+    Solid style emits the camera-facing faces, each shaded by how much sun it
+    catches.  The bottom face is never emitted: a part either sits on the road
+    or sits on another part, so it is never the thing you see.
+
+    Line style emits the same part as a single outlined silhouette instead --
+    a third of the canvas items for the same shape, and no per-face lighting
+    to work out.  The faces still have to be found and clipped, because the
+    silhouette is built from their corners; what goes away is three fills, and
+    on this renderer the canvas is the expensive half.
     """
     u0, u1, v0, v1, z0, z1, side_spec, top_spec = part
 
@@ -746,6 +905,7 @@ def _emit_box(faces, project, eye, base, ppm, ox, oy, fx, fy, rx, ry, part):
            sum(p[1] for p in c) / 8.0,
            sum(p[2] for p in c) / 8.0)
 
+    seen = []
     side_rgb = (side_spec if isinstance(side_spec, tuple)
                 else tuple(comp * side_spec for comp in base))
     top_rgb = (top_spec if isinstance(top_spec, tuple)
@@ -781,9 +941,22 @@ def _emit_box(faces, project, eye, base, ppm, ox, oy, fx, fy, rx, ry, part):
         points = project([c[i] for i in indices])
         if not points:
             continue
+        if line:
+            # Collected rather than drawn: the silhouette is the hull of every
+            # visible face's corners, so nothing can be emitted until all of
+            # them have been clipped.
+            seen.extend((points[i], points[i + 1])
+                        for i in range(0, len(points) - 1, 2))
+            continue
         lit = nx * _SUN[0] + ny * _SUN[1] + nz * _SUN[2]
         light = _AMBIENT + (1.0 - _AMBIENT) * (lit if lit > 0.0 else 0.0)
-        faces.append((points, _shaded(rgb, light)))
+        faces.append((points, _shaded(rgb, light), ""))
+
+    if line and seen:
+        outline = _silhouette(seen)
+        if outline:
+            fill_hex, line_hex = _line_colours(side_rgb)
+            faces.append((outline, fill_hex, line_hex))
 
 
 def network_extent(link_list, pixel_per_meter):

@@ -46,6 +46,12 @@ def _apply_overrides(argv) -> None:
                 changed = True
             except ValueError:
                 print(f"ignoring non-integer --seed {argv[i + 1]!r}")
+    # The selected network's own defaults land between parameter.txt and the
+    # command line: a place's speed limit should beat the global default, and
+    # an explicit --set should beat both.
+    if Utilities.apply_network_defaults(Parameters.NETWORK_DIR):
+        changed = True
+
     # --set Name=Value, repeatable, for any setting parameter.txt understands.
     for i, arg in enumerate(argv):
         if arg != "--set" or i + 1 >= len(argv):

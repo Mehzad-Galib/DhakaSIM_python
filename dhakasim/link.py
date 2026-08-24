@@ -49,6 +49,16 @@ class Link:
     def add_segment(self, segment) -> None:
         self._segment_list.append(segment)
 
+    def clear_segments(self) -> None:
+        """Drop every segment, ready for a fresh set.
+
+        Used when GeometryMode reshapes a link after it has been read -- an
+        arm pulled back to the edge of a roundabout, say.  The segments are
+        rebuilt rather than edited because a Segment measures itself in its
+        constructor.
+        """
+        self._segment_list = []
+
     def get_number_of_segments(self) -> int:
         return len(self._segment_list)
 

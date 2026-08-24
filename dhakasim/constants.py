@@ -26,6 +26,12 @@ class Constants:
     # usual side-friction form for a curve. k = 1.7 puts a 16 m island at
     # ~24 km/h and a 29 m one at ~33 km/h, which matches observed practice.
     ROUNDABOUT_SPEED_FACTOR = 1.7
+    # Width of the circulatory carriageway, in metres: the ring of road
+    # between the island and the outer kerb.  Two circulating lanes, which is
+    # what both surveyed circles have.  A `roundabout` line in geometry.txt may
+    # state its own width as a third value.  It is not the width of the widest
+    # entry: an approach arriving on seven lanes still circulates on two.
+    ROUNDABOUT_CIRCULATORY_WIDTH = 7.0
 
     # Simulation steps a driver will wait in the wrong lane before forcing the
     # turn anyway. Prevents a mis-positioned vehicle deadlocking its approach,
@@ -38,7 +44,7 @@ class Constants:
     # (10-11) a grey family; CNG is Dhaka-green.
     VEHICLE_TYPE_COLORS = (
         (0, 160, 160),    # 0  bicycle      - teal
-        (230, 130, 20),   # 1  rickshaw     - orange
+        (224, 102, 12),   # 1  rickshaw     - deep orange
         (140, 90, 40),    # 2  van / cart   - brown
         (40, 110, 220),   # 3  motorbike    - blue
         (210, 50, 50),    # 4  car          - red
@@ -52,12 +58,58 @@ class Constants:
         (0, 0, 0),        # 12 pedestrian   - black
     )
     pedestrian_color = Color.BLACK
-    road_border_color = Color.BLACK
+    # Dark slate rather than pure black: the edge has to hold its own against
+    # a white background without drowning the painted lane dividers.
+    road_border_color = Color(58, 65, 73)
     # Filled road surface; junctions are filled with the same colour so that
     # intersections read as one smooth area instead of a tangle of kerb stubs.
-    road_fill_color = Color(176, 182, 190)
+    # White, like an engineering plan: the kerb draws the road and the fill is
+    # there to cover what lies under it, not to colour it in.  A whisker off
+    # pure white and no more -- the background is white too, and at report
+    # scale the kerb is a sub-pixel line, so a carriageway with no tint at all
+    # would leave the road with nothing to be seen by.  This is also the
+    # colour the 3D view lays on its pale ground.  The markings below are grey
+    # for the same reason.
+    road_fill_color = Color(246, 247, 249)
     # central island of a roundabout (planted, so a muted green)
     island_fill_color = Color(198, 214, 190)
+    #: Painted lane dividers.  Grey, because the carriageway they are painted
+    #: on is white: real road markings are pale against dark asphalt, but a
+    #: pale marking on a white road is not there at all.
+    lane_marking_color = Color(152, 160, 170)
+    #: Drawn over map imagery instead of the three colours above.  Aerial
+    #: photography is dark, busy and every colour at once, so the kerb is a
+    #: near-black slate that holds against all of it, and the markings a mid
+    #: grey that reads on the white wash without competing with the kerb.  An
+    #: earlier version used indigo, which was chosen against street-map
+    #: rendering; over photography it only tinted the road blue.
+    overlay_border_color = Color(30, 38, 48)
+    overlay_marking_color = Color(122, 132, 145)
+    #: Carriageway drawn over imagery: white, and painted solid.
+    overlay_fill_color = Color(255, 255, 255)
+    #: How solid that paint is.  This used to be a wash at just under a half,
+    #: on the argument that a reader wants to see the photograph under the
+    #: road.  They do not: what a wash actually gives is a dithered grey that
+    #: reads as neither road nor imagery, and every place the arms, the
+    #: junction patch and the connectors overlap comes out a different shade,
+    #: so the junction looks blotched exactly where it matters most.  Solid,
+    #: the road is a road and the imagery is context around it.  The stipple
+    #: machinery stays -- ``set_alpha`` is part of the drawing-surface
+    #: protocol and the islands and the 3D view still use it -- but at 1.0 the
+    #: canvas takes the fast path and never dithers.
+    OVERLAY_FILL_ALPHA = 1.0
+
+    #: Metres added to every carriageway *when drawing over map imagery*, and
+    #: nowhere else.  A rendered road width is a cartographic choice: OSM draws
+    #: a trunk road about eleven metres wide whatever it measures, and a wide
+    #: street gets no wider than a narrow one.  A survey carriageway laid over
+    #: that leaves the casing sticking out along both kerbs, which reads as the
+    #: model being in the wrong place when it is not.  Six metres covers the
+    #: casing on the classes the Dhaka networks use without swallowing the
+    #: footpath.  The simulation never sees it -- strips, capacity and every
+    #: statistic come from the real width in ``link.txt``.  Set to 0.0 to draw
+    #: the surveyed width exactly.
+    OVERLAY_WIDEN_METRES = 6.0
     background_color = Color.WHITE  # Color(105, 105, 105) / Color.DARK_GRAY
     DEFAULT_SCALE = 5.0
     TIME_STEP = 1.0
@@ -90,7 +142,14 @@ class Constants:
     road_crossing_ped_poisson = None
     road_along_ped_poisson = None
 
-    STANDING_PEDESTRIAN_COLOR = Color(216, 150, 0)
+    # --- side friction ----------------------------------------------------
+    # Parked vehicles and standing pedestrians are obstructions, not traffic,
+    # so they share a hazard-yellow family that no moving vehicle uses.  They
+    # were all one amber before, which sat close enough to the rickshaw's
+    # orange that a parked object and a moving one read the same at a glance.
+    # Within the family they differ by lightness rather than hue, so the group
+    # still reads as one thing while its members stay tellable apart.
+    STANDING_PEDESTRIAN_COLOR = Color(252, 220, 88)   # bright yellow
     STANDING_PEDESTRIAN_LENGTH = PEDESTRIAN_SIZE  # Unit: meter
     STANDING_PEDESTRIAN_WIDTH = PEDESTRIAN_SIZE  # Unit: meter
     STANDING_PEDESTRIAN_TIME_LIMIT_FACTOR = 50
@@ -106,7 +165,7 @@ class Constants:
     AVG_NUMBER_OF_STANDING_PEDESTRIANS = jint(math.ceil(
         STANDING_PEDESTRIANS_PER_KM * TOTAL_NETWORK_ROAD_LENGTH))
 
-    PARKED_CAR_COLOR = Color(216, 150, 0)
+    PARKED_CAR_COLOR = Color(226, 190, 48)            # gold
     PARKED_CAR_LENGTH = 4.5  # Unit: meter
     PARKED_CAR_WIDTH = 1.7  # Unit: meter
     PARKED_CAR_TIME_LIMIT_FACTOR = STANDING_PEDESTRIAN_TIME_LIMIT_FACTOR * 10
@@ -123,7 +182,7 @@ class Constants:
     AVG_NUMBER_OF_PARKED_CARS = jint(math.ceil(
         PARKED_CARS_PER_KM * TOTAL_NETWORK_ROAD_LENGTH))
 
-    PARKED_RICKSHAW_COLOR = Color(216, 150, 0)
+    PARKED_RICKSHAW_COLOR = Color(255, 240, 165)      # pale straw
     PARKED_RICKSHAW_LENGTH = 3.0  # Unit: meter
     PARKED_RICKSHAW_WIDTH = 1.0  # Unit: meter
     PARKED_RICKSHAW_TIME_LIMIT_FACTOR = PARKED_CAR_TIME_LIMIT_FACTOR // 5
@@ -139,7 +198,7 @@ class Constants:
     AVG_NUMBER_OF_PARKED_RICKSHAWS = jint(math.ceil(
         PARKED_RICKSHAWS_PER_KM * TOTAL_NETWORK_ROAD_LENGTH))
 
-    PARKED_CNG_COLOR = Color(216, 150, 0)
+    PARKED_CNG_COLOR = Color(196, 158, 24)            # dark gold
     PARKED_CNG_LENGTH = 2.6  # Unit: meter
     PARKED_CNG_WIDTH = 1.3  # Unit: meter
     PARKED_CNG_TIME_LIMIT_FACTOR = PARKED_CAR_TIME_LIMIT_FACTOR // 5

@@ -29,6 +29,7 @@ import math
 from .constants import Constants
 from .javacompat import Color
 from .parameters import Parameters
+from . import basemap as basemap_module
 from . import road_geometry
 
 # The road surfaces in the report are taken straight from the colours the live
@@ -57,6 +58,7 @@ class _SVGGraphics:
         self._ty = ty
         self._c = "#000000"
         self._w = 1.0
+        self._alpha = 1.0
         self.parts = []
 
     def set_transform(self, *a):
@@ -68,6 +70,13 @@ class _SVGGraphics:
 
     def end_prop(self):
         pass
+
+    def set_alpha(self, fraction):
+        """Real opacity, unlike the canvas, which can only dither a stipple."""
+        self._alpha = max(0.0, min(1.0, float(fraction)))
+
+    def _opacity(self):
+        return "" if self._alpha >= 0.999 else f' fill-opacity="{self._alpha:.2f}"'
 
     def set_color(self, c):
         self._c = c.to_hex() if hasattr(c, "to_hex") else c
@@ -87,13 +96,14 @@ class _SVGGraphics:
     def fill_polygon(self, xs, ys, n):
         pts = " ".join(f"{self._tx(xs[i]):.1f},{self._ty(ys[i]):.1f}"
                        for i in range(n))
-        self.parts.append(f'<polygon points="{pts}" fill="{self._c}"/>')
+        self.parts.append(
+            f'<polygon points="{pts}" fill="{self._c}"{self._opacity()}/>')
 
     def fill_oval(self, x, y, w, h):
         self.parts.append(
             f'<ellipse cx="{self._tx(x + w / 2):.1f}" cy="{self._ty(y + h / 2):.1f}" '
             f'rx="{w / 2 * self._s:.1f}" ry="{h / 2 * self._s:.1f}" '
-            f'fill="{self._c}"/>')
+            f'fill="{self._c}"{self._opacity()}/>')
 
     def draw_oval(self, x, y, w, h):
         self.parts.append(
@@ -230,25 +240,60 @@ class RunRecorder:
         self.scale = self.ppm / self.k
 
         # The road geometry the GUI paints, built once at the simulator's scale.
-        self.geometry = road_geometry.build(processor.link_list,
-                                            processor.node_list, self.k)
+        # Drawn wider over imagery, for the reason in Constants -- the report
+        # has to agree with the window about the shape of the road.  Whether
+        # there *is* imagery is settled here rather than read off
+        # ``self.basemap``, which is not built until the frame is sized, and
+        # the geometry has to exist before that to size it.
+        self.has_basemap = basemap_module.BaseMap.load(
+            Parameters.NETWORK_DIR, processor.link_list,
+            processor.node_list) is not None
+        self.geometry = road_geometry.build(
+            processor.link_list, processor.node_list, self.k,
+            widen=(Constants.OVERLAY_WIDEN_METRES if self.has_basemap
+                   else 0.0))
 
         # Work out where every label will sit *before* fixing the canvas, so
         # the frame can be sized to include the labels rather than clipping
         # them. Everything here is in un-shifted simulation pixels (metres * k);
         # the scale and translation are applied once the extent is known.
         self.labels = []
+        # Two extents, not one.  ``road`` is the carriageway and nothing else,
+        # and it is what the frame gets centred on; ``extent`` is everything
+        # that has to fit inside the frame, labels included.
+        road = []
         extent = []
-        quads, hulls, discs = self.geometry
-        for qxs, qys in quads:                   # the painted road surface
-            extent.extend(zip(qxs, qys))
-        for hxs, hys, cx, cy, radius in hulls:   # junction patches
-            extent.append((cx - radius, cy - radius))
-            extent.append((cx + radius, cy + radius))
-            extent.extend(zip(hxs, hys))
-        for cx, cy, r in discs:                  # roundabout islands
-            extent.append((cx - r, cy - r))
-            extent.append((cx + r, cy + r))
+        (_quads, hulls, discs, connectors,
+         _markings, carriage) = self.geometry
+        for near, far in carriage:               # the painted road surface
+            road.extend(near)
+            road.extend(far)
+        for cxs, cys in connectors:              # turning paths, which swing
+            road.extend(zip(cxs, cys))           # wider than the patch
+        for hxs, hys, cx, cy, radius, _kerb in hulls:   # junction patches
+            road.append((cx - radius, cy - radius))
+            road.append((cx + radius, cy + radius))
+            road.extend(zip(hxs, hys))
+        for cx, cy, _r, outer in discs:          # roundabouts, ring and all
+            road.append((cx - outer, cy - outer))
+            road.append((cx + outer, cy + outer))
+        extent.extend(road)
+        # Street names sit on the carriageway itself, so they are kept apart
+        # from self.labels, which carries leader lines and a 3D counterpart
+        # that a road name has no use for.
+        self.link_labels = []
+        for link in processor.link_list:
+            link_name = Parameters.LINK_NAMES.get(link.get_id(),
+                                                  str(link.get_id()))
+            count = link.get_number_of_segments()
+            if count <= 0:
+                continue
+            seg = link.get_segment(count // 2)
+            mx = (seg.get_start_x() + seg.get_end_x()) / 2.0 * self.k
+            my = (seg.get_start_y() + seg.get_end_y()) / 2.0 * self.k
+            self.link_labels.append((link_name, mx, my))
+            extent.append((mx, my))
+
         for node in processor.node_list:
             name = Parameters.NODE_NAMES.get(node.get_id(), str(node.get_id()))
             px, py = self._node_point(processor, node)
@@ -274,24 +319,46 @@ class RunRecorder:
             extent.append((lx + left, ly - 16.0 / self.scale))
             extent.append((lx + left + text_w, ly + 6.0 / self.scale))
 
-        minx = min(p[0] for p in extent)
-        maxx = max(p[0] for p in extent)
-        miny = min(p[1] for p in extent)
-        maxy = max(p[1] for p in extent)
-        # leave room for the north arrow and the scale bar as well
+        # Centre the frame on the carriageway rather than on the whole
+        # picture.  A node name is pushed well clear of the roads and is as
+        # long as the street happens to be called, so a frame sized to
+        # everything drawn slides the junction sideways by however far the
+        # longest name overhangs -- a couple of hundred pixels at Khamarbari,
+        # which is exactly the lopsidedness the animation had.  The names
+        # still have to fit, so each half-width is taken out to whichever
+        # reaches further, road or label, and then matched on the other side.
+        mid_x = (min(p[0] for p in road) + max(p[0] for p in road)) / 2.0
+        mid_y = (min(p[1] for p in road) + max(p[1] for p in road)) / 2.0
+        half_w = max(max(abs(p[0] - mid_x) for p in extent), 1.0)
+        half_h = max(max(abs(p[1] - mid_y) for p in extent), 1.0)
+        minx, maxx = mid_x - half_w, mid_x + half_w
+        miny, maxy = mid_y - half_h, mid_y + half_h
+        # leave room for the north arrow and the scale bar as well.  Half of
+        # it goes into the offset: added to the size alone it would push the
+        # picture back off centre by half a pad.
         pad = 24.0
-        self.TXv = margin - minx * self.scale
-        self.TYv = margin - miny * self.scale
+        self.TXv = margin + pad / 2.0 - minx * self.scale
+        self.TYv = margin + pad / 2.0 - miny * self.scale
         self.W = int((maxx - minx) * self.scale + 2 * margin + pad)
         self.H = int((maxy - miny) * self.scale + 2 * margin + pad)
 
-        # Static background: the road network exactly as the GUI paints it --
-        # surfaces, kerbs, junction patches and roundabout islands -- followed by
-        # the report's own node markers and name labels.
+        # Map imagery underneath, when the network has any, so the report shows
+        # the same place the window does.  The flip-book repeats the whole
+        # static layer in every frame, so the picture itself is defined once
+        # and referenced from each frame; embedding it in the layer directly
+        # would multiply several megabytes by the frame count.
+        bg = []
+        self.basemap_defs = self._embed_basemap(processor)
+        self.basemap = ('<use href="#dsbasemap"/>' if self.basemap_defs else "")
+
+        # The road network exactly as the GUI paints it -- surfaces, kerbs,
+        # junction patches and roundabout islands -- followed by the report's
+        # own node markers and name labels.
         road = _SVGGraphics(self.scale, self._tx, self._ty)
         road_geometry.paint(road, processor.link_list, processor.node_list,
-                            self.k, self.geometry)
-        bg = list(road.parts)
+                            self.k, self.geometry, fill=not self.basemap)
+        bg.append(self.basemap)
+        bg.extend(road.parts)
 
         # Node names, pushed clear of the carriageway and joined back to the
         # junction with an arrow, so a name never sits on top of a road.
@@ -312,6 +379,18 @@ class RunRecorder:
                 f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}" '
                 f'font-family="Segoe UI,Arial,sans-serif" font-size="14" '
                 f'font-weight="bold" fill="#12263a">{_esc(name)}</text>')
+        # Street names, drawn on the road with the same halo treatment.
+        for name, mx_r, my_r in getattr(self, "link_labels", []):
+            mx, my = self._tx(mx_r), self._ty(my_r)
+            bg.append(
+                f'<text x="{mx:.1f}" y="{my:.1f}" text-anchor="middle" '
+                f'font-family="Segoe UI,Arial,sans-serif" font-size="11" '
+                f'fill="none" stroke="{BACKGROUND}" stroke-width="3.5" '
+                f'stroke-linejoin="round">{_esc(name)}</text>'
+                f'<text x="{mx:.1f}" y="{my:.1f}" text-anchor="middle" '
+                f'font-family="Segoe UI,Arial,sans-serif" font-size="11" '
+                f'fill="#33414d">{_esc(name)}</text>')
+
         self.bg = "".join(bg)
         self.north = self._north_arrow()
         self.furniture = self.north + self._scale_bar()
@@ -332,6 +411,46 @@ class RunRecorder:
             print(f"3D run animation disabled: {exc!r}")
             self.scene = None
 
+    #: Widest the embedded imagery is allowed to be.  The report is one
+    #: self-contained file and base64 adds a third on top of the PNG, so this
+    #: is the main thing standing between a report that opens quickly and one
+    #: that does not.
+    BASEMAP_MAX_PIXELS = 900
+
+    def _embed_basemap(self, processor) -> str:
+        """An ``<image>`` element carrying the network's imagery, or "".
+
+        Imagery is optional and a report must never fail for want of it, so
+        every way this can go wrong ends in an empty string and a plain
+        background.
+        """
+        try:
+            base = basemap_module.BaseMap.load(Parameters.NETWORK_DIR,
+                                               processor.link_list,
+                                               processor.node_list)
+            if base is None:
+                return ""
+            x = self._tx(base.left * self.k)
+            y = self._ty(base.top * self.k)
+            width = (base.right - base.left) * self.k * self.scale
+            height = (base.bottom - base.top) * self.k * self.scale
+            if width <= 0 or height <= 0:
+                return ""
+            self.basemap_credit = base.attribution
+            # No more pixels than the report draws, and never more than
+            # BASEMAP_MAX_PIXELS across: this is the single largest thing in
+            # the file, and the reader is looking at a thumbnail of a junction.
+            encoded = base.png_bytes(min(int(width) + 1, self.BASEMAP_MAX_PIXELS))
+            return ('<svg width="0" height="0" aria-hidden="true" '
+                    'style="position:absolute">'
+                    f'<defs><image id="dsbasemap" x="{x:.1f}" y="{y:.1f}" '
+                    f'width="{width:.1f}" height="{height:.1f}" '
+                    f'preserveAspectRatio="none" '
+                    f'href="data:image/png;base64,{encoded}"/></defs></svg>')
+        except Exception as exc:
+            print(f"report basemap skipped: {exc!r}")
+            return ""
+
     #: The report places node labels with SVG anchors; Scene3D speaks tkinter's.
     _TK_ANCHOR = {"start": "sw", "end": "se", "middle": "s"}
 
@@ -346,10 +465,13 @@ class RunRecorder:
         """
         scene, camera = self.scene, self.scene.camera
         x0, y0, x1, y1 = extent
-        # The carriageway, plus where the names sit, so nothing is left hanging
-        # over the edge of the frame.
-        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-        corners += [(lx, ly) for _n, lx, ly, _nx, _ny, _a in self.labels3]
+        # The carriageway is what the shot is aimed at; the names only have to
+        # fit in it.  Measuring both off one list would let a long name on one
+        # side swing the camera away from the junction, which is the same
+        # lopsidedness the plan view had.
+        ground = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        corners = ground + [(lx, ly)
+                            for _n, lx, ly, _nx, _ny, _a in self.labels3]
 
         for _ in range(40):
             scene.begin_frame(self.W3, self.H3, self.k)
@@ -358,18 +480,22 @@ class RunRecorder:
                 camera.distance *= 1.5          # some of it is behind the lens
                 continue
             pts = [scene._screen(v) for v in view]
-            left = min(p[0] for p in pts)
-            right = max(p[0] for p in pts)
+            aim = pts[:len(ground)]
+            centre_x = (min(p[0] for p in aim) + max(p[0] for p in aim)) / 2.0
             top = min(p[1] for p in pts)
             bottom = max(p[1] for p in pts)
 
             # Aimed a little below centre, which leaves a band of sky along the
             # top.  Without it the ground fills the frame edge to edge and the
             # picture loses the one cue that says it is a perspective view.
-            camera.pan((self.W3 / 2.0) - (left + right) / 2.0,
+            camera.pan((self.W3 / 2.0) - centre_x,
                        (self.H3 * 0.57) - (top + bottom) / 2.0, scene.focal)
 
-            fit = max((right - left) / max(self.W3 - 2 * margin, 1),
+            # Width is measured as a reach out from the aim point rather than
+            # as a plain bounding box, so a name overhanging one side pulls
+            # the camera back instead of sliding the junction across.
+            reach = max(abs(p[0] - centre_x) for p in pts)
+            fit = max(2 * reach / max(self.W3 - 2 * margin, 1),
                       (bottom - top) / max(self.H3 - 2 * margin, 1))
             if 0.97 <= fit <= 1.03:
                 break
@@ -626,8 +752,17 @@ class RunRecorder:
         """
         if not self.ok or not self.frames:
             return None
-        out = {"animation": self._film(self.frames, self.bg, self.furniture,
-                                       BACKGROUND, "ds", self.W, self.H)}
+        film = self._film(self.frames, self.bg, self.furniture,
+                          BACKGROUND, "ds", self.W, self.H)
+        # The imagery goes in front of the film, once, where every frame's
+        # <use> can reach it: references resolve across the whole document.
+        out = {"animation": getattr(self, "basemap_defs", "") + film}
+        # Every imagery licence this can use asks for a credit wherever the
+        # picture appears, so it travels with the animation rather than being
+        # left to whoever assembles the page.
+        credit = getattr(self, "basemap_credit", "")
+        if credit and getattr(self, "basemap_defs", ""):
+            out["basemap_credit"] = credit
         if self.frames3d:
             # No scale bar in perspective, and the sky is the backdrop.
             out["animation_3d"] = self._film(self.frames3d, self.bg3d,

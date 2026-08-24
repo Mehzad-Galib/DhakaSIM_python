@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 
 from .constants import Constants
 from .javacompat import (Color, GammaDistribution, JavaRandom, jbool, jexp, jint,
@@ -10,6 +11,7 @@ from .javacompat import (Color, GammaDistribution, JavaRandom, jbool, jexp, jint
 from .parameters import (CAR_FOLLOWING_MODEL, DLC_MODEL, Parameters,
                          VEHICLE_GENERATION_RATE, scratch_random)
 from .point2d import Point2D
+from . import signal_schedule
 
 #: ``Utilities.gb`` -- static, so it is built while ``Parameters.seed`` is
 #: still 0, before ``initialize()`` randomises it.  Seeding with 0 reproduces
@@ -467,6 +469,35 @@ def get_collision_penalty() -> float:
     return gb.sample()
 
 
+def apply_network_defaults(network: str) -> dict:
+    """Apply ``input/<network>/defaults.txt``, if it has one.
+
+    Settings that belong to a place rather than to a run: a speed limit is a
+    property of the roads, so carrying it in the network folder keeps Miami's
+    100 km/h from silently applying to Dhaka the next time the intersection
+    dropdown changes.
+
+    Runs after ``parameter.txt`` and before any ``--set``, so the file supplies
+    a default the command line can still override. Returns what it set, which
+    is what lets the GUI refresh the fields it is showing.
+    """
+    applied = {}
+    if not network:
+        return applied
+    try:
+        with open(os.path.join("input", network, "defaults.txt"), "r") as reader:
+            for line in reader:
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) == 2 and apply_setting(parts[0], parts[1].strip()):
+                    applied[parts[0]] = parts[1].strip()
+    except OSError:
+        pass
+    return applied
+
+
 def initialize() -> None:
     """Read ``input/parameter.txt`` into :class:`Parameters`."""
     try:
@@ -479,6 +510,10 @@ def initialize() -> None:
                     # files have no blank lines.
                     raise IndexError("empty line in input/parameter.txt")
                 apply_setting(string_tokenizer[0], string_tokenizer[1])
+
+        # Captured here, where only parameter.txt has been read, so a network
+        # or command-line override cannot be mistaken for the file's own value.
+        Parameters.BASE_MAXIMUM_SPEED = Parameters.maximum_speed
 
         # Not in finalise_settings(): this transform feeds on its own output,
         # so running it twice would give a different answer.
@@ -549,6 +584,10 @@ def apply_setting(name: str, value: str) -> bool:
         Parameters.seed = int(value)
     elif name == "VehicleMixOverride":
         Parameters.VEHICLE_MIX_OVERRIDE = value.lower() == "on"
+    elif name == "PlaceName":
+        # Overrides place.txt, so a sweep can label a run without editing the
+        # network folder it shares with every other run.
+        Parameters.PLACE_NAME = str(value)
     elif name == "StatsDir":
         Parameters.STATS_DIR = value.strip()
     elif name == "DemandOverride":
@@ -563,6 +602,33 @@ def apply_setting(name: str, value: str) -> bool:
         Parameters.SIGNAL_CHANGE_DURATION = int(value)
         Parameters.SIGNAL_CHANGE_DURATION = jint(jround(
             Parameters.SIGNAL_CHANGE_DURATION / Constants.TIME_STEP))
+    elif name == "Render3DStyle":
+        wanted = value.strip().lower()
+        if wanted not in ("solid", "line"):
+            raise ValueError(f"Render3DStyle {value!r} is not solid or line")
+        Parameters.RENDER_3D_STYLE = wanted
+    elif name == "SignalMode":
+        wanted = value.strip().lower()
+        if wanted not in signal_schedule.MODES:
+            raise ValueError(
+                f"SignalMode {value!r} is not one of {signal_schedule.MODES}")
+        Parameters.SIGNAL_MODE = wanted
+    elif name == "SignalObjectiveWeight":
+        Parameters.SIGNAL_OBJECTIVE_WEIGHT = float(value)
+    elif name == "SignalMotorizedWeight":
+        Parameters.SIGNAL_MOTORISED_WEIGHT = float(value)
+    elif name == "SignalGreenMin":
+        Parameters.SIGNAL_GREEN_MIN = float(value)
+    elif name == "SignalGreenMax":
+        Parameters.SIGNAL_GREEN_MAX = float(value)
+    elif name == "SignalPopulation":
+        Parameters.SIGNAL_POPULATION = int(value)
+    elif name == "SignalEvaluations":
+        Parameters.SIGNAL_EVALUATIONS = int(value)
+    elif name == "SignalRandomLow":
+        Parameters.SIGNAL_RANDOM_LOW = float(value)
+    elif name == "SignalRandomHigh":
+        Parameters.SIGNAL_RANDOM_HIGH = float(value)
     elif name == "DefaultTranslateX":
         Parameters.DEFAULT_TRANSLATE_X = float(value)
     elif name == "DefaultTranslateY":

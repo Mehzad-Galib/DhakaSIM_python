@@ -1,7 +1,29 @@
 # Bijoy Sarani -- real geometry from OpenStreetMap (export (1).geojson).
-# Centre 23.764400,90.388957. Every approach is a divided dual carriageway
+# Centre 23.764519,90.388946. Every approach is a divided dual carriageway
 # (separate one-way ways in OSM), so all four carry a median.
+#
+# The centre was 23.764400,90.388957, which put the junction node 13.2 m south
+# of the crossing.  Corrected by the arms' own names, not by a best fit:
+# Bijoy Sharani, Old Airport Road and Tejgaon Link Road are each unique in the
+# extract and all three pass through the point above at 0.0 m.  Thirteen
+# metres is under half a carriageway here, so nothing looked obviously wrong
+# until the two straight arms below were asked to lie on their streets and
+# could not.
 median 0 2.0   # Bijoy Sarani (west)
 median 1 2.5   # Old Airport Rd / Chief Adviser (north)
 median 2 2.5   # Airport Rd / Farmgate (south)
 median 3 1.5   # Tejgaon Link Road (east)
+
+# Read by fit_roads.py, ignored by the simulator: leave these two as the
+# chord the survey drew rather than bending them onto the nearest road.
+#
+# Both run alongside something the matcher cannot tell from the street
+# itself.  West towards the metro, the Novo Theatre forecourt and the station
+# approach curve away from Bijoy Sarani at almost its own bearing, and the fit
+# followed them twenty-nine metres off its own chord.  North towards the Chief
+# Adviser's office, Agargaon Link Road and the Tejgaon Link ramps do the same.
+# Both arms really are straight on the ground, so the chord is not a
+# compromise here -- it is the right answer, and the fit's extra vertices were
+# noise dressed up as detail.
+straight 0     # Bijoy Sarani -> Bijoy Sarani Metro
+straight 1     # Bijoy Sarani -> Chief Adviser

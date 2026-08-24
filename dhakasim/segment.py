@@ -285,9 +285,12 @@ class Segment:
         self._accident_count = accident_count
 
     def get_strip(self, index: int) -> Strip:
-        # Java throws IndexOutOfBoundsException for an out of range index;
-        # Python would silently wrap around for negatives, so guard here.
-        if index < 0 or index >= len(self._strip_list):
+        # Java throws IndexOutOfBoundsException for an out of range index, and
+        # so does the list -- except for a negative one, which Python would
+        # silently wrap round to the far end of the road.  That is the only
+        # case worth a guard, and this is called nearly two million times a
+        # minute, so the other half of the check is worth not making.
+        if index < 0:
             raise IndexError(f"strip index {index} out of range "
                              f"[0, {len(self._strip_list)})")
         return self._strip_list[index]

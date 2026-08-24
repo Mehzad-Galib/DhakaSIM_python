@@ -643,7 +643,8 @@ def write_network(edges, out_dir: str, margin: float, tolerance: float,
         if note:
             for line in note.split("\n"):
                 f.write(f"# {line}\n")
-        f.write("#\n# GeometryMode is Off by default; turn it on to apply these.\n")
+        f.write("#\n# Applied when GeometryMode is On, which it is by "
+                "default.\n")
         if divided:
             f.write("# Medians, measured as the gap between the two one-way\n"
                     "# carriageways OSM maps a divided road as.\n")
@@ -653,6 +654,16 @@ def write_network(edges, out_dir: str, margin: float, tolerance: float,
                 f.write(f"median {link['id']} {link['median']:.1f}{comment}\n")
         else:
             f.write("# No divided roads detected in the extract.\n")
+
+    # Street names, where the source carried them.  Written separately rather
+    # than into link.txt so the simulator's own format stays byte-compatible
+    # with the Java original's reader.
+    named = [link for link in links if link["props"].get("name")]
+    if named:
+        with open(os.path.join(out_dir, "link_names.txt"), "w",
+                  encoding="utf-8") as f:
+            for link in named:
+                f.write(f"{link['id']} {link['props']['name']}\n")
 
     total_km = sum(polyline_length(link["points"]) for link in links) / 1000.0
     return {"links": len(links), "nodes": len(node_ids),

@@ -14,6 +14,9 @@ from __future__ import annotations
 import math
 import os
 from datetime import datetime, timezone, timedelta
+# Imported as a bare function: this module binds a local named
+# `html` for the page it builds, which would shadow the module.
+from html import escape as _escape
 
 from .parameters import Parameters
 
@@ -27,6 +30,15 @@ TYPE_NAMES = [
 
 # Which types are motorised (index >= 3, excluding the pedestrian type 12).
 _NON_MOTORISED = {0, 1, 2}
+
+
+#: How the option page names each SignalMode, so the report and the GUI agree.
+_SIGNAL_MODE_NAMES = {
+    "fixed": "Fixed time",
+    "biased-random": "Biased random",
+    "moo-v1": "Multi-objective v1 (Equations 1 and 2)",
+    "moo-v2": "Multi-objective v2 (Equations 3 and 4)",
+}
 
 
 def _finite(v) -> bool:
@@ -171,8 +183,12 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
          "Strip granularity on the footpath."),
         ("Network speed limit", f"{max_speed_kmh:.0f} km/h",
          "Upper speed bound applied across the network."),
+        ("Signal control", _SIGNAL_MODE_NAMES.get(params.get("signal_mode"),
+                                                  str(params.get("signal_mode"))),
+         "How each junction decides how long an approach holds a green."),
         ("Signal change interval", f"{params.get('signal_change')} s",
-         "Seconds between traffic-signal phase changes at junctions."),
+         "Green each approach gets under fixed-time control; ignored by the "
+         "scheduled modes, which set their own."),
         ("Road-crossing pedestrians", yn(params.get("across_ped")),
          "Whether pedestrians crossing the road are simulated."),
         ("Along-road pedestrians", yn(params.get("along_ped")),
@@ -260,11 +276,33 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
         for name, colour, idxs in legend_rows
     ) + "</div>"
 
+    # Side friction has its own key.  These are obstructions rather than
+    # traffic, and they are the one thing in the picture that is not in the
+    # per-type tables, so without a key a reader has no way to name them.
+    friction_html = '<div class="legend">' + "".join(
+        f'<div class="lgi"><span class="sw" style="background:{c.to_hex()}">'
+        f'</span><span>{name}</span></div>'
+        for name, c in (
+            ("Standing pedestrian", Constants.STANDING_PEDESTRIAN_COLOR),
+            ("Parked car", Constants.PARKED_CAR_COLOR),
+            ("Parked rickshaw", Constants.PARKED_RICKSHAW_COLOR),
+            ("Parked CNG", Constants.PARKED_CNG_COLOR),
+        )
+    ) + "</div>"
+
     # Bangladesh Standard Time (UTC+6, no daylight saving).
     now_bd = datetime.now(timezone.utc) + timedelta(hours=6)
     hour12 = now_bd.strftime("%I").lstrip("0") or "12"
     generated_at = (now_bd.strftime("%d %B %Y, ") + hour12
                     + now_bd.strftime(":%M %p") + " BDT")
+
+    # Where the run happened.  Both spellings are prepared here because the
+    # browser tab wants it appended and the page wants it on its own line.
+    # Escaped because PlaceName can be set from the command line, so it is
+    # not necessarily one of the strings shipped in place.txt.
+    place = _escape(Parameters.PLACE_NAME or "")
+    place_title = f" &mdash; {place}" if place else ""
+    place_heading = f"Road network: {place}" if place else "Road network: unnamed"
 
     # Embedded run animations (self-contained SVG, produced during the run --
     # no third-party dependencies).  Two views of the same frames of the same
@@ -272,10 +310,18 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
     # switched to.
     viz_html = ""
     if visual and visual.get("animation"):
+        credit = visual.get("basemap_credit")
+        blurb = ('The network from above, each vehicle a rectangle in its '
+                 'type colour.')
+        if credit:
+            blurb += (' Drawn over the aerial imagery the network was built '
+                      'from, so the model can be checked against the real '
+                      'junction.')
         viz_html += ('<h2>Run animation &mdash; plan view</h2>\n'
-                     '<p class="sub">The network from above, each vehicle a '
-                     'rectangle in its type colour.</p>\n<div class="viz">'
+                     f'<p class="sub">{blurb}</p>\n<div class="viz">'
                      + visual["animation"] + "</div>\n")
+        if credit:
+            viz_html += f'<p class="sub">{_escape(credit)}</p>\n'
     if visual and visual.get("animation_3d"):
         viz_html += ('<h2>Run animation &mdash; 3D view</h2>\n'
                      '<p class="sub">The same frames of the same run through '
@@ -291,7 +337,7 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DhakaSim Simulation Report</title>
+<title>DhakaSim Simulation Report{place_title}</title>
 <style>
   :root {{ --ink:#12263a; --muted:#5b6b7b; --line:#e2e8f0; --accent:#1b5e8c;
           --bg:#f6f8fa; --card:#ffffff; }}
@@ -299,6 +345,8 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
   body {{ font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
          color:var(--ink); background:var(--bg); margin:0; padding:32px; }}
   .wrap {{ max-width:960px; margin:0 auto; }}
+  .place {{ margin:2px 0 14px; font-size:15px; font-weight:600;
+           color:var(--accent); letter-spacing:.01em; }}
   h1 {{ font-size:26px; margin:0 0 4px; }}
   h2 {{ font-size:18px; margin:34px 0 12px; padding-bottom:6px;
         border-bottom:2px solid var(--line); }}
@@ -339,6 +387,7 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
 <body>
 <div class="wrap">
   <h1>DhakaSim &mdash; Simulation Report</h1>
+  <p class="place">{place_heading}</p>
   <p class="sub">Generated {generated_at}. Microscopic simulation of
      non-lane-based, heterogeneous traffic.</p>
 
@@ -375,6 +424,12 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
      Cars, buses and trucks span a few shades of the same hue (shown to the
      right of the label).</p>
   {legend_html}
+
+  <h2>Side-friction colour legend</h2>
+  <p class="sub">Parked vehicles and standing pedestrians block part of the
+     carriageway without moving. They share a yellow family so that they read
+     as obstructions rather than as traffic.</p>
+  {friction_html}
 
   <h2>Glossary &mdash; what each term means</h2>
   <dl>{glossary_html}</dl>

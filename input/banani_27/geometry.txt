@@ -1,4 +1,7 @@
 # Real-world geometry, derived from OpenStreetMap (export.geojson).
+# Centre 23.793460,90.408565. Kamal Ataturk Avenue x Banani Road 27,
+# taken as the midpoint of the two one-way carriageways where Road 27
+# meets them, both of which end 6 m from it in OSM.
 # Kamal Ataturk Avenue is a dual carriageway: two one-way carriageways
 # separated by a central median.
 median 0 1.5   # Kamal Ataturk Ave -> Banani Kakoli
@@ -6,3 +9,9 @@ median 3 1.5   # Kamal Ataturk Ave -> Gulshan 2
 
 # Banani Road No.27 is entry-only in the survey demand (out=0).
 oneway 2
+
+# Read by fit_roads.py, ignored by the simulator: leave this one as the chord.
+# Road 27 runs beside Road 28 and a string of plot accesses at nearly its own
+# bearing, and the fit picked its way between them into a curve the street
+# does not have.
+straight 2     # Banani 27 Kacha Bazar -> Banani Road No.27

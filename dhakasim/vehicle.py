@@ -8,6 +8,7 @@ in Java, because :mod:`dhakasim.strip` calls some of them directly.
 from __future__ import annotations
 
 import math
+import atexit
 import os
 from collections import deque
 
@@ -22,6 +23,39 @@ from .vehicle_stats import VehicleStats
 from . import utilities as Utilities
 
 PEDESTRIANS_ALONG_THE_ROAD_TYPE = Constants.PEDESTRIANS_ALONG_THE_ROAD_TYPE
+
+
+_accident_log_handle = None
+_accident_log_path = None
+
+
+def accident_log():
+    """The accident log, opened once and left open.
+
+    A near crash is a common event -- a few thousand a minute at Khamarbari --
+    and this used to make a directory, open the file, append one line and
+    close it again for every one of them.  That was about eight per cent of a
+    simulation step spent on file handles rather than on traffic.  The file is
+    still opened for append and never truncated, which is what the rest of
+    ``statistics/csv`` promises.
+    """
+    global _accident_log_handle, _accident_log_path
+    path = os.path.join(Parameters.STATS_DIR, "csv", "accident_log.csv")
+    if path != _accident_log_path:
+        # STATS_DIR can change between runs in one process, and the old handle
+        # is then pointing at the wrong file.
+        if _accident_log_handle is not None:
+            _accident_log_handle.close()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        _accident_log_handle = open(path, "a")
+        _accident_log_path = path
+    return _accident_log_handle
+
+
+@atexit.register
+def _close_accident_log():
+    if _accident_log_handle is not None:
+        _accident_log_handle.close()
 
 
 class Vehicle:
@@ -1380,16 +1414,14 @@ class Vehicle:
             leader_type = -1 if leader is None else leader.get_type()
             leader_speed = NaN if leader is None else leader.get_speed()
             leader_acc = NaN if leader is None else leader.get_acceleration()
-            log_dir = os.path.join(Parameters.STATS_DIR, "csv")
-            os.makedirs(log_dir, exist_ok=True)
-            with open(os.path.join(log_dir, "accident_log.csv"), "a") as writer:
-                # sim_step, vehicle_id, type, speed, leader_type, leader_speed,
-                # acceleration, collision_penalty
-                writer.write("%d, %d, %d, %s, %s, %d, %s, %s\n"
-                             % (Parameters.simulation_step, self.get_vehicle_id(),
-                                self.get_type(), jformat(self.get_speed(), 3),
-                                jformat(self.get_acceleration(), 3), leader_type,
-                                jformat(leader_speed, 3), jformat(leader_acc, 3)))
+            # sim_step, vehicle_id, type, speed, leader_type, leader_speed,
+            # acceleration, collision_penalty
+            accident_log().write(
+                "%d, %d, %d, %s, %s, %d, %s, %s\n"
+                % (Parameters.simulation_step, self.get_vehicle_id(),
+                   self.get_type(), jformat(self.get_speed(), 3),
+                   jformat(self.get_acceleration(), 3), leader_type,
+                   jformat(leader_speed, 3), jformat(leader_acc, 3)))
 
     def _control_speed_in_segment(self) -> bool:
         self._store_prev_speeds()
@@ -1523,16 +1555,15 @@ class Vehicle:
         """:return: the vehicle closest and in front of this among all the
         strips (None if none is in front of it)"""
         leader = None
+        nearest = 0.0
         segment = self._link.get_segment(self._segment_index)
         for i in range(self._strip_index, self._strip_index + self._number_of_strips):
-            strip = segment.get_strip(i)
-            v = strip.get_probable_leader_for_my_model(self)
-            if v is not None:
-                if leader is None:
-                    leader = v
-                else:
-                    if leader.get_distance_in_segment() > v.get_distance_in_segment():
-                        leader = v
+            v = segment.get_strip(i).get_probable_leader_for_my_model(self)
+            if v is None:
+                continue
+            distance = v.get_distance_in_segment()
+            if leader is None or nearest > distance:
+                leader, nearest = v, distance
         return leader
 
     def get_probable_object_leader(self):

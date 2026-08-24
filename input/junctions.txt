@@ -2,13 +2,12 @@
 #
 # Source: Google Maps, read off the junction centre by the project owner
 # (29 Jul 2026). These supersede the GPS fields inside the survey workbooks,
-# which were correct for Kakrail/Khamarbari/Banani 27 but carried an identical,
+# which were correct for Kakrail and Banani 27 but carried an identical,
 # low-precision and wrong coordinate for Banani 23 and Bijoy Sarani.
 #
 # network            latitude            longitude           notes
 kakrail_corridor     23.737627939020340  90.405200922276920  Kakrail Church = "Kakrail Cir" ROUNDABOUT, r=16.3 m
 kakrail_corridor     23.737393422402004  90.404243796578360  Kakrail Mosque (second junction of the corridor)
-khamarbari           23.758472688937548  90.383754676597590  "Khamar Bari Goal Chottor" ROUNDABOUT, r=28.8 m
 banani_27            23.793443383934587  90.408409787550620  Kamal Ataturk Ave dual carriageway
 banani_23            23.793246138640896  90.406170685163530  Kemal Ataturk Ave x Rd 10 / Rd 23
 bijoy_sarani         23.764399902806243  90.388957018967910  Bijoy Sarani (divided) x Kazi Nazrul Islam Ave

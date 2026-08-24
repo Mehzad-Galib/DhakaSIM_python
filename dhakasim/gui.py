@@ -11,6 +11,8 @@ the Java version, so traces stay interchangeable between the two builds.
 from __future__ import annotations
 
 import math
+import os
+import re
 import webbrowser
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -19,6 +21,7 @@ from .constants import Constants
 from .javacompat import Color, JavaRandom, jbool, jbool_str, jint, jround, jstr
 from .parameters import Parameters
 from .processor import Processor
+from . import basemap as basemap_module
 from . import render3d
 from . import road_geometry
 from . import utilities as Utilities
@@ -31,6 +34,7 @@ class CanvasGraphics:
         self.canvas = canvas
         self._color = Color.BLACK
         self._stroke = 1
+        self._stipple = ""
         self._font = ("Serif", 12)
         self.scale = 1.0
         self.translate_x = 0.0
@@ -55,6 +59,27 @@ class CanvasGraphics:
 
     def set_color(self, color) -> None:
         self._color = color
+
+    def set_alpha(self, fraction) -> None:
+        """How solid the next fills are, from 0 (invisible) to 1 (opaque).
+
+        A Tk canvas has no alpha channel, so this is dithered: the item is
+        drawn through a stipple mask that leaves a fraction of its pixels
+        unpainted.  Coarse, but it is the only translucency Tk offers, and at
+        the size a carriageway is drawn the eye reads it as a wash rather than
+        as a pattern.  ``_SVGGraphics`` implements the same call with real
+        opacity; ``Scene3D`` ignores it.
+        """
+        if fraction >= 0.95:
+            self._stipple = ""
+        elif fraction >= 0.62:
+            self._stipple = "gray75"
+        elif fraction >= 0.37:
+            self._stipple = "gray50"
+        elif fraction >= 0.15:
+            self._stipple = "gray25"
+        else:
+            self._stipple = "gray12"
 
     def set_stroke(self, width) -> None:
         self._stroke = width
@@ -85,13 +110,20 @@ class CanvasGraphics:
         for i in range(n):
             points.append(self._tx(xs[i]))
             points.append(self._ty(ys[i]))
-        self.canvas.create_polygon(points, fill=self._color.to_hex(), outline="")
+        # offset "#0,0" pins every stipple to the same origin.  Tk otherwise
+        # aligns the pattern to each item, so overlapping washes land on
+        # different pixels and compound towards opaque -- and a junction is
+        # fifty-odd overlapping quads, a hull and its connectors.
+        self.canvas.create_polygon(points, fill=self._color.to_hex(),
+                                   outline="", stipple=self._stipple,
+                                   offset="#0,0")
 
     def fill_oval(self, x, y, w, h) -> None:
         x1 = self._tx(x)
         y1 = self._ty(y)
         self.canvas.create_oval(x1, y1, x1 + w * self.scale, y1 + h * self.scale,
-                                fill=self._color.to_hex(), outline="")
+                                fill=self._color.to_hex(), outline="",
+                                stipple=self._stipple, offset="#0,0")
 
     def draw_oval(self, x, y, w, h) -> None:
         x1 = self._tx(x)
@@ -104,6 +136,15 @@ class CanvasGraphics:
         size = max(1, int(self._font[1] * self.scale))
         self.canvas.create_text(self._tx(x), self._ty(y), text=text, anchor=anchor,
                                 fill=self._color.to_hex(), font=(self._font[0], size))
+
+    def to_screen(self, x, y):
+        """World pixels to canvas coordinates.
+
+        The basemap is a raster rather than a shape, so it cannot go through
+        the drawing calls above.  It still has to land in the same place as
+        everything else, which means going through the same transform.
+        """
+        return self._tx(x), self._ty(y)
 
 
 class ProgressSlider:
@@ -139,8 +180,13 @@ class DhakaSimPanel:
         self._reference_x = -999999999
         self._reference_y = -999999999
         self._road_geometry = None
+        self._road_geometry_widen = 0.0
         self._timer = None
         self._finished = False
+        self._basemap = None
+        self._basemap_photo = None
+        self.show_basemap = True
+        self.paused = False
 
         try:
             if Parameters.TRACE_MODE:
@@ -189,6 +235,11 @@ class DhakaSimPanel:
             self.translate_x = Parameters.DEFAULT_TRANSLATE_X
             self.translate_y = Parameters.DEFAULT_TRANSLATE_Y
 
+        # Map imagery, when this network has had any fetched for it.  Absent
+        # is the normal case, so nothing downstream may assume it is there.
+        self._basemap = basemap_module.load_for_current_network(
+            self.link_list, self.node_list)
+
         # Frame the whole network for the 3D camera, and remember it as the
         # view a double-click goes back to.
         extent = render3d.network_extent(self.link_list, Parameters.pixel_per_meter)
@@ -199,7 +250,17 @@ class DhakaSimPanel:
         self._timer = self.canvas.after(max(1, Parameters.simulation_speed),
                                        self._on_timer)
 
+    def basemap_active(self) -> bool:
+        """Whether imagery is being drawn behind the plan view right now."""
+        return (self._basemap is not None and self.show_basemap
+                and not self.view_3d)
+
     def set_scale(self, scale: float) -> None:
+        # Snap to a scale the imagery can be drawn at exactly.  Tk rescales a
+        # photo by whole numbers only, so an unsnapped zoom would slide the
+        # map off the roads.  See dhakasim.basemap.
+        if self._basemap is not None and self.show_basemap:
+            scale = self._basemap.snap(scale, Parameters.pixel_per_meter)
         self.scale = scale
         if self.view_3d:
             # One zoom control for both views: the slider's 2D scale is read as
@@ -250,6 +311,11 @@ class DhakaSimPanel:
             self.frame.update_legend_counts(self.vehicle_list)
         except Exception:
             pass
+
+        # Imagery underneath everything, so the network reads as being drawn
+        # on the place rather than beside it.
+        if self.basemap_active():
+            self._draw_basemap(g2d)
 
         if self.draw_roads:
             self.draw_road_network(g2d)
@@ -306,6 +372,14 @@ class DhakaSimPanel:
         """
         canvas = self.canvas
         ink, paper = "#12263a", "#ffffff"
+
+        # --- imagery credit, bottom right ---
+        # The ODbL asks for the credit wherever the tiles are shown, so it is
+        # drawn with the furniture rather than left to the documentation.
+        if self.basemap_active():
+            canvas.create_text(width - 8, height - 6, anchor="se",
+                               text=self._basemap.attribution,
+                               fill="#33465c", font=("Segoe UI", 8))
 
         # --- north arrow, top right ---
         cx, cy = width - 46, 46
@@ -470,16 +544,100 @@ class DhakaSimPanel:
         g2d.set_color(Color.BLACK)
         g2d.draw_string(name, jint(lx), jint(ly), anchor)
 
+    def draw_link_name(self, g2d, link) -> None:
+        """Draw a link's street name along the middle of its carriageway.
+
+        Falls back to the numeric id, which is what the per-link CSV columns
+        are indexed by, so a link can always be matched between the picture and
+        the statistics.
+        """
+        name = Parameters.LINK_NAMES.get(link.get_id(), str(link.get_id()))
+        count = link.get_number_of_segments()
+        if count <= 0:
+            return
+        # Midpoint of the middle segment, which sits away from the junction
+        # patches at either end where the label would collide with node names.
+        seg = link.get_segment(count // 2)
+        x_m = (seg.get_start_x() + seg.get_end_x()) / 2.0
+        y_m = (seg.get_start_y() + seg.get_end_y()) / 2.0
+        lx = x_m * Parameters.pixel_per_meter
+        ly = y_m * Parameters.pixel_per_meter
+
+        g2d.set_font("Serif", 78)
+        halo = max(1.0, 1.2 / max(self.scale, 0.0001))
+        g2d.set_color(Color.WHITE)
+        for ox, oy in ((-halo, 0), (halo, 0), (0, -halo), (0, halo)):
+            g2d.draw_string(name, jint(lx + ox), jint(ly + oy), "s")
+        g2d.set_color(Color(40, 40, 40))
+        g2d.draw_string(name, jint(lx), jint(ly), "s")
+
+    def _draw_basemap(self, g2d) -> None:
+        """Place the map imagery under the network.
+
+        The image is cropped to what is on screen and scaled by whole numbers,
+        both of which :mod:`dhakasim.basemap` handles.  The only thing decided
+        here is where its top-left corner lands, and that goes through the same
+        transform every road does.
+        """
+        base = self._basemap
+        ppm = Parameters.pixel_per_meter
+        left, top = g2d.to_screen(base.left * ppm, base.top * ppm)
+        placed = base.scaled_region(left, top,
+                                    self.canvas.winfo_width() or 1,
+                                    self.canvas.winfo_height() or 1,
+                                    self.scale, ppm)
+        if placed is None:
+            return
+        photo, x, y = placed
+        # Tk drops a photo the moment nothing references it, and the canvas
+        # item does not count as a reference.
+        self._basemap_photo = photo
+        self.canvas.create_image(x, y, image=photo, anchor="nw")
+
+    def set_paused(self, paused: bool) -> None:
+        """Hold the run where it is, or let it carry on.
+
+        Only the stepping stops.  The view still repaints, so panning, zooming
+        and switching to the 3D camera all keep working on the held frame,
+        which is most of the point of being able to stop.
+        """
+        self.paused = bool(paused)
+        self.repaint()
+
+    def toggle_basemap(self) -> None:
+        """Show or hide the imagery.  Does nothing if none was fetched."""
+        if self._basemap is None:
+            return
+        self.show_basemap = not self.show_basemap
+        # Turning it back on re-snaps the zoom; turning it off frees it again.
+        self.set_scale(self.scale)
+
     def draw_road_network(self, g2d) -> None:
         # The road surface is painted by road_geometry.paint, which the report's
         # animation also calls, so the two pictures cannot diverge.  Cache the
         # geometry: it depends only on the network and pixelPerMeter, and
         # rebuilding it every frame is wasteful.
-        if self._road_geometry is None:
+        # Two shapes, not one: over imagery the carriageway is drawn wider, so
+        # the cache is keyed by which of the two is wanted.  Toggling the map
+        # rebuilds; it does not silently reuse the other one's geometry.
+        widen = (Constants.OVERLAY_WIDEN_METRES if self.basemap_active()
+                 else 0.0)
+        if self._road_geometry is None or self._road_geometry_widen != widen:
             self._road_geometry = road_geometry.build(
-                self.link_list, self.node_list, Parameters.pixel_per_meter)
+                self.link_list, self.node_list, Parameters.pixel_per_meter,
+                widen=widen)
+            self._road_geometry_widen = widen
+        # Over imagery the carriageway is washed rather than painted: same
+        # shapes, but a pale fill at part opacity, so the road still reads as
+        # a surface without hiding the very thing the imagery is there for.
         road_geometry.paint(g2d, self.link_list, self.node_list,
-                            Parameters.pixel_per_meter, self._road_geometry)
+                            Parameters.pixel_per_meter, self._road_geometry,
+                            fill=not self.basemap_active())
+
+        # Street names first, so a junction name drawn afterwards wins the
+        # overlap where a short link's label reaches its node.
+        for link in self.link_list:
+            self.draw_link_name(g2d, link)
 
         for node in self.node_list:
             g2d.set_color(Color.BLACK)
@@ -489,8 +647,12 @@ class DhakaSimPanel:
 
     def _on_timer(self) -> None:
         try:
-            self.action_performed()
+            if not self.paused:
+                self.action_performed()
         finally:
+            # Re-armed either way.  Cancelling the timer while paused would
+            # mean rebuilding it on resume and getting the bookkeeping in
+            # dispose() wrong; skipping the step is the whole of pausing.
             if not self._finished:
                 self._timer = self.canvas.after(max(1, Parameters.simulation_speed),
                                                self._on_timer)
@@ -531,6 +693,9 @@ class DhakaSimPanel:
                     pass
         self.trace_writer = None
         self.trace_reader = None
+        if self._basemap is not None:
+            self._basemap.forget()
+        self._basemap_photo = None
 
     def mouse_pressed(self, event) -> None:
         self._reference_x = event.x
@@ -582,191 +747,979 @@ class DhakaSimPanel:
             self.repaint()
             return
         new_scale_value = self.scale - notches * 0.004
-        self.scale = min(1.0, max(0.001, new_scale_value))
-        self.repaint()
+        # Through set_scale rather than straight onto self.scale, so a wheel
+        # zoom lands on the imagery's ladder like every other zoom does.
+        self.set_scale(min(1.0, max(0.001, new_scale_value)))
+
+
+#: The start screen's palette.  Warm charcoal rather than the usual near-black:
+#: everything this program draws is warm -- brick, dust, orange rickshaws --
+#: and a blue-grey panel in front of that reads as belonging to a different
+#: application.  The accent is not a taste decision either.  It is lifted from
+#: ``Constants.VEHICLE_TYPE_COLORS[7]``, the green this simulator has always
+#: painted a CNG, so the colour that means "go" on this screen is the same one
+#: that means "go" in the picture the screen leads to.
+#: The surfaces are glass: each one carries a light edge along its top and a
+#: shadow along its bottom, because tkinter has no per-widget alpha and a
+#: highlight is what translucency actually looks like.  ``glass_hi`` and
+#: ``glass_lo`` are those two hairlines and ``glow`` is the light behind the
+#: title.  The explanatory text was two steps too dark to read against the
+#: panel -- ``muted`` and ``faint`` are both a long way up from where they
+#: started, and the whole palette is a shade lighter to match.
+_UI = {
+    "ground": "#131211",
+    "panel": "#242120",
+    "band": "#302C29",
+    "seg_off": "#3A3634",
+    "seg_hover": "#4A4542",
+    "edge": "#443F3C",
+    "glass_hi": "#524B47",
+    "glass_lo": "#0C0B0A",
+    "glow": "#26352C",
+    "accent": "#1EA046",
+    "accent_hover": "#25B851",
+    "accent_text": "#5BD986",
+    "on_accent": "#08160D",
+    "text": "#F4F1ED",
+    "muted": "#C3BBB4",
+    "faint": "#948B84",
+}
+
+
+def _mix(colour, towards, amount):
+    """Blend two ``#rrggbb`` colours.  Every gloss on this screen is one.
+
+    A lit edge is the surface's own colour lifted towards white, so a control
+    that changes colour -- selected, hovered -- gets its highlight for free
+    rather than needing a second table of colours to keep in step with the
+    first.
+    """
+    a, b = colour.lstrip("#"), towards.lstrip("#")
+    return "#" + "".join(
+        "%02X" % round(int(a[i:i + 2], 16) * (1.0 - amount)
+                       + int(b[i:i + 2], 16) * amount)
+        for i in (0, 2, 4))
+
+
+def _glass(surface, top=None, bottom=None):
+    """Give a surface the two hairlines that read as a pane of glass.
+
+    Glass is not a flat fill: it catches the light along its top edge and
+    drops a shadow along its bottom one.  Tk cannot composite, so the two
+    edges *are* the effect.  They go on with ``place``, which does not
+    disturb whichever geometry manager the surface's real children use --
+    that is the whole reason this can be applied to a finished widget.
+    """
+    for colour, offset, rely in ((top or _UI["glass_hi"], 0, 0.0),
+                                 (bottom or _UI["glass_lo"], -1, 1.0)):
+        tk.Frame(surface, background=colour, height=1, borderwidth=0,
+                 highlightthickness=0).place(x=0, y=offset, rely=rely,
+                                             relwidth=1)
+
+
+class _Dropdown(tk.Frame):
+    """A value and a menu, built from plain Tk widgets.
+
+    Not a ``ttk.Combobox``: under the Windows theme ttk draws the field from
+    the OS and ignores the colours given to it, so a combobox on this screen
+    comes out white.  A ``tk.Menu`` takes colours, and twenty-five hours is a
+    list rather than a strip -- putting them all on screen at once cost more
+    height than the whole Control section.
+    """
+
+    def __init__(self, parent, options, variable, width=22,
+                 font=("Segoe UI", 12), pad=(12, 7)):
+        super().__init__(parent, background=_UI["panel"])
+        self._var = variable
+        self._button = tk.Label(
+            self, textvariable=variable, font=font, width=width,
+            anchor="w", padx=pad[0], pady=pad[1], cursor="hand2",
+            takefocus=True, background=_UI["seg_off"], foreground=_UI["text"],
+            highlightthickness=2, highlightbackground=_UI["edge"],
+            highlightcolor=_UI["accent"])
+        self._button.pack(side="left")
+        _glass(self._button, top=_mix(_UI["seg_off"], "#FFFFFF", 0.24))
+        caret = tk.Label(self, text="\u25be",
+                         font=(font[0], max(8, font[1] - 2)),
+                         padx=max(6, pad[0] - 2), pady=pad[1], cursor="hand2",
+                         background=_UI["seg_off"], foreground=_UI["muted"])
+        caret.pack(side="left", padx=(1, 0))
+
+        self._menu = tk.Menu(self, tearoff=0, background=_UI["seg_off"],
+                             foreground=_UI["text"],
+                             activebackground=_UI["accent"],
+                             activeforeground=_UI["on_accent"],
+                             borderwidth=0, activeborderwidth=0,
+                             font=(font[0], max(8, font[1] - 1)))
+        for index, option in enumerate(options):
+            # Twenty-five hours in one column runs off a short screen; break
+            # it into columns of twelve so the menu stays inside the window.
+            self._menu.add_command(
+                label=option, columnbreak=1 if index and index % 13 == 0 else 0,
+                command=lambda o=option: variable.set(o))
+
+        for widget in (self._button, caret):
+            for sequence in ("<Button-1>", "<Return>", "<space>"):
+                widget.bind(sequence, self._open)
+            widget.bind("<Enter>", lambda _e: self._paint(True))
+            widget.bind("<Leave>", lambda _e: self._paint(False))
+        self._caret = caret
+
+    def _paint(self, hovering):
+        colour = _UI["seg_hover"] if hovering else _UI["seg_off"]
+        self._button.configure(background=colour)
+        self._caret.configure(background=colour)
+
+    def _open(self, _event=None):
+        self._menu.tk_popup(self._button.winfo_rootx(),
+                            self._button.winfo_rooty()
+                            + self._button.winfo_height())
+
+
+class _Segmented(tk.Frame):
+    """A row of choices with the current one filled in.
+
+    The control idiom of the whole screen, and not borrowed for its own sake:
+    this simulator has no lanes.  A carriageway is a row of half-metre strips
+    and a vehicle occupies one of them, so a row of cells with one filled is
+    the shape the model is already made of.
+
+    Rendered *from* its ``StringVar`` rather than merely writing to it, so a
+    caller that sets the variable -- ``apply_network_defaults`` does, whenever
+    the junction changes -- redraws this without knowing it exists.
+
+    A value matching none of the offered choices is not dropped.  It is added
+    as an extra cell and selected, because a surveyed network is entitled to a
+    speed limit nobody thought to offer, and silently snapping it to the
+    nearest button would change the run without saying so.
+
+    *options* are values, or ``(value, label)`` when the two differ: the hour
+    strip shows ``08`` and stores ``08:00 - 09:00``, which is what
+    ``start_simulation`` looks up.
+    """
+
+    def __init__(self, parent, options, variable, command=None, columns=None,
+                 font=("Segoe UI Semibold", 11), pad=(13, 6), wheel=None,
+                 keep_unknown=True):
+        super().__init__(parent, background=_UI["panel"])
+        # Cells are destroyed and rebuilt whenever the value changes, which
+        # takes their bindings with them.  The wheel one has to come back or
+        # the form stops scrolling over whichever row was last touched.
+        self._wheel = wheel
+        # Off when several of these share one variable, as the two junction
+        # groups do: to the Multi row a Dhaka junction is not an unoffered
+        # value worth keeping, it is the other row's business, and keeping it
+        # drew the selected network twice.
+        self._keep_unknown = keep_unknown
+        # Not ``self._options``: that is ``tkinter.Misc``'s own method, and
+        # shadowing it breaks every grid call this widget makes.
+        self._choices = [o if isinstance(o, tuple) else (str(o), str(o))
+                         for o in options]
+        self._var = variable
+        self._command = command
+        self._columns = columns
+        self._font = font
+        self._pad = pad
+        self._cells = []
+        self._render()
+        # Held so it can be given back.  The whole form is rebuilt whenever
+        # the window changes density, and a trace left behind by a destroyed
+        # widget fires into nothing the next time the variable is written.
+        self._trace = variable.trace_add("write", lambda *_a: self._render())
+        self.bind("<Destroy>", self._forget)
+
+    def _forget(self, event):
+        # <Destroy> arrives for every descendant too, and this is only the
+        # one occasion that matters.
+        if event.widget is self and self._trace is not None:
+            self._var.trace_remove("write", self._trace)
+            self._trace = None
+
+    @staticmethod
+    def _same(a, b):
+        """Equal as text, or as numbers when both are numbers.
+
+        ``0.5`` and ``0.50`` are the same strip width, and the parameter file
+        and this form do not always agree on how to spell one.
+        """
+        if a == b:
+            return True
+        try:
+            return abs(float(a) - float(b)) < 1e-9
+        except (TypeError, ValueError):
+            return False
+
+    def _render(self):
+        wanted = self._var.get()
+        options = list(self._choices)
+        if (self._keep_unknown and wanted
+                and not any(self._same(v, wanted) for v, _l in options)):
+            options.append((wanted, wanted))
+
+        if [v for v, _l in options] != [v for v, _l, _c in self._cells]:
+            for _v, _l, cell in self._cells:
+                cell.destroy()
+            self._cells = []
+            width = self._columns or len(options)
+            for index, (value, label) in enumerate(options):
+                cell = tk.Label(self, text=label, font=self._font,
+                                padx=self._pad[0], pady=self._pad[1],
+                                cursor="hand2", takefocus=True,
+                                highlightthickness=2,
+                                highlightbackground=_UI["panel"],
+                                highlightcolor=_UI["accent_hover"])
+                cell.grid(row=index // width, column=index % width,
+                          padx=(0, 3), pady=(0, 3), sticky="ew")
+                # One lit pixel along the top edge, which is the whole
+                # difference between a flat rectangle and a raised one.
+                # ``_paint`` recolours it, so it follows the selection.
+                cell.gloss = tk.Frame(cell, height=1, borderwidth=0,
+                                      highlightthickness=0)
+                cell.gloss.place(x=0, y=0, relwidth=1)
+                for sequence in ("<Button-1>", "<Return>", "<space>"):
+                    cell.bind(sequence, lambda _e, v=value: self._choose(v))
+                cell.bind("<Enter>", lambda _e, c=cell: self._paint(c, True))
+                cell.bind("<Leave>", lambda _e, c=cell: self._paint(c, False))
+                cell.bind("<FocusIn>", lambda _e, c=cell: self._paint(c, False))
+                cell.bind("<FocusOut>", lambda _e, c=cell: self._paint(c, False))
+                if self._wheel is not None:
+                    self._wheel(cell)
+                self._cells.append((value, label, cell))
+            if self._columns:
+                for column in range(width):
+                    self.columnconfigure(column, weight=1, uniform="seg")
+
+        for _value, _label, cell in self._cells:
+            self._paint(cell, False)
+
+    def _paint(self, cell, hovering):
+        value = next(v for v, _l, c in self._cells if c is cell)
+        chosen = self._same(value, self._var.get())
+        if chosen:
+            background = _UI["accent_hover"] if hovering else _UI["accent"]
+            cell.configure(background=background, foreground=_UI["on_accent"])
+        else:
+            background = _UI["seg_hover"] if hovering else _UI["seg_off"]
+            cell.configure(background=background, foreground=_UI["text"])
+        cell.gloss.configure(background=_mix(background, "#FFFFFF", 0.24))
+
+    def _choose(self, value):
+        self._var.set(value)
+        if self._command is not None:
+            self._command()
+
+
+#: Four ways to draw the same seventeen settings, roomiest first.
+#:
+#: The screen picks one by *measuring*, not by asking how big the monitor is:
+#: a maximised window is the screen less its title bar and its taskbar, and
+#: both of those move with the DPI setting, the taskbar's position and
+#: whether it hides itself.  ``_fit_to_window`` walks this list from the top
+#: and stops at the first entry the window can show whole.
+#:
+#: The last entry drops the captions, and it has to.  A 1280x720 desktop
+#: leaves about 1070 pixels of settings across two columns and the roomiest
+#: layout wants 1570 -- a third more than there is -- and no amount of
+#: shaving fonts and padding closes a gap that size while every row is
+#: carrying two lines of explanation.  So at that size the explanations move
+#: to a hint line in the footer, which costs one row's height for all
+#: seventeen of them instead of two lines each.
+_DENSITIES = (
+    dict(name="roomy",
+         header=102, title=30, tagline=12,
+         band=11, note=11, label=13, caption=11, group=10,
+         cell=(12, 11), cell_pad=((16, 9), (13, 6)),
+         value=12, unit=11, button=13, button_pad=(28, 12),
+         field=330, wrap=300, row_pad=6, band_gap=8, pad=(18, 22),
+         foot_pad=12, tail=10, tiles=None),
+    dict(name="compact",
+         header=94, title=26, tagline=11,
+         band=10, note=10, label=12, caption=10, group=9,
+         cell=(11, 10), cell_pad=((13, 7), (11, 5)),
+         value=11, unit=10, button=12, button_pad=(22, 10),
+         field=286, wrap=258, row_pad=5, band_gap=8, pad=(15, 18),
+         foot_pad=10, tail=10, tiles=None),
+    dict(name="dense",
+         header=80, title=22, tagline=10,
+         band=9, note=9, label=11, caption=9, group=8,
+         cell=(10, 9), cell_pad=((11, 6), (9, 4)),
+         value=10, unit=9, button=11, button_pad=(18, 8),
+         field=246, wrap=222, row_pad=4, band_gap=6, pad=(12, 14),
+         foot_pad=8, tail=8, tiles=None),
+    dict(name="minimal",
+         header=60, title=19, tagline=9,
+         band=9, note=None, label=11, caption=None, group=8,
+         cell=(10, 9), cell_pad=((9, 4), (8, 3)),
+         value=10, unit=9, button=10, button_pad=(16, 5),
+         field=196, wrap=None, row_pad=2, band_gap=4, pad=(11, 12),
+         foot_pad=5, tail=4, tiles=2),
+)
 
 
 class OptionPanel:
-    """Port of ``thesisfinal.OptionPanel``."""
+    """The start screen: pick a junction, press Start.
+
+    Laid out as a settings screen -- banded sections, one setting to a row,
+    the control on the right -- rather than as the flat seventeen-row form it
+    was.  Three things that look like cosmetics and are not:
+
+    *Start lives in a footer that does not scroll.*  An earlier version put it
+    at the top of the form for the same reason: the settings are taller than a
+    short window, and a button below them is a button nobody can see.  Pinning
+    it outside the scroller keeps it visible without putting it in front of
+    the thing it starts.
+
+    *Each caption sits under its own label rather than in a third column.*  In
+    a third column a wrapped caption pushed the next row down by however many
+    lines it took, so captions had to be one line and the form still ran wide.
+    Stacked, they can wrap and cost the control column nothing.
+
+    *The whole form is drawn again whenever the window changes size enough to
+    want a different density.*  That is why every variable is made once in
+    ``_make_vars`` and every widget in ``_init_components``: a rebuild throws
+    away the widgets and keeps the values, so nothing the reader has typed is
+    lost when their window is resized under them.
+    """
+
+    #: How green time is shared out.  Values are what ``Parameters.SIGNAL_MODE``
+    #: takes; the labels are what a reader of the paper would call them.
+    SIGNAL_CHOICES = {
+        "Fixed time": "fixed",
+        "Biased random": "biased-random",
+        "Multi-objective v1": "moo-v1",
+        "Multi-objective v2": "moo-v2",
+    }
+
+    #: Whether the 3D view is on and how it draws are one decision to anyone
+    #: standing in front of the form, so they are one control.
+    VIEW_CHOICES = {
+        "Off": (False, "line"),
+        "Line art": (True, "line"),
+        "Solid": (True, "solid"),
+    }
+
+    #: What this program is, in the words its own paper uses.
+    TAGLINE = ("A Non-Lane based heterogeneous Micro Simulation "
+               "for Dhaka City")
+
+    #: Which junctions are one intersection and which are a network of them.
+    #: Kakrail is a two-junction corridor and sits with the single ones
+    #: because that is how it is studied -- a pair of adjacent signals, not a
+    #: grid.  Any network not named here joins the second group.
+    SINGLE_JUNCTIONS = ("banani_23", "banani_27", "bijoy_sarani",
+                        "kakrail_corridor")
 
     def __init__(self, dhaka_sim_frame, parent):
         self.dhaka_sim_frame = dhaka_sim_frame
-        self.frame = ttk.Frame(parent, padding=24)
+        self.frame = tk.Frame(parent, background=_UI["ground"])
+        self._level = 0
+        self._busy = False
+        self._waiting = 0
+        self._viewport = None
+        self._hint = None
+        self._hint_rows = []
+        self._make_vars()
+        self.form = self._build_shell()
+        self._build_form()
+        self.frame.bind("<Configure>", lambda _e: self._fit_to_window())
+        self.frame.update_idletasks()
+        self._fit_to_window(force=True)
+
+    @property
+    def _d(self):
+        """The sizes the form is currently being drawn at."""
+        return _DENSITIES[self._level]
+
+    # ---- the shell: header, scrolling settings, pinned footer -------------
+
+    def _build_shell(self):
+        # A canvas, not two labels, because the light behind the title has
+        # to be painted: tkinter has no per-widget alpha, so a glow can only
+        # be drawn, and a label over it would punch an opaque rectangle
+        # straight through the middle of it.  Canvas text does not.
+        header = tk.Canvas(self.frame, height=self._d["header"],
+                           highlightthickness=0, bd=0,
+                           background=_UI["ground"])
+        header.pack(fill="x")
+        self._header = header
+        header.bind("<Configure>", self._paint_header)
+
+        self._footer = tk.Frame(self.frame, background=_UI["band"])
+        self._footer.pack(side="bottom", fill="x")
+
+        body = tk.Frame(self.frame, background=_UI["ground"])
+        body.pack(fill="both", expand=True)
+        canvas = tk.Canvas(body, highlightthickness=0, bd=0,
+                           background=_UI["ground"])
+        # A classic tk scrollbar, not a ttk one: under the Windows theme ttk
+        # draws the trough from the OS and ignores every colour given to it,
+        # so the only way to a dark bar without switching the whole app to
+        # "clam" -- which would restyle the simulation panel too -- is the
+        # widget that predates themes.
+        bar = tk.Scrollbar(body, orient="vertical", command=canvas.yview,
+                           background=_UI["seg_off"],
+                           activebackground=_UI["seg_hover"],
+                           troughcolor=_UI["ground"], borderwidth=0,
+                           highlightthickness=0, elementborderwidth=0,
+                           width=14)
+        canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        # A full-width tray holding the form, rather than a centred canvas
+        # item.  A canvas window item resolves its anchor against the width it
+        # had when its coordinates were last set, so an item anchored to its
+        # own middle drifts off to one side as the form grows underneath it,
+        # and reports a bounding box that disagrees with where the widget
+        # actually is.  Stretching the tray to the canvas and centring inside
+        # it with weighted spacer columns is decided by the geometry manager
+        # instead, which cannot fall out of step.
+        tray = tk.Frame(canvas, background=_UI["ground"])
+        window = canvas.create_window(0, 0, window=tray, anchor="nw")
+        tray.columnconfigure(0, weight=1)
+        tray.columnconfigure(2, weight=1)
+        form = tk.Frame(tray, background=_UI["ground"])
+        form.grid(row=0, column=1, sticky="n")
+
+        # Two columns rather than one, because the whole point is to fit the
+        # screen without scrolling: stacked, these settings run to some 1700
+        # pixels and a maximised window has 800 at best and 460 at worst.
+        self._columns = []
+        for _index in (0, 1):
+            panel = tk.Frame(form, background=_UI["panel"],
+                             highlightthickness=1,
+                             highlightbackground=_UI["edge"],
+                             highlightcolor=_UI["edge"])
+            panel.columnconfigure(1, weight=1)
+            self._columns.append(panel)
+        self._rows = [0, 0]
+        self._col = 0
+        self._stacked = None
+
+        def fit(_event=None):
+            canvas.itemconfigure(window, width=canvas.winfo_width())
+            self._fit_to_window()
+
+        def grew(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            self._show_bar()
+
+        canvas.bind("<Configure>", fit)
+        tray.bind("<Configure>", grew)
+        self._canvas = canvas
+        self._tray = tray
+        self._bar = bar
+        return form
+
+    def _show_bar(self):
+        """The whole point of the density ladder is that this never appears,
+        and an inert bar says there is more below when there is not.
+
+        Asked on the *tray's* resize as well as the canvas's: the canvas
+        stops resizing long before the settings have finished being built, so
+        a check made only there decides while the form is still short.
+        """
+        needed = self._tray.winfo_reqheight() > self._canvas.winfo_height()
+        if needed and not self._bar.winfo_ismapped():
+            self._bar.pack(side="right", fill="y", before=self._canvas)
+        elif not needed and self._bar.winfo_ismapped():
+            self._bar.pack_forget()
+
+    def _fit_to_window(self, force=False) -> None:
+        """Draw the settings at the roomiest density this window can show.
+
+        Measured, never inferred from the screen size: a maximised window is
+        the desktop less its title bar and its taskbar, and the DPI setting,
+        the taskbar's edge and its auto-hiding all move that number.  So the
+        list is walked from the top and the first entry whose form fits
+        inside the canvas wins.
+
+        The search always restarts at the roomiest entry rather than stepping
+        down from wherever it is, because a window that has just been
+        *un*-maximised has to be able to climb back.  It keys off the
+        panel's own size rather than the canvas's, which is the only stable
+        thing here -- the canvas's height is a consequence of the density,
+        since a denser layout means a shorter header, so keying off it would
+        chase itself.
+        """
+        size = (self.frame.winfo_width(), self.frame.winfo_height())
+        if size[0] < 2 or self._busy or (size == self._viewport and not force):
+            return
+        if self._canvas.winfo_width() < 2:
+            # The panel has its size but the canvas inside it has not been
+            # laid out yet, and this runs from the panel's own <Configure>,
+            # inside the very geometry pass that would give the canvas one.
+            # Measuring here judges the roomiest layout against a one-pixel
+            # canvas, finds it too wide, stacks it, and steps down a rung it
+            # never needed.  Come back once Tk has finished the pass.
+            if self._waiting < 20 and self.frame.winfo_ismapped():
+                self._waiting += 1
+                self.frame.after_idle(
+                    lambda: self._fit_to_window(force=True))
+            return
+        self._waiting = 0
+        self._busy = True
+        try:
+            for level in range(len(_DENSITIES)):
+                if level != self._level:
+                    self._level = level
+                    self._build_form()
+                # The columns are a different width at every density, so
+                # whether they stand side by side has to be decided again --
+                # ``_arrange`` short-circuits on its last answer, and a
+                # stale one here reads as "stacked", which never fits and
+                # sends the search all the way to the bottom of the list.
+                self._stacked = None
+                self.frame.update_idletasks()
+                self._arrange(self._canvas.winfo_width())
+                self.frame.update_idletasks()
+                if (self._tray.winfo_reqheight()
+                        <= self._canvas.winfo_height()):
+                    break
+            self._viewport = size
+        finally:
+            self._busy = False
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        self._show_bar()
+
+    def _build_form(self) -> None:
+        """Draw every setting again at the current density.
+
+        The widgets go, the variables stay.  Everything the reader has typed
+        lives in a ``StringVar`` made once in ``_make_vars``, so a rebuild is
+        invisible except for the sizes.
+        """
+        for column in self._columns:
+            for child in column.winfo_children():
+                child.destroy()
+            column.columnconfigure(0, minsize=self._d["field"])
+            _glass(column)
+        for child in self._footer.winfo_children():
+            child.destroy()
+        _glass(self._footer)
+        self._header.configure(height=self._d["header"])
+        self._rows = [0, 0]
+        self._col = 0
+        self._stacked = None
+        self._hint = None
+        self._hint_rows = []
         self._init_components()
+        self._bind_wheel(self._tray)
+        self._bind_wheel(self._canvas)
+        for widgets, text in self._hint_rows:
+            for widget in widgets:
+                self._bind_hint(widget, text)
+        self._paint_header()
 
-    def _init_components(self) -> None:
-        frame = self.frame
-        ttk.Label(frame, text="DhakaSim", font=("Segoe UI", 32)).grid(
-            row=0, column=0, columnspan=3, pady=(30, 2))
-        ttk.Label(frame, text="Set up the run — each setting is explained on the "
-                             "right. A report opens automatically when the run ends.",
-                  font=("Segoe UI", 10), foreground="#5b6b7b").grid(
-            row=1, column=0, columnspan=3, pady=(0, 18))
+    def _bind_hint(self, widget, text) -> None:
+        """Show one row's explanation in the footer while the pointer is on
+        it.  Added to whatever is already bound, never in place of it: the
+        cells paint their own hover state on the same event."""
+        widget.bind("<Enter>",
+                    lambda _e: self._hint.configure(text=text), add="+")
+        widget.bind("<Leave>",
+                    lambda _e: self._hint.configure(text=""), add="+")
+        for child in widget.winfo_children():
+            self._bind_hint(child, text)
 
-        # --- intersection / network selector -----------------------------
+    def _paint_header(self, _event=None) -> None:
+        """Draw the title, the line under it, and the light behind them.
+
+        The glow is concentric filled ovals worked from the outside in, and
+        the outermost one is the ground colour itself, so the bloom has no
+        edge to give it away.  Sixty steps put the banding below what the eye
+        separates at this contrast; a dozen would show rings.  It is green
+        because the accent is -- the colour this simulator has always painted
+        a CNG -- so the light behind the name is the light on Start.
+        """
+        canvas = self._header
+        width, height = canvas.winfo_width(), self._d["header"]
+        if width < 2:
+            return
+        canvas.delete("all")
+        steps = 60
+        centre_x, centre_y = width / 2.0, height * 0.52
+        for index in range(steps):
+            towards = index / (steps - 1.0)
+            radius_x = width * (0.62 - 0.54 * towards)
+            radius_y = height * (1.5 - 1.3 * towards)
+            canvas.create_oval(centre_x - radius_x, centre_y - radius_y,
+                               centre_x + radius_x, centre_y + radius_y,
+                               outline="", fill=_mix(_UI["ground"],
+                                                     _UI["glow"], towards))
+        canvas.create_text(centre_x, height * 0.38, text="DhakaSim",
+                           font=("Segoe UI Semibold", self._d["title"]),
+                           fill=_UI["text"])
+        canvas.create_text(centre_x, height * 0.74, text=self.TAGLINE,
+                           font=("Segoe UI", self._d["tagline"]),
+                           fill=_UI["muted"])
+        canvas.create_line(0, height - 1, width, height - 1,
+                           fill=_UI["edge"])
+
+    def _arrange(self, width) -> None:
+        """Side by side while there is room, stacked when there is not.
+
+        The form has no horizontal scrollbar -- it never had one -- so a
+        two-column layout wider than the window would simply lose its right
+        half.  Measured rather than guessed at: the columns ask for what they
+        ask for, and 60 px covers the gutter and the scrollbar.
+
+        Stacking is a last resort and not a rung of the density ladder.  It
+        doubles the height, so ``_fit_to_window`` will keep stepping down
+        past it, and a denser layout is often narrow enough to come back
+        apart again -- which is exactly what should happen on a 1280-wide
+        screen.
+        """
+        if not self._columns:
+            return
+        wanted = sum(c.winfo_reqwidth() for c in self._columns) + 60
+        stacked = width < wanted
+        if stacked == self._stacked:
+            return
+        self._stacked = stacked
+        for index, panel in enumerate(self._columns):
+            if stacked:
+                panel.grid(row=index, column=0, sticky="n",
+                           pady=(0, 18 if index == 0 else 0))
+            else:
+                # Both panes stretch to the taller of the two, so they
+                # end on the same line: one pane stopping short of its
+                # neighbour reads as an unfinished layout, not as a shorter
+                # list of settings.
+                panel.grid(row=0, column=index, sticky="ns",
+                           padx=(0, 18 if index == 0 else 0))
+
+    def _bind_wheel(self, widget) -> None:
+        """Let the wheel scroll the settings from anywhere over them.
+
+        Tk delivers a wheel event to the widget under the pointer and walks
+        that widget's own bindtags, so a binding on the containing frame never
+        fires once the pointer is over an entry box.  Binding each descendant
+        covers the whole form without reaching for ``bind_all``, which would
+        still be in force during the run and fight the canvas's own zoom.
+        """
+        widget.bind("<MouseWheel>", lambda e: self._canvas.yview_scroll(
+            -1 if e.delta > 0 else 1, "units"))
+        for child in widget.winfo_children():
+            self._bind_wheel(child)
+
+    # ---- the pieces a settings screen is made of -------------------------
+
+    def _use(self, column):
+        """Send the next bands and rows to one of the two columns."""
+        self._col = column
+
+    def _band(self, title, note=""):
+        level = self._d
+        column = self._columns[self._col]
+        self._rows[self._col] += 1
+        band = tk.Frame(column, background=_UI["band"])
+        band.grid(row=self._rows[self._col], column=0, columnspan=2,
+                  sticky="ew",
+                  pady=(level["band_gap"] if self._rows[self._col] > 1 else 0,
+                        0))
+        _glass(band)
+        tk.Label(band, text=title.upper(),
+                 font=("Segoe UI Semibold", level["band"]),
+                 background=_UI["band"], foreground=_UI["accent_text"],
+                 padx=level["pad"][0], pady=max(4, level["row_pad"] + 1)
+                 ).pack(side="left")
+        if note and level["note"]:
+            tk.Label(band, text=note, font=("Segoe UI", level["note"]),
+                     background=_UI["band"], foreground=_UI["muted"]).pack(
+                side="left", pady=max(4, level["row_pad"] + 1))
+
+    def _row(self, label, caption):
+        """One setting: name and explanation left, control right.
+
+        At the densest layout the explanation is not drawn at all -- it goes
+        to the footer, shown while the pointer is on the row.  Seventeen
+        two-line captions are 400 pixels of height, which is the difference
+        between fitting a 720p screen and not.
+        """
+        level = self._d
+        column = self._columns[self._col]
+        self._rows[self._col] += 1
+        cell = tk.Frame(column, background=_UI["panel"])
+        cell.grid(row=self._rows[self._col], column=0, sticky="nw",
+                  padx=level["pad"], pady=(level["row_pad"], 0))
+        tk.Label(cell, text=label, font=("Segoe UI", level["label"]),
+                 background=_UI["panel"], foreground=_UI["text"]).pack(
+            anchor="w")
+        if level["caption"]:
+            tk.Label(cell, text=caption, font=("Segoe UI", level["caption"]),
+                     background=_UI["panel"], foreground=_UI["muted"],
+                     wraplength=level["wrap"], justify="left").pack(
+                anchor="w", pady=(1, 0))
+        holder = tk.Frame(column, background=_UI["panel"])
+        holder.grid(row=self._rows[self._col], column=1, sticky="nw",
+                    padx=(0, level["pad"][0]),
+                    pady=(max(1, level["row_pad"] - 1), 0))
+        if not level["caption"]:
+            self._hint_rows.append(((cell, holder), caption))
+        return holder
+
+    def _unit(self, holder, text):
+        tk.Label(holder, text=text, font=("Segoe UI", self._d["unit"]),
+                 background=_UI["panel"], foreground=_UI["faint"]).pack(
+            side="left", padx=(9, 0))
+
+    def _entry(self, holder, variable, width=9):
+        box = tk.Entry(holder, textvariable=variable, width=width,
+                       font=("Consolas", self._d["value"]), relief="flat",
+                       background=_UI["seg_off"], foreground=_UI["text"],
+                       insertbackground=_UI["accent"],
+                       highlightthickness=2, highlightbackground=_UI["edge"],
+                       highlightcolor=_UI["accent"])
+        box.pack(side="left", ipady=max(2, self._d["row_pad"] - 1), ipadx=6)
+        return box
+
+    def _seg(self, holder, options, variable, large=False, **kwargs):
+        """A choice strip at whatever size the form is being drawn at."""
+        level = self._d
+        index = 0 if large else 1
+        return _Segmented(holder, options, variable,
+                          font=("Segoe UI Semibold", level["cell"][index]),
+                          pad=level["cell_pad"][index],
+                          wheel=self._bind_wheel, **kwargs)
+
+    def _button(self, parent, text, command, primary=False):
+        level = self._d
+        button = tk.Label(
+            parent, text=text, font=("Segoe UI Semibold", level["button"]),
+            background=_UI["accent"] if primary else _UI["seg_off"],
+            foreground=_UI["on_accent"] if primary else _UI["text"],
+            padx=level["button_pad"][0], pady=level["button_pad"][1],
+            cursor="hand2", takefocus=True,
+            highlightthickness=2, highlightbackground=_UI["band"],
+            highlightcolor=_UI["accent_hover"])
+        gloss = tk.Frame(button, height=1, borderwidth=0,
+                         highlightthickness=0)
+        gloss.place(x=0, y=0, relwidth=1)
+
+        def paint(hovering):
+            if primary:
+                colour = _UI["accent_hover"] if hovering else _UI["accent"]
+            else:
+                colour = _UI["seg_hover"] if hovering else _UI["seg_off"]
+            button.configure(background=colour)
+            gloss.configure(background=_mix(colour, "#FFFFFF", 0.24))
+
+        for sequence in ("<Button-1>", "<Return>", "<space>"):
+            button.bind(sequence, lambda _e: command())
+        button.bind("<Enter>", lambda _e: paint(True))
+        button.bind("<Leave>", lambda _e: paint(False))
+        paint(False)
+        return button
+
+    # ---- the settings themselves -----------------------------------------
+
+    def _make_vars(self) -> None:
+        """Every value the form edits, made once and kept.
+
+        Separate from ``_init_components`` because the widgets are thrown
+        away and drawn again whenever the window wants a different density,
+        and a reader's half-typed end time must survive that.
+        """
+        self.fields = {}
         networks = Processor.available_networks()
-        ttk.Label(frame, text="Intersection:", font=("Consolas", 10)).grid(
-            row=2, column=0, sticky="w", padx=(0, 18), pady=4)
         default = (Parameters.NETWORK_DIR if Parameters.NETWORK_DIR in networks
                    else (networks[0] if networks else ""))
         self.network_var = tk.StringVar(value=default)
-        if networks:
-            selector = ttk.Combobox(frame, textvariable=self.network_var,
-                                    values=networks, state="readonly", width=24,
-                                    font=("Consolas", 10))
-        else:
-            selector = ttk.Entry(frame, textvariable=self.network_var, width=24,
-                                 font=("Consolas", 10))
-        selector.grid(row=2, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="Which intersection/network to simulate. Each "
-                             "option is a folder under input/ with its own "
-                             "roads, demand and vehicle mix.",
-                  font=("Segoe UI", 9), foreground="#5b6b7b",
-                  wraplength=430, justify="left").grid(
-            row=2, column=2, sticky="w", padx=(16, 0), pady=4)
-
-        # --- time of day -------------------------------------------------
-        ttk.Label(frame, text="Time of Day:", font=("Consolas", 10)).grid(
-            row=3, column=0, sticky="w", padx=(0, 18), pady=4)
         self.TIME_CHOICES = ["Peak hour (busiest)"] + [
             f"{h:02d}:00 - {(h + 1) % 24:02d}:00" for h in range(24)]
         current = Parameters.TIME_OF_DAY
         self.time_var = tk.StringVar(
             value=self.TIME_CHOICES[current + 1] if 0 <= current <= 23
             else self.TIME_CHOICES[0])
-        ttk.Combobox(frame, textvariable=self.time_var, values=self.TIME_CHOICES,
-                     state="readonly", width=24, font=("Consolas", 10)).grid(
-            row=3, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="Which hour of the surveyed day to simulate. The "
-                             "counts cover a full 24 hours, so traffic is much "
-                             "lighter at night than at the peak.",
-                  font=("Segoe UI", 9), foreground="#5b6b7b",
-                  wraplength=430, justify="left").grid(
-            row=3, column=2, sticky="w", padx=(16, 0), pady=4)
-
-        self.fields = {}
-        # (label with unit, key, initial value, plain-language explanation)
-        rows = (
-            ("Random Seed:", "seed", str(Parameters.seed),
-             "Fixes randomness so a run can be repeated. Same number → "
-             "identical run; -1 = a new random run each time."),
-            ("Simulation End Time (seconds):", "end_time",
-             str(Parameters.simulation_end_time),
-             "How long to simulate, in SECONDS of traffic (1800 = 30 minutes)."),
-            ("Simulation Speed (ms/frame):", "speed",
-             str(Parameters.simulation_speed),
-             "Animation delay in MILLISECONDS. Lower = faster playback; does "
-             "not affect the results."),
-            ("Pixel Per Meter:", "ppm", jstr(float(Parameters.pixel_per_meter)),
-             "Display zoom only: screen pixels drawn per metre of road."),
-            ("Probability of Accident:", "accident",
-             jstr(Parameters.encounter_per_accident),
-             "Accident-frequency control (encounters per accident). A higher "
-             "value means accidents happen less often."),
-            ("Strip Width (metres):", "strip", jstr(Parameters.strip_width),
-             "Width of each lateral 'strip' in METRES. A vehicle occupies "
-             "several strips and may move to any free one — this is how "
-             "non-lane traffic is modelled."),
-            ("Footpath Strip Width (metres):", "footpath",
-             jstr(Parameters.footpath_strip_width),
-             "Strip granularity on the footpath, in METRES."),
-            # Speeds are held in m/s; this field, like MaximumSpeed in
-            # parameter.txt, is km/h.  Rounding to 2 dp undoes the 4-digit
-            # truncation precision2 applied on the way in, so the value shown
-            # is the value the file states and start_simulation converts it
-            # back to exactly the same m/s -- the round trip is an identity.
-            ("Maximum Speed (km/h):", "max_speed",
-             jstr(round(Parameters.maximum_speed * 3.6, 2)),
-             "Network speed limit, in KILOMETRES PER HOUR, as set by "
-             "MaximumSpeed in parameter.txt. The fastest vehicle type manages "
-             "110 km/h, so anything above that is no limit at all."),
-        )
-        for i, (label, key, value, desc) in enumerate(rows, start=4):
-            ttk.Label(frame, text=label, font=("Consolas", 10)).grid(
-                row=i, column=0, sticky="w", padx=(0, 18), pady=4)
-            var = tk.StringVar(value=value)
-            entry = ttk.Entry(frame, textvariable=var, width=16, font=("Consolas", 10))
-            entry.grid(row=i, column=1, sticky="w", pady=4)
-            ttk.Label(frame, text=desc, font=("Segoe UI", 9), foreground="#5b6b7b",
-                      wraplength=430, justify="left").grid(
-                row=i, column=2, sticky="w", padx=(16, 0), pady=4)
-            self.fields[key] = var
-
-        ttk.Label(frame, text="Trace Mode:", font=("Consolas", 10)).grid(
-            row=12, column=0, sticky="w", pady=4)
+        self.fields["end_time"] = tk.StringVar(
+            value=str(Parameters.simulation_end_time))
+        self.fields["max_speed"] = tk.StringVar(
+            value=jstr(round(Parameters.maximum_speed * 3.6, 2)))
+        self.fields["seed"] = tk.StringVar(value=str(Parameters.seed))
+        self.fields["accident"] = tk.StringVar(
+            value=jstr(Parameters.encounter_per_accident))
         self.trace_var = tk.StringVar(
             value="On" if Parameters.TRACE_MODE else "Off")
-        trace_radios = ttk.Frame(frame)
-        trace_radios.grid(row=12, column=1, sticky="w")
-        ttk.Radiobutton(trace_radios, text="On", value="On",
-                        variable=self.trace_var).pack(side="left")
-        ttk.Radiobutton(trace_radios, text="Off", value="Off",
-                        variable=self.trace_var).pack(side="left")
-        ttk.Label(frame, text="On = replay a previously recorded run from "
-                             "trace.txt instead of simulating a fresh one.",
-                  font=("Segoe UI", 9), foreground="#5b6b7b",
-                  wraplength=430, justify="left").grid(
-            row=12, column=2, sticky="w", padx=(16, 0), pady=4)
-
-        ttk.Label(frame, text="Pedestrian:", font=("Consolas", 10)).grid(
-            row=13, column=0, sticky="w", pady=4)
-        self.pedestrian_var = tk.StringVar(
-            value="On" if Parameters.across_pedestrian_mode else "Off")
-        radios = ttk.Frame(frame)
-        radios.grid(row=13, column=1, sticky="w")
-        ttk.Radiobutton(radios, text="On", value="On",
-                        variable=self.pedestrian_var).pack(side="left")
-        ttk.Radiobutton(radios, text="Off", value="Off",
-                        variable=self.pedestrian_var).pack(side="left")
-        ttk.Label(frame, text="On = generate road-crossing pedestrians, a major "
-                             "source of congestion in Dhaka.",
-                  font=("Segoe UI", 9), foreground="#5b6b7b",
-                  wraplength=430, justify="left").grid(
-            row=13, column=2, sticky="w", padx=(16, 0), pady=4)
-
-        ttk.Label(frame, text="Real Geometry:", font=("Consolas", 10)).grid(
-            row=14, column=0, sticky="w", pady=4)
+        self.signal_var = tk.StringVar(
+            value=next((label for label, mode in self.SIGNAL_CHOICES.items()
+                        if mode == Parameters.SIGNAL_MODE), "Fixed time"))
         self.geometry_var = tk.StringVar(
             value="On" if Parameters.GEOMETRY_MODE else "Off")
-        geom_radios = ttk.Frame(frame)
-        geom_radios.grid(row=14, column=1, sticky="w")
-        ttk.Radiobutton(geom_radios, text="On", value="On",
-                        variable=self.geometry_var).pack(side="left")
-        ttk.Radiobutton(geom_radios, text="Off", value="Off",
-                        variable=self.geometry_var).pack(side="left")
-        ttk.Label(frame, text="On = use the surveyed road layout: physical "
-                             "medians, and roundabouts with a central island, "
-                             "give-way priority and deflection. Off reproduces "
-                             "the original simulator exactly.",
-                  font=("Segoe UI", 9), foreground="#5b6b7b",
-                  wraplength=430, justify="left").grid(
-            row=14, column=2, sticky="w", padx=(16, 0), pady=4)
-
-        ttk.Label(frame, text="3D View:", font=("Consolas", 10)).grid(
-            row=15, column=0, sticky="w", pady=4)
+        self.pedestrian_var = tk.StringVar(
+            value="On" if Parameters.across_pedestrian_mode else "Off")
+        self.fields["strip"] = tk.StringVar(value=jstr(Parameters.strip_width))
+        self.fields["footpath"] = tk.StringVar(
+            value=jstr(Parameters.footpath_strip_width))
         self.render3d_var = tk.StringVar(
-            value="On" if Parameters.RENDER_3D else "Off")
-        view_radios = ttk.Frame(frame)
-        view_radios.grid(row=15, column=1, sticky="w")
-        ttk.Radiobutton(view_radios, text="On", value="On",
-                        variable=self.render3d_var).pack(side="left")
-        ttk.Radiobutton(view_radios, text="Off", value="Off",
-                        variable=self.render3d_var).pack(side="left")
-        ttk.Label(frame, text="On = watch the run as a 3D perspective scene "
-                             "with modelled vehicles, as VISSIM does; Off = "
-                             "the 2D plan view. Drawing only — the results are "
-                             "the same either way, and the button in the "
-                             "toolbar (or the V key) switches at any time.",
-                  font=("Segoe UI", 9), foreground="#5b6b7b",
-                  wraplength=430, justify="left").grid(
-            row=15, column=2, sticky="w", padx=(16, 0), pady=4)
+            value=next(
+                (label for label, (on, style) in self.VIEW_CHOICES.items()
+                 if on == Parameters.RENDER_3D
+                 and (not on or style == Parameters.RENDER_3D_STYLE)), "Off"))
+        self.fields["ppm"] = tk.StringVar(
+            value=jstr(float(Parameters.pixel_per_meter)))
+        self.fields["speed"] = tk.StringVar(
+            value=str(Parameters.simulation_speed))
 
-        start = ttk.Button(frame, text="Start Simulation",
-                           command=self.start_simulation)
-        start.grid(row=16, column=0, columnspan=3, pady=(22, 0))
+        # A speed limit belongs to the roads, not to the run, so changing the
+        # junction has to move it.  Bound to the variable rather than to the
+        # widget, so a script that sets ``network_var`` gets the same refresh
+        # a click does -- and so a rebuild of the form does not add a second
+        # copy of this.
+        self._base_max_speed = round(Parameters.BASE_MAXIMUM_SPEED * 3.6, 2)
+        self.network_var.trace_add("write",
+                                   lambda *_a: self._on_network_change())
+        self._on_network_change()
+
+    def _init_components(self) -> None:
+        level = self._d
+        networks = Processor.available_networks()
+
+        # ================= left column ====================================
+        self._use(0)
+        self._band("Junction", "  the network to simulate")
+        holder = self._row("Intersection",
+                           "Each is a surveyed junction with its own demand, "
+                           "vehicle mix and road widths.")
+        single = [n for n in networks if n in self.SINGLE_JUNCTIONS]
+        multi = [n for n in networks if n not in self.SINGLE_JUNCTIONS]
+        for caption, group in (("Single intersection", single),
+                               ("Multi intersection", multi)):
+            if not group:
+                continue
+            tk.Label(holder, text=caption, font=("Segoe UI", level["group"]),
+                     background=_UI["panel"], foreground=_UI["faint"]).pack(
+                anchor="w", pady=(0, 2))
+            # Four tiles abreast is 440 pixels, which two columns of them
+            # cannot afford on a 1280-wide screen; the densest layout wraps
+            # them instead.
+            self._seg(holder, [(n, _place_name(n)) for n in group],
+                      self.network_var, large=True,
+                      command=self._on_network_change,
+                      columns=min(level["tiles"] or len(group), len(group)),
+                      keep_unknown=False).pack(
+                anchor="w", pady=(0, level["row_pad"] + 2))
+
+        holder = self._row("Time of day",
+                           "The busiest hour of the surveyed day, or one you "
+                           "name.")
+        _Dropdown(holder, self.TIME_CHOICES, self.time_var,
+                  font=("Segoe UI", level["value"]),
+                  pad=(12, max(3, level["row_pad"]))).pack(anchor="w")
+
+        self._band("Run", "  how much traffic, and how repeatable")
+        holder = self._row("End time",
+                           "How many seconds of traffic to simulate.")
+        self._entry(holder, self.fields["end_time"])
+        self._unit(holder, "s")
+
+        holder = self._row("Maximum speed",
+                           "The network speed limit. Choosing a junction sets "
+                           "its surveyed value.")
+        self._entry(holder, self.fields["max_speed"])
+        self._unit(holder, "km/h")
+
+        holder = self._row("Random seed",
+                           "The same number twice gives the same run twice.")
+        self._entry(holder, self.fields["seed"])
+        self._button(holder, "Randomise",
+                     lambda: self.fields["seed"].set("-1")).pack(
+            side="left", padx=(10, 0))
+
+        holder = self._row("Accidents",
+                           "Close encounters before one becomes an accident. "
+                           "Lower means more.")
+        self._entry(holder, self.fields["accident"])
+
+        holder = self._row("Trace replay",
+                           "On replays trace.txt instead of simulating a new "
+                           "run.")
+        self._seg(holder, ["Off", "On"], self.trace_var).pack(anchor="w")
+
+        # ================= right column ===================================
+        self._use(1)
+        self._band("Control", "  what the signals do")
+        holder = self._row("Signal control",
+                           "Fixed time shares green equally; the "
+                           "multi-objective modes re-plan each cycle.")
+        self._seg(holder, list(self.SIGNAL_CHOICES), self.signal_var,
+                  columns=2).pack(anchor="w")
+
+        holder = self._row("Real geometry",
+                           "The surveyed layout: solid medians and real "
+                           "roundabouts. Off is Java parity.")
+        self._seg(holder, ["Off", "On"], self.geometry_var).pack(anchor="w")
+
+        holder = self._row("Pedestrians",
+                           "On puts pedestrians crossing the carriageway.")
+        self._seg(holder, ["Off", "On"], self.pedestrian_var).pack(anchor="w")
+
+        self._band("Road model", "  the strips a vehicle slides between")
+        holder = self._row("Strip width",
+                           "There are no lanes here. A carriageway is a row of "
+                           "strips this wide.")
+        self._seg(holder, ["0.25", "0.5", "1.0"],
+                  self.fields["strip"]).pack(side="left")
+        self._unit(holder, "m")
+
+        holder = self._row("Footpath strip width",
+                           "The same width again, for the footpath.")
+        self._seg(holder, ["0.25", "0.5", "1.0"],
+                  self.fields["footpath"]).pack(side="left")
+        self._unit(holder, "m")
+
+        self._band("Display", "  playback only, the results do not change")
+        holder = self._row("3D view",
+                           "A perspective scene instead of the plan view. "
+                           "Line art is the lighter of the two.")
+        self._seg(holder, list(self.VIEW_CHOICES),
+                  self.render3d_var).pack(anchor="w")
+
+        holder = self._row("Scale",
+                           "How many screen pixels a metre of road takes up.")
+        self._seg(holder, [5, 10, 15, 20, 30],
+                  self.fields["ppm"]).pack(side="left")
+        self._unit(holder, "px/m")
+
+        holder = self._row("Frame delay",
+                           "Pause between frames. Playback only -- the results "
+                           "are the same either way.")
+        self._seg(holder, [1, 5, 20, 50, 100, 500],
+                  self.fields["speed"]).pack(side="left")
+        self._unit(holder, "ms")
+
+        for index, column in enumerate(self._columns):
+            self._rows[index] += 1
+            tk.Frame(column, background=_UI["panel"],
+                     height=level["tail"]).grid(
+                row=self._rows[index], column=0, columnspan=2, sticky="ew")
+
+        # ---- the footer, which does not scroll ---------------------------
+        inner = tk.Frame(self._footer, background=_UI["band"])
+        inner.pack(fill="x", padx=level["pad"][0] * 2, pady=level["foot_pad"])
+        self._button(inner, "Reset to defaults",
+                     self.dhaka_sim_frame.show_options).pack(side="left")
+        start = self._button(inner, "Start simulation", self.start_simulation,
+                             primary=True)
+        start.pack(side="right")
         start.focus_set()
-        parent_toplevel = frame.winfo_toplevel()
-        parent_toplevel.bind("<Return>", lambda _e: self.start_simulation())
+        if not level["caption"]:
+            # The captions had to come off the rows to fit the screen; this
+            # is where they went.  One line for all seventeen of them.
+            self._hint = tk.Label(
+                inner, text="", font=("Segoe UI", level["group"] + 1),
+                background=_UI["band"], foreground=_UI["muted"], anchor="w")
+            self._hint.pack(side="left", fill="x", expand=True, padx=16)
+
+    def _on_network_change(self):
+        applied = Utilities.apply_network_defaults(self.network_var.get())
+        if "MaximumSpeed" in applied:
+            self.fields["max_speed"].set(
+                jstr(round(Parameters.maximum_speed * 3.6, 2)))
+        else:
+            # back to the shared default when the network states none
+            Utilities.apply_setting("MaximumSpeed", str(self._base_max_speed))
+            self.fields["max_speed"].set(jstr(round(self._base_max_speed, 2)))
 
     def start_simulation(self) -> None:
         Parameters.NETWORK_DIR = self.network_var.get().strip()
@@ -782,9 +1735,13 @@ class OptionPanel:
         Parameters.random = (JavaRandom() if Parameters.seed < 0
                              else JavaRandom(Parameters.seed))
         Parameters.TRACE_MODE = self.trace_var.get() == "On"
+        Parameters.SIGNAL_MODE = self.SIGNAL_CHOICES.get(
+            self.signal_var.get(), "fixed")
+        print("Signal control: " + Parameters.SIGNAL_MODE)
         Parameters.GEOMETRY_MODE = self.geometry_var.get() == "On"
         print("Real geometry: " + ("On" if Parameters.GEOMETRY_MODE else "Off"))
-        Parameters.RENDER_3D = self.render3d_var.get() == "On"
+        Parameters.RENDER_3D, Parameters.RENDER_3D_STYLE = (
+            self.VIEW_CHOICES.get(self.render3d_var.get(), (False, "line")))
         Parameters.pixel_per_meter = float(self.fields["ppm"].get())
         value = float(self.fields["accident"].get())
         if value < 1:
@@ -802,6 +1759,31 @@ class OptionPanel:
         Parameters.pixel_per_strip = Parameters.pixel_per_meter * Parameters.strip_width
 
         self.dhaka_sim_frame.show_simulation()
+
+
+def _place_name(network: str) -> str:
+    """What to call a network on screen.
+
+    ``place.txt`` holds the name the extract was cut around, which is what a
+    reader recognises where the folder name is an identifier.  Only the part
+    before the comma, or every Dhaka network reads ", Dhaka", and without the
+    parenthetical, which is a note rather than a name.
+
+    A place name that says less than the folder does is not a name: the
+    synthetic network's file says "Dhaka", which is true of four of the
+    others too, so it falls back to "Demo Backup".
+    """
+    folder = network.replace("_", " ").title()
+    try:
+        with open(os.path.join("input", network, "place.txt"),
+                  "r", encoding="utf-8") as handle:
+            place = handle.read().strip()
+    except OSError:
+        return folder
+    place = re.sub(r"\s*\([^)]*\)", "", place).split(",")[0].strip()
+    if not place or (len(place.split()) < len(folder.split())):
+        return folder
+    return place
 
 
 class DhakaSimFrame:
@@ -825,6 +1807,7 @@ class DhakaSimFrame:
         self.panel = None
         self._report_button = None
         self._view_button = None
+        self._pause_button = None
         self._status = None
         self.show_options()
 
@@ -835,10 +1818,124 @@ class DhakaSimFrame:
         ("Bus", (8, 9)), ("Truck", (10, 11)), ("Pedestrian", (12,)),
     )
 
+    # Roadside obstructions, which have no counts because they do not travel.
+    FRICTION_CATEGORIES = (
+        ("Standing pedestrian", Constants.STANDING_PEDESTRIAN_COLOR),
+        ("Parked car", Constants.PARKED_CAR_COLOR),
+        ("Parked rickshaw", Constants.PARKED_RICKSHAW_COLOR),
+        ("Parked CNG", Constants.PARKED_CNG_COLOR),
+    )
+
+    #: The one row of Run settings that is a control rather than a reading.
+    #: Named so the renderer can pick it out without matching a bare string.
+    DELAY_LABEL = "Frame delay"
+
+    #: Delays the spinner steps through, in milliseconds.  Roughly 1-2-5 per
+    #: decade: playback speed is judged by eye, so equal ratios are the useful
+    #: steps rather than equal differences.
+    DELAY_CHOICES = (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
+
+    @staticmethod
+    def _run_settings():
+        """The configuration this run was started with, as label/value pairs.
+
+        Read once, when the legend is built, rather than bound live to
+        ``Parameters``.  Two reasons: these are a record of what was chosen on
+        the setup form, so they should not drift if something later writes to
+        the same fields, and the run's own step counter lives in there too.
+
+        The frame delay is the exception, and is rendered as a control rather
+        than as text: it only sets how long the picture pauses between frames,
+        so it can be changed mid-run without making the run mean anything
+        different.  Everything else here would.
+
+        Speeds are held internally in metres per second; the form states them
+        in km/h, and this shows what was typed.
+        """
+        hour = Parameters.TIME_OF_DAY
+        # Split across the value and unit columns, which is the only way an
+        # hour range fits beside the numeric settings without being clipped.
+        when, when_unit = ((f"{hour:02d}:00", f"-{(hour + 1) % 24:02d}:00")
+                           if 0 <= hour <= 23 else ("Peak", "hour"))
+        on_off = lambda flag: "On" if flag else "Off"
+        # Value and unit are separate so the numbers line up in their own
+        # column instead of being pushed about by the length of the unit.
+        return [
+            ("Time of day", when, when_unit),
+            ("End time", str(Parameters.simulation_end_time), "s"),
+            (DhakaSimFrame.DELAY_LABEL,
+             str(Parameters.simulation_speed), "ms"),
+            ("Random seed", str(Parameters.seed), ""),
+            ("Max speed", f"{Parameters.maximum_speed * 3.6:.0f}", "km/h"),
+            ("Strip width", f"{Parameters.strip_width:g}", "m"),
+            ("Footpath strip", f"{Parameters.footpath_strip_width:g}", "m"),
+            ("Pixels per metre", f"{Parameters.pixel_per_meter:g}", ""),
+            ("Pedestrians", on_off(Parameters.across_pedestrian_mode), ""),
+            ("Real geometry", on_off(Parameters.GEOMETRY_MODE), ""),
+            ("Trace replay", on_off(Parameters.TRACE_MODE), ""),
+        ]
+
     def _build_legend(self, parent):
         """A collapsible panel: colour key plus a live count per type."""
         bg = "#f2f4f7"
         legend = tk.Frame(parent, bg=bg, padx=10, pady=8, bd=1, relief="solid")
+
+        if Parameters.PLACE_NAME:
+            tk.Label(legend, text=Parameters.PLACE_NAME,
+                     font=("Segoe UI", 11, "bold"), bg=bg, fg="#1b2733",
+                     anchor="w", justify="left", wraplength=170).pack(
+                         anchor="w", fill="x", pady=(0, 6))
+
+        zoom_row = tk.Frame(legend, bg=bg)
+        zoom_row.pack(anchor="w", fill="x", pady=(0, 8))
+        tk.Label(zoom_row, text="Zoom", font=("Segoe UI", 9), bg=bg,
+                 fg="#4a5560").pack(side="left", padx=(0, 6))
+
+        def zoom_by(step):
+            """Nudge the zoom slider, which repaints through its own callback.
+
+            Wheel and buttons therefore share one path; the wheel's own
+            handler still moves the view directly, so this stays additive.
+            """
+            slider = getattr(self, "_scale_slider", None)
+            if slider is None:
+                return
+            slider.set(min(100.0, max(0.0, slider.get() + step)))
+
+        for label, step, tip in (("−", -6.0, "Zoom out"),
+                                 ("+", 6.0, "Zoom in")):
+            tk.Button(zoom_row, text=label, width=2, relief="raised",
+                      font=("Segoe UI", 10, "bold"), bg="#ffffff", bd=1,
+                      cursor="hand2",
+                      command=lambda s=step: zoom_by(s)).pack(side="left", padx=1)
+        tk.Button(zoom_row, text="Reset", relief="raised",
+                  font=("Segoe UI", 8), bg="#ffffff", bd=1, cursor="hand2",
+                  command=lambda: zoom_by(30.0 - self._scale_slider.get())
+                  ).pack(side="left", padx=(6, 0))
+
+        # Only offered where imagery was actually fetched, so the control
+        # never promises something the network cannot show.
+        if self.panel is not None and self.panel._basemap is not None:
+            self._basemap_var = tk.BooleanVar(value=self.panel.show_basemap)
+
+            def flip():
+                self.panel.toggle_basemap()
+                self._basemap_var.set(self.panel.show_basemap)
+                self.panel.repaint()
+
+            # "Background map", not "Satellite map": every network ships with
+            # the OpenStreetMap street rendering now, and only says satellite
+            # if someone re-fetches with --provider esri.
+            tk.Checkbutton(legend, text="Background map", bg=bg,
+                           font=("Segoe UI", 9), anchor="w",
+                           variable=self._basemap_var, command=flip,
+                           cursor="hand2").pack(anchor="w", pady=(0, 6))
+            tk.Label(legend, text="Zoom steps are fixed while the map is on, "
+                                  "so the imagery stays lined up with the "
+                                  "roads.",
+                     bg=bg, fg="#6b7683", font=("Segoe UI", 8), anchor="w",
+                     justify="left", wraplength=170).pack(anchor="w",
+                                                          pady=(0, 6))
 
         header = tk.Frame(legend, bg=bg)
         header.pack(anchor="w", fill="x")
@@ -883,8 +1980,111 @@ class DhakaSimFrame:
         tk.Label(total_row, textvariable=self.legend_total, bg=bg, width=5,
                  anchor="e", font=("Consolas", 9, "bold")).pack(side="left")
 
+        # Side friction is drawn on the same canvas but never appears in the
+        # counts above, because these are obstructions rather than trips.
+        # Without a key of its own a parked rickshaw is just an unexplained
+        # blob, which is how it came to be mistaken for a moving one.
+        tk.Label(body, text="Side friction", font=("Segoe UI", 10, "bold"),
+                 bg=bg).pack(anchor="w", pady=(12, 2))
+        for name, colour in self.FRICTION_CATEGORIES:
+            row = tk.Frame(body, bg=bg)
+            row.pack(anchor="w", fill="x", pady=1)
+            tk.Label(row, text="  ", bg=colour.to_hex(), width=2,
+                     relief="solid", borderwidth=1).pack(side="left")
+            tk.Label(row, text="  " + name, bg=bg, width=20, anchor="w",
+                     font=("Segoe UI", 9)).pack(side="left")
+
         body.pack(anchor="w", fill="x", pady=(6, 0))
+
+        # What the run was set up with, kept in view for the whole run.  The
+        # setup form is gone by now, and every one of these changes what the
+        # numbers on screen mean, so reading a result without them beside it
+        # invites comparing two runs that were never comparable.
+        settings_header = tk.Frame(legend, bg=bg)
+        settings_header.pack(anchor="w", fill="x", pady=(12, 0))
+        settings_body = tk.Frame(legend, bg=bg)
+        settings_state = {"open": True}
+
+        def toggle_settings():
+            settings_state["open"] = not settings_state["open"]
+            if settings_state["open"]:
+                settings_body.pack(anchor="w", fill="x", pady=(4, 0))
+                settings_btn.configure(text="\u2212")
+            else:
+                settings_body.forget()
+                settings_btn.configure(text="+")
+
+        tk.Label(settings_header, text="Run settings",
+                 font=("Segoe UI", 10, "bold"), bg=bg).pack(side="left")
+        settings_btn = tk.Button(settings_header, text="\u2212", width=2,
+                                 relief="flat", bg=bg,
+                                 font=("Segoe UI", 10, "bold"), bd=0,
+                                 command=toggle_settings, cursor="hand2")
+        settings_btn.pack(side="right")
+
+        for label, value, unit in self._run_settings():
+            row = tk.Frame(settings_body, bg=bg)
+            row.pack(anchor="w", fill="x", pady=1)
+            tk.Label(row, text=label, bg=bg, width=14, anchor="w",
+                     fg="#4a5560", font=("Segoe UI", 9)).pack(side="left")
+            if label == self.DELAY_LABEL:
+                self._build_delay_control(row, value, unit, bg)
+                continue
+            tk.Label(row, text=value, bg=bg, width=6, anchor="e",
+                     font=("Consolas", 9, "bold")).pack(side="left")
+            tk.Label(row, text=" " + unit, bg=bg, width=6, anchor="w",
+                     fg="#6b7683", font=("Segoe UI", 8)).pack(side="left")
+
+        settings_body.pack(anchor="w", fill="x", pady=(4, 0))
         return legend
+
+    def _build_delay_control(self, row, value, unit, bg) -> None:
+        """A spinner for the animation delay, live for the whole run.
+
+        Nothing has to be restarted or rearmed: the panel's timer reads
+        ``Parameters.simulation_speed`` each time it schedules the next frame,
+        so a new value is picked up on the following tick.  While paused the
+        timer is still turning over, so a change made then takes effect the
+        moment the run resumes.
+
+        Typed as well as stepped, since the useful range spans three orders of
+        magnitude and clicking from 500 down to 1 would be tedious.
+        """
+        self._delay_var = tk.StringVar(value=value)
+
+        def apply(normalise):
+            """Push the box's value at the run, and optionally tidy the box.
+
+            *normalise* is off while typing.  Rewriting the text on every
+            keystroke fights the typist: a "0" on the way to "500" would be
+            clamped to "1" under their fingers.  So mid-edit the value is
+            applied if it parses and the text is left alone; it is only
+            written back once the edit is committed.
+            """
+            try:
+                wanted = int(float(self._delay_var.get()))
+            except (TypeError, ValueError):
+                return                      # mid-edit, or nonsense
+            wanted = max(1, min(60000, wanted))
+            Parameters.simulation_speed = wanted
+            if normalise and str(wanted) != self._delay_var.get():
+                self._delay_var.set(str(wanted))
+
+        spin = ttk.Spinbox(row, textvariable=self._delay_var, width=6,
+                           values=self.DELAY_CHOICES,
+                           command=lambda: apply(True),
+                           font=("Consolas", 9), justify="right")
+        spin.pack(side="left")
+        # command= only fires for the arrows, so typing needs its own hooks.
+        spin.bind("<Return>", lambda _e: apply(True))
+        spin.bind("<FocusOut>", lambda _e: apply(True))
+        self._delay_var.trace_add("write", lambda *_a: apply(False))
+        # Kept as an attribute so the commit path can be exercised directly
+        # rather than through a synthetic key event, which needs focus to be
+        # where the test thinks it is.
+        self._commit_delay = lambda: apply(True)
+        tk.Label(row, text=" " + unit, bg=bg, width=4, anchor="w",
+                 fg="#6b7683", font=("Segoe UI", 8)).pack(side="left")
 
     def update_legend_counts(self, vehicle_list) -> None:
         """Refresh the live per-type counts shown beside the colour key."""
@@ -933,7 +2133,13 @@ class DhakaSimFrame:
         self.option_panel = None
         self._report_button = None
         self._view_button = None
+        self._pause_button = None
         self._status = None
+        # Belong to the legend that is about to be destroyed, and the next
+        # run may not have imagery at all.
+        self._basemap_var = None
+        self._delay_var = None
+        self._commit_delay = None
         Parameters.show_progress_slider = None
         for child in self.container.winfo_children():
             child.destroy()
@@ -954,18 +2160,28 @@ class DhakaSimFrame:
                                          state="disabled")
         self._report_button.pack(side="left", padx=(8, 0))
 
+        self._pause_button = ttk.Button(top_bar, command=self.toggle_pause)
+        self._pause_button.pack(side="left", padx=(8, 0))
+        self._sync_pause_button()
+
         # The view can be flipped at any point in a run: it changes only how
         # the frame is drawn, never what is simulated.
         self._view_button = ttk.Button(top_bar, command=self.toggle_view)
         self._view_button.pack(side="left", padx=(8, 0))
         self._sync_view_button()
         self.root.bind("<KeyPress-v>", lambda _e: self.toggle_view())
+        self.root.bind("<KeyPress-space>", lambda _e: self.toggle_pause())
+        self.root.bind("<KeyPress-m>", lambda _e: self.toggle_basemap())
 
         self._status = ttk.Label(top_bar, text="")
         self._status.pack(side="left", padx=(12, 0))
         top_bar.pack(side="top", fill="x")
 
         scale_slider = ttk.Scale(self.container, from_=100, to=0, orient="vertical")
+        # The buttons in the legend drive this same slider rather than
+        # calling set_scale directly, so the handle never disagrees with
+        # the view after a click.
+        self._scale_slider = scale_slider
         scale_slider.set(30)
         show_progress_slider = ProgressSlider(self.container, 1,
                                              Parameters.simulation_end_time, 1)
@@ -1008,6 +2224,33 @@ class DhakaSimFrame:
         panel.set_scale(max(0.00001, scale_slider.get() / 100.0))
         panel.start()
 
+    def toggle_pause(self) -> None:
+        """Hold or resume the run, from the toolbar or the space bar."""
+        if self.panel is None or self.panel._finished:
+            return
+        self.panel.set_paused(not self.panel.paused)
+        self._sync_pause_button()
+
+    def _sync_pause_button(self) -> None:
+        if self._pause_button is None or self.panel is None:
+            return
+        # The button says what it will do, not what the run is doing.
+        paused = self.panel.paused
+        self._pause_button.configure(text="\u25b6  Play" if paused
+                                     else "\u23f8  Pause")
+        if self._status is not None:
+            self._status.configure(text="Paused." if paused else "")
+
+    def toggle_basemap(self) -> None:
+        """Show or hide the map imagery, keeping the legend's box in step."""
+        if self.panel is None:
+            return
+        self.panel.toggle_basemap()
+        var = getattr(self, "_basemap_var", None)
+        if var is not None:
+            var.set(self.panel.show_basemap)
+        self.panel.repaint()
+
     def toggle_view(self) -> None:
         """Swap between the 2D plan view and the 3D perspective view."""
         if self.panel is None:
@@ -1039,6 +2282,8 @@ class DhakaSimFrame:
         # Java swaps in an inert slider once the run ends; just stop repainting.
         # In addition, offer the auto-generated HTML report to the user.
         try:
+            if self._pause_button is not None:
+                self._pause_button.configure(state="disabled")
             if self._status is not None:
                 self._status.configure(text="Run finished.")
             from . import report

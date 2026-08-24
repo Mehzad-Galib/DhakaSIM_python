@@ -54,6 +54,16 @@ class Strip:
             print("Very big problem")
         self._vehicle_list.append(v)
 
+    def get_vehicle_list(self):
+        """The vehicles currently over this strip.
+
+        Read-only by convention: the list is the strip's own, not a copy, so
+        that counting the traffic on an approach costs nothing.  A vehicle
+        covers several strips at once and appears in each of them, so anything
+        counting has to de-duplicate.
+        """
+        return self._vehicle_list
+
     def del_vehicle(self, v) -> None:
         """Removes a vehicle when it leaves the strip."""
         for i, existing in enumerate(self._vehicle_list):
@@ -158,21 +168,24 @@ class Strip:
             return ped_leader
 
         return (ped_leader
-                if ped_leader.get_distance_in_segment()
-                < veh_leader.get_distance_in_segment()
+                if (ped_leader.get_distance_in_segment()
+                    < veh_leader.get_distance_in_segment())
                 else veh_leader)
 
     def probable_leader_for_pedestrian(self, follower):
+        # Most strips have no pedestrian on them at all, and this runs half a
+        # million times a minute; there is nothing to search for here.
+        if not self._pedestrian_list:
+            return None
         minimum = DOUBLE_MAX_VALUE
         ped = None
         # as accidents can occur so getLength is omitted
         distance = follower.get_distance_in_segment() + follower.get_length()
         for leader in self._pedestrian_list:
-            if leader.get_distance_in_segment() > distance:
-                compare = leader.get_distance_in_segment() - distance
-                if compare < minimum:
-                    minimum = compare
-                    ped = leader
+            compare = leader.get_distance_in_segment() - distance
+            if 0.0 < compare < minimum:
+                minimum = compare
+                ped = leader
         res = None
         if ped is not None:
             res = follower.create_dummy_vehicle_at_pedestrian_position_for_my_model(ped)
@@ -183,7 +196,7 @@ class Strip:
 
         for vehicle in self._vehicle_list:
             lower_limit = vehicle.get_distance_in_segment()
-            upper_limit = vehicle.get_distance_in_segment() + vehicle.get_length()
+            upper_limit = lower_limit + vehicle.get_length()
             if ((lower_limit <= starting_distance <= upper_limit
                  or lower_limit <= ending_distance <= upper_limit)
                     or (starting_distance <= lower_limit <= ending_distance
@@ -205,16 +218,17 @@ class Strip:
         lower_limit = v.get_distance_in_segment()
         upper_limit = lower_limit + v.get_length()
 
+        segment = v.get_segment()
+        reverse = v.is_reverse_segment()
         for vehicle in self._vehicle_list:
             if vehicle is v:
                 continue
 
-            if (v.get_segment() is not vehicle.get_segment()
-                    or v.is_reverse_segment() != vehicle.is_reverse_segment()):
+            if (segment is not vehicle.get_segment()
+                    or reverse != vehicle.is_reverse_segment()):
                 continue
 
-            distance = vehicle.get_distance_in_segment()
-            if lower_limit < distance < upper_limit:
+            if lower_limit < vehicle.get_distance_in_segment() < upper_limit:
                 return True
 
         return False
@@ -227,8 +241,7 @@ class Strip:
             if vehicle is v:
                 continue
 
-            distance = vehicle.get_distance_in_segment()
-            if lower_limit < distance < upper_limit:
+            if lower_limit < vehicle.get_distance_in_segment() < upper_limit:
                 return vehicle
 
         return None
@@ -236,41 +249,45 @@ class Strip:
     def probable_leader(self, follower):
         """For a vehicle on this strip, finds another vehicle on the same strip
         with the minimum distance ahead."""
+        if not self._vehicle_list:
+            return None
         minimum = DOUBLE_MAX_VALUE
         ret = None
         # as accidents can occur so getLength is omitted
         distance = follower.get_distance_in_segment() + follower.get_length()
         for leader in self._vehicle_list:
-            if leader.get_distance_in_segment() > distance:
-                compare = leader.get_distance_in_segment() - distance
-                if compare < minimum:
-                    minimum = compare
-                    ret = leader
+            compare = leader.get_distance_in_segment() - distance
+            if 0.0 < compare < minimum:
+                minimum = compare
+                ret = leader
         return ret
 
     def probable_object_leader(self, follower):
+        if not self._object_list:
+            return None
         minimum = DOUBLE_MAX_VALUE
         ret = None
         # as accidents can occur so getLength is omitted
         distance = follower.get_distance_in_segment() + follower.get_length()
         for leader in self._object_list:
-            if leader.get_distance_in_segment() > distance:
-                compare = leader.get_distance_in_segment() - distance
-                if compare < minimum:
-                    minimum = compare
-                    ret = leader
+            compare = leader.get_distance_in_segment() - distance
+            if 0.0 < compare < minimum:
+                minimum = compare
+                ret = leader
         return ret
 
     def probable_follower(self, leader):
+        if not self._vehicle_list:
+            return None
         minimum = DOUBLE_MAX_VALUE
         ret = None
+        ahead = leader.get_distance_in_segment()
         for follower in self._vehicle_list:
-            distance = follower.get_distance_in_segment() + follower.get_length()
-            if leader.get_distance_in_segment() > distance:
-                compare = leader.get_distance_in_segment() - distance
-                if compare < minimum:
-                    minimum = compare
-                    ret = follower
+            compare = ahead - (follower.get_distance_in_segment()
+                               + follower.get_length())
+            if 0.0 < compare < minimum:
+                minimum = compare
+                ret = follower
         return ret
 
     def get_gap_for_forward_movement(self, v) -> float:

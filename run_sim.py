@@ -11,7 +11,7 @@ Files are read and written inside the selected network folder
 ``input/`` when no network is selected.  Run it from this folder::
 
     python run_sim.py                          # the network named in parameter.txt
-    python run_sim.py --network khamarbari     # override the selection
+    python run_sim.py --network kakrail_corridor  # override the selection
     python run_sim.py --paths-only             # regenerate path.txt, keep demand.txt
     python run_sim.py --force                  # allow overwriting survey demand
 

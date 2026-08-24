@@ -47,6 +47,14 @@ class Parameters:
     # Optional map of node id -> human-readable name (loaded from
     # input/node_names.txt if present); used for GUI labels and the report.
     NODE_NAMES = {}
+    #: Friendly link names, from ``link_names.txt``.  Same shape and the same
+    #: fallback as NODE_NAMES: absent means the numeric id is drawn instead.
+    LINK_NAMES = {}
+    #: What to call the place being simulated, for the GUI legend and the
+    #: report heading.  Read from ``place.txt``, overridable with the
+    #: ``PlaceName`` setting, and derived from the network folder when neither
+    #: exists, so an unlabelled network still names itself sensibly.
+    PLACE_NAME = ""
     # Number of frames captured for the report's embedded animation (0 = off).
     REPORT_ANIMATION_FRAMES = 24
     # Open the GUI in the 3D perspective view rather than the 2D plan view.
@@ -59,15 +67,26 @@ class Parameters:
     # Hour of the survey day to simulate, 0-23. -1 = the network's peak hour
     # (the default demand.txt / vehicle_mix.txt).
     TIME_OF_DAY = -1
-    # Real-world geometry extensions (physical medians, and later one-way links,
-    # roundabout circulation and turn-lane channelisation). OFF by default: with
-    # GEOMETRY_MODE False the simulator stays byte-identical to the Java
-    # reference. Read from the selected network's geometry.txt.
-    GEOMETRY_MODE = False
+    # Real-world geometry extensions: physical medians, one-way links,
+    # roundabout circulation and turn-lane channelisation, read from the
+    # selected network's geometry.txt.
+    #
+    # ON by default.  Every surveyed network ships a geometry.txt and every one
+    # of them is wrong without it -- a roundabout with no ring, a dual
+    # carriageway with no median, a one-way arm reserving half its road for
+    # traffic that never comes.  Turning it OFF is the Java-parity mode: with
+    # GEOMETRY_MODE False none of it runs and the simulator reproduces the
+    # reference exactly, which is what `tests/test_javacompat.py` and the
+    # experiments/ comparison need.  A network with no geometry.txt is
+    # unaffected either way.
+    GEOMETRY_MODE = True
     # link id -> median width in metres
     MEDIAN_WIDTHS = {}
     # node id -> roundabout radius in metres
     ROUNDABOUTS = {}
+    # node id -> circulatory carriageway width in metres, where geometry.txt
+    # states one; anything absent takes Constants.ROUNDABOUT_CIRCULATORY_WIDTH
+    ROUNDABOUT_WIDTHS = {}
     # link ids that carry traffic in one direction only, so the whole
     # carriageway serves that direction instead of half being reserved
     ONEWAY_LINKS = set()
@@ -111,13 +130,50 @@ class Parameters:
     strip_width = 0.0
     footpath_strip_width = 0.0
     maximum_speed = 0.0
+    #: MaximumSpeed exactly as ``parameter.txt`` stated it, before any network
+    #: defaults.txt or --set touched it.  The GUI needs it to know what to fall
+    #: back to when the intersection dropdown moves to a network that states no
+    #: limit of its own.
+    BASE_MAXIMUM_SPEED = 0.0
     across_pedestrian_mode = False
     along_pedestrian_mode = False
     DEBUG_MODE = False
     TRACE_MODE = False
     random = None
     seed = 0
+    # How the 3D view draws vehicles and roadside objects: "solid" shades
+    # every camera-facing face, "line" draws each model part once as an
+    # outlined silhouette.  Line is the default -- it is a third of the canvas
+    # items for the same shape, and on this renderer the canvas is the
+    # expensive half of a frame.
+    RENDER_3D_STYLE = "line"
     SIGNAL_CHANGE_DURATION = 0
+    # Traffic signal scheduling (Rahaman et al., IEEE Access 2025); see
+    # dhakasim/signal_schedule.py.  "fixed" is the original behaviour and the
+    # default, so nothing about a run changes until it is asked for.
+    SIGNAL_MODE = "fixed"
+    # W in Equation 6: how the two normalised objectives are weighed against
+    # each other when one schedule has to be picked off the Pareto front.  The
+    # paper's Figure 10 finds this barely matters, which is worth knowing
+    # before spending an afternoon tuning it.
+    SIGNAL_OBJECTIVE_WEIGHT = 0.5
+    # w in Equation 3: how much a motorised vehicle counts towards congestion
+    # against a non-motorised one.  This one matters a great deal (Figure 11):
+    # the lower it goes, the better the network runs, because a rickshaw takes
+    # more than twice as long to clear the stop line as a car and pricing the
+    # two alike under-serves the approaches full of rickshaws.
+    SIGNAL_MOTORISED_WEIGHT = 0.2
+    # Bounds on one approach's green, in seconds.  The paper's range.
+    SIGNAL_GREEN_MIN = 5.0
+    SIGNAL_GREEN_MAX = 600.0
+    # NSGA-II's population and evaluation budget.  Population is the paper's;
+    # the budget is not, and is the one knob trading schedule quality against
+    # how long a step takes -- see signal_schedule.optimise.
+    SIGNAL_POPULATION = 50
+    SIGNAL_EVALUATIONS = 2000
+    # Range the "biased-random" baseline draws its multiplier from, in seconds.
+    SIGNAL_RANDOM_LOW = 5.0
+    SIGNAL_RANDOM_HIGH = 600.0
     DEFAULT_TRANSLATE_X = 0.0
     DEFAULT_TRANSLATE_Y = 0.0
     CENTERED_VIEW = False

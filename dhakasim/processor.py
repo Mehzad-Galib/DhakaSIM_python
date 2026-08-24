@@ -26,6 +26,59 @@ from .vehicle import Vehicle
 from . import utilities as Utilities
 
 
+def _circle_crossing(points, centre_x, centre_y, radius):
+    """Where a polyline running inwards last crosses a circle.
+
+    *points* starts outside and ends at (or near) the centre.  Returns the
+    index of the last point still outside and the crossing itself, or ``None``
+    when the line never gets outside at all -- a link shorter than the
+    roundabout, which is a network to fix rather than a case to handle.
+    """
+    def outside(p):
+        return math.hypot(p[0] - centre_x, p[1] - centre_y) >= radius
+
+    if not points or not outside(points[0]):
+        return None
+    for i in range(len(points) - 1):
+        a, b = points[i], points[i + 1]
+        if outside(b):
+            continue
+        # a is out, b is in: solve |a + t(b - a) - centre| = radius for t
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        fx, fy = a[0] - centre_x, a[1] - centre_y
+        qa = dx * dx + dy * dy
+        qb = 2.0 * (fx * dx + fy * dy)
+        qc = fx * fx + fy * fy - radius * radius
+        disc = qb * qb - 4.0 * qa * qc
+        if qa <= 0.0 or disc < 0.0:
+            return None
+        root = math.sqrt(disc)
+        # Two roots, one entering the circle and one leaving; the segment runs
+        # inwards, so the entering one is the smaller and it is the one wanted.
+        hits = [t for t in ((-qb - root) / (2.0 * qa), (-qb + root) / (2.0 * qa))
+                if -1e-9 <= t <= 1.0 + 1e-9]
+        if not hits:
+            return None
+        t = min(hits)
+        return i, (a[0] + dx * t, a[1] + dy * t)
+    return None
+
+
+def _rebuild_segments(link, points, widths) -> None:
+    """Replace a link's segments with ones spanning *points*.
+
+    Fresh objects rather than edited ones: a Segment works out its sensor
+    position and its strips in its constructor.
+    """
+    link.clear_segments()
+    count = len(points) - 1
+    for i in range(count):
+        link.add_segment(Segment(
+            link.get_index(), i, i, points[i][0], points[i][1],
+            points[i + 1][0], points[i + 1][1], widths[i],
+            i == count - 1, i == 0, link.get_id()))
+
+
 class Processor:
     # variables for roadside objects (static in Java)
     number_of_vehicles = 0
@@ -135,7 +188,12 @@ class Processor:
         Parameters.simulation_step += 1
 
     def _run_at_each_time_step(self) -> None:
-        if Parameters.simulation_step % Parameters.SIGNAL_CHANGE_DURATION == 0:
+        # SignalChangeDuration is doing two jobs in fixed-time mode: it is the
+        # green duration *and* how often the controller is asked to look.  A
+        # scheduled mode sets its own durations, so it has to be looked at
+        # every step or every green would be rounded up to a multiple of this.
+        if (Parameters.SIGNAL_MODE != "fixed"
+                or Parameters.simulation_step % Parameters.SIGNAL_CHANGE_DURATION == 0):
             self._control_signal()
 
         if self.start_along_ped:
@@ -434,6 +492,7 @@ class Processor:
                     "footpath_strip_width": Parameters.footpath_strip_width,
                     "maximum_speed": Parameters.maximum_speed,
                     "signal_change": Parameters.SIGNAL_CHANGE_DURATION,
+                    "signal_mode": Parameters.SIGNAL_MODE,
                     "across_ped": Parameters.across_pedestrian_mode,
                     "along_ped": Parameters.along_pedestrian_mode,
                     "object_mode": Parameters.OBJECT_MODE,
@@ -1409,11 +1468,18 @@ class Processor:
             Statistics.flow_count = 0
 
     def _control_signal(self) -> None:
+        # A roundabout has no phases at all -- it gives way to circulating
+        # traffic -- so scheduling never applies to one, whatever the mode.
+        scheduled = Parameters.SIGNAL_MODE != "fixed"
         for node in self.intersection_list:
             # node.adaptive_signal_change(Parameters.simulation_step)
             if node.is_roundabout():
                 node.roundabout_signal_change()   # give way to circulating traffic
+            elif scheduled:
+                node.scheduled_signal_change(Parameters.simulation_step)
             else:
+                # The original fixed-time behaviour, left exactly as it was:
+                # this is the path a Java-parity run takes.
                 node.constant_signal_change(Parameters.simulation_step)
 
     def _get_next_signal(self, vehicle) -> SIGNAL:
@@ -1477,7 +1543,7 @@ class Processor:
         starting with ``#`` are ignored. Currently understood::
 
             median     <linkId> <widthMetres>
-            roundabout <nodeId> <radiusMetres>
+            roundabout <nodeId> <radiusMetres> [circulatoryWidthMetres]
             oneway     <linkId>
 
         The file is only consulted when ``GeometryMode On`` is set, so a default
@@ -1485,6 +1551,7 @@ class Processor:
         """
         Parameters.MEDIAN_WIDTHS = {}
         Parameters.ROUNDABOUTS = {}
+        Parameters.ROUNDABOUT_WIDTHS = {}
         Parameters.ONEWAY_LINKS = set()
         Parameters.TURN_LANES = {}
         self.turn_lane_held = 0
@@ -1496,6 +1563,7 @@ class Processor:
             return
         medians = {}
         roundabouts = {}
+        circulatory = {}
         oneways = set()
         turn_lanes = {}
         try:
@@ -1509,6 +1577,8 @@ class Processor:
                         medians[int(tokens[1])] = float(tokens[2])
                     elif len(tokens) >= 3 and tokens[0].lower() == "roundabout":
                         roundabouts[int(tokens[1])] = float(tokens[2])
+                        if len(tokens) >= 4:
+                            circulatory[int(tokens[1])] = float(tokens[3])
                     elif len(tokens) == 2 and tokens[0].lower() == "oneway":
                         oneways.add(int(tokens[1]))
                     elif len(tokens) == 5 and tokens[0].lower() == "turnlane":
@@ -1519,6 +1589,7 @@ class Processor:
             return
         Parameters.MEDIAN_WIDTHS = medians
         Parameters.ROUNDABOUTS = roundabouts
+        Parameters.ROUNDABOUT_WIDTHS = circulatory
         Parameters.ONEWAY_LINKS = oneways
         Parameters.TURN_LANES = turn_lanes
         if turn_lanes:
@@ -1582,7 +1653,9 @@ class Processor:
                         node.create_bundles()
                         radius = Parameters.ROUNDABOUTS.get(node_id, 0.0)
                         if radius > 0:
-                            node.set_roundabout(radius)
+                            node.set_roundabout(
+                                radius,
+                                Parameters.ROUNDABOUT_WIDTHS.get(node_id, 0.0))
                         self.intersection_list.append(node)
                     self.node_list.append(node)
 
@@ -1615,6 +1688,36 @@ class Processor:
         except OSError:
             pass
         Parameters.NODE_NAMES = names
+
+        # Optional friendly link names: "<id> <name with spaces>" per line.
+        link_names = {}
+        try:
+            with open(self.input_path("link_names.txt"), "r") as reader:
+                for line in reader:
+                    parts = line.split(None, 1)
+                    if len(parts) == 2:
+                        link_names[int(parts[0])] = parts[1].strip()
+        except OSError:
+            pass
+        Parameters.LINK_NAMES = link_names
+
+        # What to call this place.  An explicit PlaceName setting wins, then
+        # place.txt, then the folder name tidied up -- so a network always has
+        # something to put in the legend and the report heading.
+        if not Parameters.PLACE_NAME:
+            place = ""
+            try:
+                with open(self.input_path("place.txt"), "r") as reader:
+                    for line in reader:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            place = line
+                            break
+            except OSError:
+                pass
+            if not place and Parameters.NETWORK_DIR:
+                place = Parameters.NETWORK_DIR.replace("_", " ").title()
+            Parameters.PLACE_NAME = place
 
         # Optional survey vehicle mix: "<type index> <percentage>" per line.
         # Converted to cumulative per-10000 thresholds for sampling.
@@ -1788,6 +1891,72 @@ class Processor:
                 ordered.append((bearing, link_index))
             ordered.sort()
             node.set_circulation_order([li for _b, li in ordered])
+            self._open_the_circle(node)
+
+    def _open_the_circle(self, node) -> None:
+        """Pull every arm back to the outside of the circulatory carriageway.
+
+        The survey draws a junction as a point: every arm at a node ends on the
+        same coordinate, which for a roundabout is the middle of the island.
+        Left alone that is what the simulator models -- traffic drives straight
+        across the island and stops on it, which is what the picture showed --
+        and no amount of drawing fixes it, because there is no ring for anyone
+        to be on.  A roundabout is not an intersection with an ornament in the
+        middle; it is a one-way circular road with a solid island inside it,
+        and the arms have to stop at its kerb for that road to exist.
+
+        So each arm is cut where it crosses the outer circle.  Everything
+        inside becomes the circulatory carriageway, which is exactly the region
+        an ``IntersectionStrip`` already covers, and ``set_arc`` then bends
+        each crossing into an arc that clears the island instead of one that
+        cuts through it.
+
+        Segments are rebuilt rather than edited: a ``Segment`` measures its own
+        sensor position from its endpoints in its constructor, so moving them
+        afterwards would leave that stale.
+        """
+        centre_x, centre_y = node.get_centre()
+        outer = node.get_outer_radius()
+        for j in range(node.number_of_links()):
+            link = self.link_list[node.get_link(j)]
+            at_start = link.get_up_node() == node.get_id()
+            points = [(link.get_first_segment().get_start_x(),
+                       link.get_first_segment().get_start_y())]
+            widths = []
+            for k in range(link.get_number_of_segments()):
+                seg = link.get_segment(k)
+                points.append((seg.get_end_x(), seg.get_end_y()))
+                widths.append(seg.get_segment_width())
+            if at_start:
+                points.reverse()
+                widths.reverse()
+
+            # points now runs from the far end of the link towards the node,
+            # so walk in from the outside until the circle is crossed.
+            cut = _circle_crossing(points, centre_x, centre_y, outer)
+            if cut is None:
+                print(f"Geometry: link {link.get_id()} is too short to reach "
+                      f"the edge of the roundabout at node {node.get_id()}; "
+                      f"left as it is")
+                continue
+
+            # The cut stays on the ring and does not go a metre deeper.  The
+            # arm's mouth ends up standing off the ring -- its stated line is
+            # a kerb edge, so the carriageway swings a full width to one side
+            # and away from the circle -- but the answer to that is to fill
+            # the wedge when drawing (`road_geometry.roundabout_aprons`), not
+            # to push the arm inside the island.  Every metre the arm overruns
+            # is a metre nearer the centre that a vehicle enters the circle,
+            # and `set_arc` takes its radius from exactly that point.
+            index, point = cut
+            # `index` is the last point still outside, so segment `index` is
+            # the one the circle cuts: keep it, shortened, and drop the rest.
+            points = points[:index + 1] + [point]
+            widths = widths[:index + 1]
+            if at_start:
+                points.reverse()
+                widths.reverse()
+            _rebuild_segments(link, points, widths)
 
     def _get_link_index(self, link_id: int) -> int:
         for link in self.link_list:

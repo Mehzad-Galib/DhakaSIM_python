@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from .constants import Constants
 from .javacompat import DOUBLE_MAX_VALUE, DOUBLE_MIN_VALUE
 from .intersection_strip_bundle import IntersectionStripBundle
 from .parameters import Parameters
 from .point2d import Point2D
 from .signal import SIGNAL
+from . import signal_schedule
 
 
 class Node:
@@ -14,7 +16,9 @@ class Node:
                  "intersection_strip_list", "_vehicle_list",
                  "_intersection_strip_bundles", "_active_bundle_index",
                  "_pressure_on_active_bundle", "_roundabout_radius",
-                 "_circulation_order", "_centre_x", "_centre_y")
+                 "_circulatory_width",
+                 "_circulation_order", "_centre_x", "_centre_y",
+                 "_green_times", "_signal_rng")
 
     MIN_VEHICLES_TO_MAKE_A_SIGNAL_GREEN = 1
 
@@ -29,12 +33,25 @@ class Node:
         # > 0 marks this node as a roundabout of that radius in metres
         # (GeometryMode only). See ``roundabout_signal_change``.
         self._roundabout_radius = 0.0
+        # Only meaningful once set_roundabout has run.
+        self._circulatory_width = Constants.ROUNDABOUT_CIRCULATORY_WIDTH
         # incident link indices in circulation order (see set_circulation_order)
         self._circulation_order = []
         # true centre of a junction, in metres; junction nodes are stored at
         # (0, 0) so this is recovered from the incident link geometry
         self._centre_x = 0.0
         self._centre_y = 0.0
+
+        # Green duration per bundle, in simulation steps, as decided by the
+        # Traffic Signal Scheduling Module.  Empty until the first cycle is
+        # planned, and unused unless Parameters.SIGNAL_MODE asks for it.
+        self._green_times = []
+        # The optimiser's own random stream.  Seeded per node so that the
+        # schedule an intersection gets does not depend on how many other
+        # intersections were planned before it, and kept well away from
+        # Parameters.random, which is what makes a seeded run reproduce the
+        # Java original exactly.
+        self._signal_rng = None
 
         self._link_list = []
         self.intersection_strip_list = []
@@ -122,14 +139,28 @@ class Node:
                     break
             self._time_passed = Parameters.simulation_step
 
-    def set_roundabout(self, radius: float) -> None:
+    def set_roundabout(self, radius: float, circulatory_width: float = 0.0) -> None:
         self._roundabout_radius = radius
+        self._circulatory_width = (circulatory_width if circulatory_width > 0
+                                   else Constants.ROUNDABOUT_CIRCULATORY_WIDTH)
 
     def is_roundabout(self) -> bool:
         return self._roundabout_radius > 0
 
     def get_roundabout_radius(self) -> float:
         return self._roundabout_radius
+
+    def get_circulatory_width(self) -> float:
+        return self._circulatory_width
+
+    def get_outer_radius(self) -> float:
+        """Kerb line of the circulatory carriageway, in metres.
+
+        The arms are pulled back to this circle when the network is read, so
+        it is where a roundabout begins for a driver and where the ring is
+        drawn for a reader.  Nothing should be inside it but the island.
+        """
+        return self._roundabout_radius + self._circulatory_width
 
     def set_circulation_order(self, link_indices) -> None:
         """Incident links ordered the way traffic circulates.
@@ -193,6 +224,66 @@ class Node:
             bundle.set_signal(SIGNAL.RED if link_index in blocked
                               else SIGNAL.GREEN)
 
+    def scheduled_signal_change(self, simulation_time: int) -> None:
+        """Signalling driven by the Traffic Signal Scheduling Module.
+
+        Algorithm 1 of Rahaman et al., 2025, from this end: hold each approach
+        green for the duration the module gave it, and when the cycle has come
+        all the way round, ask for a new schedule against the traffic that is
+        there *now*.  Re-planning every cycle rather than every step is the
+        paper's own design and it is also what makes the cost bearable -- a
+        full NSGA-II run per intersection per simulation step would dominate
+        everything else the simulator does.
+        """
+        if not self._intersection_strip_bundles:
+            return
+        if not self._green_times:
+            self._plan_cycle()
+            self._time_passed = simulation_time
+            return
+        index = self._active_bundle_index
+        if simulation_time - self._time_passed < self._green_times[index]:
+            return
+        self._switch_signal()
+        self._time_passed = simulation_time
+        if self._active_bundle_index == 0:
+            self._plan_cycle()
+
+    def _plan_cycle(self) -> None:
+        """Ask the scheduling module for one green duration per approach."""
+        if self._signal_rng is None:
+            # Distinct per node, derived from the run's seed, so the whole
+            # thing stays reproducible without sharing state between nodes.
+            self._signal_rng = signal_schedule.seed_from(
+                (0 if Parameters.seed is None or Parameters.seed < 0
+                 else Parameters.seed) + self._id * 7919)
+        demands = [signal_schedule.Demand(*bundle.get_demand_on_bundle())
+                   for bundle in self._intersection_strip_bundles]
+        seconds = signal_schedule.schedule(
+            demands, Parameters.SIGNAL_MODE,
+            rng=self._signal_rng,
+            # SignalChangeDuration is the fixed-time green, and it is the
+            # only place that number lives.  It is held in steps, and the
+            # module works in seconds.
+            fixed_green=Parameters.SIGNAL_CHANGE_DURATION * Constants.TIME_STEP,
+            motorised_weight=Parameters.SIGNAL_MOTORISED_WEIGHT,
+            objective_weight=Parameters.SIGNAL_OBJECTIVE_WEIGHT,
+            green_min=Parameters.SIGNAL_GREEN_MIN,
+            green_max=Parameters.SIGNAL_GREEN_MAX,
+            population=Parameters.SIGNAL_POPULATION,
+            evaluations=Parameters.SIGNAL_EVALUATIONS,
+            random_low=Parameters.SIGNAL_RANDOM_LOW,
+            random_high=Parameters.SIGNAL_RANDOM_HIGH)
+        # Seconds out of the module, simulation steps in here.  At least one
+        # step, or an approach whose green rounds to nothing never opens and
+        # the traffic on it waits for the whole run.
+        self._green_times = [max(1, int(round(green / Constants.TIME_STEP)))
+                             for green in seconds]
+
+    def get_green_times(self):
+        """The current cycle, in simulation steps.  For the report and tests."""
+        return list(self._green_times)
+
     def constant_signal_change(self, simulation_time: int) -> None:
         """Non adaptive signal changing scheme; does not consider load on a link."""
         if simulation_time - self._time_passed >= Parameters.SIGNAL_CHANGE_DURATION:
@@ -232,24 +323,31 @@ class Node:
 
     @staticmethod
     def _is_colliding(a, b) -> bool:
-        for x in range(2):
-            vehicle = a if x == 0 else b
+        """Separating-axis test on the two vehicles' footprints.
 
-            corners = vehicle.get_segment_corners()
-            for i1 in range(len(corners)):
-                i2 = (i1 + 1) % len(corners)
-                p1 = corners[i1]
-                p2 = corners[i2]
+        Both corner lists are fetched once and reduced to plain coordinate
+        pairs: this runs over eight edges for every pair of vehicles in every
+        junction on every step, and asking each vehicle for its corners again
+        inside the inner loop -- and boxing every edge normal in a Point2D --
+        cost more than the arithmetic did.
+        """
+        corners_a = [(p.x, p.y) for p in a.get_segment_corners()]
+        corners_b = [(p.x, p.y) for p in b.get_segment_corners()]
 
-                normal = Point2D(p2.y - p1.y, p1.x - p2.x)
+        for corners in (corners_a, corners_b):
+            count = len(corners)
+            for i1 in range(count):
+                x1, y1 = corners[i1]
+                x2, y2 = corners[(i1 + 1) % count]
+                nx, ny = y2 - y1, x1 - x2
 
                 min_a = DOUBLE_MAX_VALUE
                 # Java seeds this with Double.MIN_VALUE, the smallest positive
                 # denormal rather than the most negative double.
                 max_a = DOUBLE_MIN_VALUE
 
-                for p in a.get_segment_corners():
-                    projected = normal.x * p.x + normal.y * p.y
+                for px, py in corners_a:
+                    projected = nx * px + ny * py
 
                     if projected < min_a:
                         min_a = projected
@@ -259,8 +357,8 @@ class Node:
                 min_b = DOUBLE_MAX_VALUE
                 max_b = DOUBLE_MIN_VALUE
 
-                for p in b.get_segment_corners():
-                    projected = normal.x * p.x + normal.y * p.y
+                for px, py in corners_b:
+                    projected = nx * px + ny * py
 
                     if projected < min_b:
                         min_b = projected
