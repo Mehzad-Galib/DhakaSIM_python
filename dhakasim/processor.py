@@ -12,6 +12,7 @@ from .javacompat import (Color, DOUBLE_MAX_VALUE, jabs_int, jdiv, jformat,
                          jint, jlog, jmax, jmin, jround, jround_to_int, jstr)
 from .link import Link
 from .link_segment_orientation import get_link_and_segment_orientation
+from . import network_files
 from .node import Node
 from .parameters import Parameters, VEHICLE_GENERATION_RATE, scratch_random
 from .path import Path
@@ -1569,34 +1570,16 @@ class Processor:
         path = self.input_path("geometry.txt")
         if not os.path.exists(path):
             return
-        medians = {}
-        roundabouts = {}
-        circulatory = {}
-        oneways = set()
-        turn_lanes = {}
         try:
-            # utf-8 explicitly: street names in the medians' comments can be
-            # Arabic or Bangla, and Windows' default codepage cannot read them.
-            with open(path, "r", encoding="utf-8") as reader:
-                for line in reader:
-                    line = line.split("#", 1)[0].strip()
-                    if not line:
-                        continue
-                    tokens = line.split()
-                    if len(tokens) == 3 and tokens[0].lower() == "median":
-                        medians[int(tokens[1])] = float(tokens[2])
-                    elif len(tokens) >= 3 and tokens[0].lower() == "roundabout":
-                        roundabouts[int(tokens[1])] = float(tokens[2])
-                        if len(tokens) >= 4:
-                            circulatory[int(tokens[1])] = float(tokens[3])
-                    elif len(tokens) == 2 and tokens[0].lower() == "oneway":
-                        oneways.add(int(tokens[1]))
-                    elif len(tokens) == 5 and tokens[0].lower() == "turnlane":
-                        turn_lanes[(int(tokens[1]), int(tokens[2]))] = (
-                            int(tokens[3]), int(tokens[4]))
+            facts = network_files.read_geometry(path)
         except (OSError, ValueError) as ex:
             print(f"geometry.txt ignored: {ex}")
             return
+        medians = facts.medians
+        roundabouts = facts.roundabouts
+        circulatory = facts.circulatory
+        oneways = facts.oneways
+        turn_lanes = facts.turn_lanes
         Parameters.MEDIAN_WIDTHS = medians
         Parameters.ROUNDABOUTS = roundabouts
         Parameters.ROUNDABOUT_WIDTHS = circulatory
@@ -1618,56 +1601,39 @@ class Processor:
 
     def _read_network(self) -> None:
         try:
-            with open(self.input_path("link.txt"), "r") as reader:
-                num_links = int(reader.readline())
-                for i in range(num_links):
-                    tokens = reader.readline().split()
-                    link_id = int(tokens[0])
-                    node_id1 = int(tokens[1])
-                    node_id2 = int(tokens[2])
-                    segment_count = int(tokens[3])
-                    link = Link(i, link_id, node_id1, node_id2)
-                    for j in range(segment_count):
-                        tokens = reader.readline().split()
-                        segment_id = int(tokens[0])
-                        start_x = float(tokens[1])
-                        start_y = float(tokens[2])
-                        end_x = float(tokens[3])
-                        end_y = float(tokens[4])
-                        segment_width = float(tokens[5])
+            # The file grammar lives in network_files; what stays here is the
+            # heavy construction only this loader wants -- a Segment measures
+            # its sensor and builds its strips in its constructor, which
+            # needs the run's configuration.
+            for i, row in enumerate(network_files.read_link_rows(
+                    self.input_path("link.txt"))):
+                link = Link(i, row.link_id, row.up, row.down)
+                segment_count = len(row.segments)
+                for j, seg in enumerate(row.segments):
+                    segment = Segment(i, j, seg.seg_id, seg.sx, seg.sy,
+                                      seg.ex, seg.ey, seg.width,
+                                      j == segment_count - 1, j == 0,
+                                      row.link_id)
+                    link.add_segment(segment)
+                self.link_list.append(link)
 
-                        first_segment = (j == 0)
-                        last_segment = (j == segment_count - 1)
-
-                        segment = Segment(i, j, segment_id, start_x, start_y, end_x,
-                                          end_y, segment_width, last_segment,
-                                          first_segment, link_id)
-                        link.add_segment(segment)
-                    self.link_list.append(link)
-
-            with open(self.input_path("node.txt"), "r") as reader:
-                num_nodes = int(reader.readline())
-                boundary_points = []
-
-                for i in range(num_nodes):
-                    tokens = reader.readline().split()
-                    node_id = int(tokens[0])
-                    center_x = float(tokens[1])
-                    center_y = float(tokens[2])
-                    if center_x != 0 or center_y != 0:
-                        boundary_points.append(Point2D(center_x, center_y))
-                    node = Node(i, node_id, center_x, center_y)
-                    for token in tokens[3:]:
-                        node.add_link(self._get_link_index(int(token)))
-                    if node.number_of_links() > 1:
-                        node.create_bundles()
-                        radius = Parameters.ROUNDABOUTS.get(node_id, 0.0)
-                        if radius > 0:
-                            node.set_roundabout(
-                                radius,
-                                Parameters.ROUNDABOUT_WIDTHS.get(node_id, 0.0))
-                        self.intersection_list.append(node)
-                    self.node_list.append(node)
+            boundary_points = []
+            for i, row in enumerate(network_files.read_node_rows(
+                    self.input_path("node.txt"))):
+                if row.x != 0 or row.y != 0:
+                    boundary_points.append(Point2D(row.x, row.y))
+                node = Node(i, row.node_id, row.x, row.y)
+                for link_id in row.link_ids:
+                    node.add_link(self._get_link_index(link_id))
+                if node.number_of_links() > 1:
+                    node.create_bundles()
+                    radius = Parameters.ROUNDABOUTS.get(row.node_id, 0.0)
+                    if radius > 0:
+                        node.set_roundabout(
+                            radius,
+                            Parameters.ROUNDABOUT_WIDTHS.get(row.node_id, 0.0))
+                    self.intersection_list.append(node)
+                self.node_list.append(node)
 
             self._validate_network()
             self._setup_roundabouts()

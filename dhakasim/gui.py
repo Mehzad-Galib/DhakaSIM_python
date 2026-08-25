@@ -148,12 +148,23 @@ class CanvasGraphics:
 
 
 class ProgressSlider:
-    """Stands in for the Swing ``JSlider`` the drawing code pokes at."""
+    """Stands in for the Swing ``JSlider`` the drawing code pokes at.
+
+    A plain ``tk.Scale`` rather than ttk: under the Windows theme ttk paints
+    its sliders from the OS and ignores every colour handed to it, and the
+    run screen dresses in the start screen's palette (``_UI``).
+    """
 
     def __init__(self, parent, minimum, maximum, value):
         self.var = tk.DoubleVar(value=value)
-        self.widget = ttk.Scale(parent, from_=minimum, to=max(maximum, minimum + 1),
-                                orient="horizontal", variable=self.var)
+        self.widget = tk.Scale(parent, from_=minimum, to=max(maximum, minimum + 1),
+                               orient="horizontal", variable=self.var,
+                               showvalue=False, borderwidth=0,
+                               highlightthickness=0, sliderrelief="flat",
+                               sliderlength=26, width=9,
+                               background=_UI["seg_off"],
+                               troughcolor=_UI["band"],
+                               activebackground=_UI["accent"])
 
     def set_value(self, value) -> None:
         try:
@@ -181,6 +192,9 @@ class DhakaSimPanel:
         self._reference_y = -999999999
         self._road_geometry = None
         self._road_geometry_widen = 0.0
+        # What the 3D static layer on the canvas was built from; None means
+        # there is no reusable static layer.  See paint_component.
+        self._static3d_key = None
         self._timer = None
         self._finished = False
         self._basemap = None
@@ -288,13 +302,39 @@ class DhakaSimPanel:
 
     def paint_component(self) -> None:
         canvas = self.canvas
-        canvas.delete("all")
         width = canvas.winfo_width() or 1
         height = canvas.winfo_height() or 1
+        reuse_static = False
         if self.view_3d:
             g2d = self.scene3d
-            g2d.begin_frame(width, height, Parameters.pixel_per_meter)
+            camera = g2d.camera
+            # Everything the projected road layer depends on.  While none of
+            # it changes -- the common case, a run being watched from a still
+            # camera -- the sky, ground, roads and node names stay on the
+            # canvas and only the vehicles are deleted and redrawn, which is
+            # the same economy the report has always used
+            # (RunRecorder._capture_3d renders the static layer once).  The
+            # canvas is the expensive half of this renderer, so not re-feeding
+            # it several hundred static items a frame is the single biggest
+            # saving available.
+            static_key = (width, height, Parameters.pixel_per_meter,
+                          round(camera.target[0], 2), round(camera.target[1], 2),
+                          round(camera.distance, 2), round(camera.yaw, 5),
+                          round(camera.pitch, 5), camera.fov,
+                          self.draw_roads, id(self._road_geometry))
+            reuse_static = static_key == self._static3d_key
+            if reuse_static:
+                canvas.delete(render3d.Scene3D.DYNAMIC_TAG)
+                canvas.delete("furniture")
+            else:
+                canvas.delete("all")
+            g2d.begin_frame(width, height, Parameters.pixel_per_meter,
+                            keep_static=reuse_static)
         else:
+            canvas.delete("all")
+            # 2D items are untagged, so a later 3D frame must not mistake
+            # what this frame paints for its own static layer.
+            self._static3d_key = None
             g2d = self.graphics
             g2d.set_transform(width, height, self.scale,
                               self.translate_x, self.translate_y)
@@ -317,8 +357,14 @@ class DhakaSimPanel:
         if self.basemap_active():
             self._draw_basemap(g2d)
 
-        if self.draw_roads:
+        if self.draw_roads and not reuse_static:
             self.draw_road_network(g2d)
+
+        if self.view_3d:
+            # The static half of the 3D frame ends here; vehicles and
+            # trajectories from now on are tagged for per-frame deletion.
+            g2d.begin_dynamic()
+            self._static3d_key = static_key
 
         if self.draw_trajectories:
             self.draw_all_trajectories(g2d)
@@ -369,6 +415,11 @@ class DhakaSimPanel:
         Networks are built with bearings measured from screen-up, so north is
         simply up -- except in the 3D view, where the camera can be swung round
         and the needle has to swing with it.
+
+        Every item carries the ``furniture`` tag: the 3D view deletes only
+        its dynamic items between frames when the camera is still, and the
+        furniture has to be deleted and redrawn with them or the new vehicles
+        would stack above the compass.
         """
         canvas = self.canvas
         ink, paper = "#12263a", "#ffffff"
@@ -379,7 +430,8 @@ class DhakaSimPanel:
         if self.basemap_active():
             canvas.create_text(width - 8, height - 6, anchor="se",
                                text=self._basemap.attribution,
-                               fill="#33465c", font=("Segoe UI", 8))
+                               fill="#33465c", font=("Segoe UI", 8),
+                               tags="furniture")
 
         # --- north arrow, top right ---
         cx, cy = width - 46, 46
@@ -391,11 +443,12 @@ class DhakaSimPanel:
             return cx + x * cos_b - y * sin_b, cy + x * sin_b + y * cos_b
 
         canvas.create_oval(cx - 26, cy - 26, cx + 26, cy + 26,
-                           fill=paper, outline="#c7ccd3")
+                           fill=paper, outline="#c7ccd3", tags="furniture")
         canvas.create_polygon(*needle(0, -19), *needle(-8, 11), *needle(0, 5),
-                              *needle(8, 11), fill=ink, outline="")
+                              *needle(8, 11), fill=ink, outline="",
+                              tags="furniture")
         canvas.create_text(*needle(0, 17), text="N", fill=ink,
-                           font=("Segoe UI", 10, "bold"))
+                           font=("Segoe UI", 10, "bold"), tags="furniture")
 
         if self.view_3d:
             # A scale bar means nothing under perspective -- the metres a
@@ -405,7 +458,8 @@ class DhakaSimPanel:
                 16, height - 16, anchor="sw", fill="#33465c",
                 font=("Segoe UI", 9),
                 text="3D view — drag to orbit · right-drag or Shift+drag to "
-                     "pan · wheel to zoom · double-click to reset")
+                     "pan · wheel to zoom · double-click to reset",
+                tags="furniture")
             return
 
         # --- scale bar, bottom left ---
@@ -425,13 +479,15 @@ class DhakaSimPanel:
             return
         x0, y0 = 20, height - 26
         canvas.create_rectangle(x0 - 8, y0 - 24, x0 + bar + 12, y0 + 12,
-                                fill=paper, outline="#c7ccd3")
-        canvas.create_line(x0, y0, x0 + bar, y0, fill=ink, width=3)
+                                fill=paper, outline="#c7ccd3", tags="furniture")
+        canvas.create_line(x0, y0, x0 + bar, y0, fill=ink, width=3,
+                           tags="furniture")
         for x in (x0, x0 + bar):
-            canvas.create_line(x, y0 - 6, x, y0 + 4, fill=ink, width=2)
+            canvas.create_line(x, y0 - 6, x, y0 + 4, fill=ink, width=2,
+                               tags="furniture")
         label = f"{nice} m" if nice < 1000 else f"{nice // 1000} km"
         canvas.create_text(x0 + bar / 2, y0 - 13, text=label, fill=ink,
-                           font=("Segoe UI", 10, "bold"))
+                           font=("Segoe UI", 10, "bold"), tags="furniture")
 
     def draw_all_trajectories(self, g2d) -> None:
         # TODO
@@ -815,6 +871,65 @@ def _glass(surface, top=None, bottom=None):
         tk.Frame(surface, background=colour, height=1, borderwidth=0,
                  highlightthickness=0).place(x=0, y=offset, rely=rely,
                                              relwidth=1)
+
+
+class _ToolButton(tk.Label):
+    """A push button in the start screen's dress, for the run toolbar.
+
+    Not ``ttk.Button`` for the same reason the start screen avoids ttk
+    everywhere: the Windows theme paints ttk from the OS and ignores every
+    colour it is given, so a ttk toolbar stays light grey however the rest of
+    the window is dressed.  A label with the same fills, gloss and hover the
+    start screen's buttons use keeps the two screens one application.
+
+    ``configure(text=...)`` and ``configure(state="disabled"/"normal")`` work
+    as they do on the ttk button this replaces, so the callers that flip the
+    pause caption or enable the report button did not have to change.
+    """
+
+    def __init__(self, parent, text="", command=None, primary=False):
+        super().__init__(
+            parent, text=text, font=("Segoe UI Semibold", 10),
+            background=_UI["accent"] if primary else _UI["seg_off"],
+            foreground=_UI["on_accent"] if primary else _UI["text"],
+            disabledforeground=_UI["faint"],
+            padx=14, pady=5, cursor="hand2", takefocus=True,
+            highlightthickness=2, highlightbackground=_UI["band"],
+            highlightcolor=_UI["accent_hover"])
+        self._primary = primary
+        self._command = command
+        self._gloss = tk.Frame(self, height=1, borderwidth=0,
+                               highlightthickness=0)
+        self._gloss.place(x=0, y=0, relwidth=1)
+        for sequence in ("<Button-1>", "<Return>", "<space>"):
+            self.bind(sequence, self._fire)
+        self.bind("<Enter>", lambda _e: self._paint(True))
+        self.bind("<Leave>", lambda _e: self._paint(False))
+        self._paint(False)
+
+    def _fire(self, _event):
+        if self._command is not None and str(self.cget("state")) != "disabled":
+            self._command()
+
+    def _paint(self, hovering):
+        if str(self.cget("state")) == "disabled":
+            colour = _UI["band"]
+        elif self._primary:
+            colour = _UI["accent_hover"] if hovering else _UI["accent"]
+        else:
+            colour = _UI["seg_hover"] if hovering else _UI["seg_off"]
+        self.configure(background=colour)
+        self._gloss.configure(background=_mix(colour, "#FFFFFF", 0.24))
+
+    def configure(self, cnf=None, **kw):
+        result = super().configure(cnf, **kw)
+        if "state" in kw:
+            # The fills are painted, not themed, so a state change has to
+            # repaint them; the foreground follows from disabledforeground.
+            self._paint(False)
+        return result
+
+    config = configure
 
 
 class _Dropdown(tk.Frame):
@@ -1859,7 +1974,9 @@ class DhakaSimFrame:
             self.root.state("zoomed")
         except tk.TclError:
             pass
-        self.container = ttk.Frame(self.root)
+        # The ground colour under every screen, so the gaps between the run
+        # view's panels read as the same application as the start screen.
+        self.container = tk.Frame(self.root, background=_UI["ground"])
         self.container.pack(fill="both", expand=True)
         # The configuration as loaded from parameter.txt, before any run has
         # had a chance to mutate it.  show_options() puts this back, so the
@@ -1938,20 +2055,41 @@ class DhakaSimFrame:
         ]
 
     def _build_legend(self, parent):
-        """A collapsible panel: colour key plus a live count per type."""
-        bg = "#f2f4f7"
-        legend = tk.Frame(parent, bg=bg, padx=10, pady=8, bd=1, relief="solid")
+        """A collapsible panel: colour key plus a live count per type.
+
+        Dressed in the start screen's palette (``_UI``), because the run view
+        and the form it came from are one application and should read as one.
+        Plain ``tk`` widgets throughout for the same reason the start screen
+        uses them: ttk takes its colours from the Windows theme and would
+        punch a light grey panel through the dark chrome.
+        """
+        bg = _UI["panel"]
+        legend = tk.Frame(parent, bg=bg, padx=10, pady=8,
+                          highlightthickness=1,
+                          highlightbackground=_UI["edge"])
+
+        def dark_button(parent_, text, command, width=None, size=10):
+            button = tk.Button(
+                parent_, text=text, command=command, cursor="hand2",
+                font=("Segoe UI Semibold", size), bd=0, relief="flat",
+                background=_UI["seg_off"], foreground=_UI["text"],
+                activebackground=_UI["seg_hover"],
+                activeforeground=_UI["text"],
+                highlightthickness=1, highlightbackground=_UI["edge"])
+            if width is not None:
+                button.configure(width=width)
+            return button
 
         if Parameters.PLACE_NAME:
             tk.Label(legend, text=Parameters.PLACE_NAME,
-                     font=("Segoe UI", 11, "bold"), bg=bg, fg="#1b2733",
+                     font=("Segoe UI", 11, "bold"), bg=bg, fg=_UI["text"],
                      anchor="w", justify="left", wraplength=170).pack(
                          anchor="w", fill="x", pady=(0, 6))
 
         zoom_row = tk.Frame(legend, bg=bg)
         zoom_row.pack(anchor="w", fill="x", pady=(0, 8))
         tk.Label(zoom_row, text="Zoom", font=("Segoe UI", 9), bg=bg,
-                 fg="#4a5560").pack(side="left", padx=(0, 6))
+                 fg=_UI["muted"]).pack(side="left", padx=(0, 6))
 
         def zoom_by(step):
             """Nudge the zoom slider, which repaints through its own callback.
@@ -1966,14 +2104,11 @@ class DhakaSimFrame:
 
         for label, step, tip in (("−", -6.0, "Zoom out"),
                                  ("+", 6.0, "Zoom in")):
-            tk.Button(zoom_row, text=label, width=2, relief="raised",
-                      font=("Segoe UI", 10, "bold"), bg="#ffffff", bd=1,
-                      cursor="hand2",
-                      command=lambda s=step: zoom_by(s)).pack(side="left", padx=1)
-        tk.Button(zoom_row, text="Reset", relief="raised",
-                  font=("Segoe UI", 8), bg="#ffffff", bd=1, cursor="hand2",
-                  command=lambda: zoom_by(30.0 - self._scale_slider.get())
-                  ).pack(side="left", padx=(6, 0))
+            dark_button(zoom_row, label, lambda s=step: zoom_by(s),
+                        width=2).pack(side="left", padx=1)
+        dark_button(zoom_row, "Reset",
+                    lambda: zoom_by(30.0 - self._scale_slider.get()),
+                    size=8).pack(side="left", padx=(6, 0))
 
         # Only offered where imagery was actually fetched, so the control
         # never promises something the network cannot show.
@@ -1989,13 +2124,16 @@ class DhakaSimFrame:
             # the OpenStreetMap street rendering now, and only says satellite
             # if someone re-fetches with --provider esri.
             tk.Checkbutton(legend, text="Background map", bg=bg,
-                           font=("Segoe UI", 9), anchor="w",
+                           fg=_UI["text"], font=("Segoe UI", 9), anchor="w",
                            variable=self._basemap_var, command=flip,
-                           cursor="hand2").pack(anchor="w", pady=(0, 6))
+                           cursor="hand2", activebackground=bg,
+                           activeforeground=_UI["text"],
+                           selectcolor=_UI["seg_off"],
+                           highlightthickness=0).pack(anchor="w", pady=(0, 6))
             tk.Label(legend, text="Zoom steps are fixed while the map is on, "
                                   "so the imagery stays lined up with the "
                                   "roads.",
-                     bg=bg, fg="#6b7683", font=("Segoe UI", 8), anchor="w",
+                     bg=bg, fg=_UI["faint"], font=("Segoe UI", 8), anchor="w",
                      justify="left", wraplength=170).pack(anchor="w",
                                                           pady=(0, 6))
 
@@ -2013,10 +2151,13 @@ class DhakaSimFrame:
                 body.forget()
                 toggle_btn.configure(text="+")
 
-        tk.Label(header, text="Vehicles on network", font=("Segoe UI", 10, "bold"),
-                 bg=bg).pack(side="left")
+        tk.Label(header, text="Vehicles on network",
+                 font=("Segoe UI Semibold", 10), bg=bg,
+                 fg=_UI["accent_text"]).pack(side="left")
         toggle_btn = tk.Button(header, text="−", width=2, relief="flat",
-                               bg=bg, font=("Segoe UI", 10, "bold"), bd=0,
+                               bg=bg, fg=_UI["muted"], activebackground=bg,
+                               activeforeground=_UI["text"],
+                               font=("Segoe UI", 10, "bold"), bd=0,
                                command=toggle, cursor="hand2")
         toggle_btn.pack(side="right")
 
@@ -2027,34 +2168,35 @@ class DhakaSimFrame:
             row.pack(anchor="w", fill="x", pady=1)
             tk.Label(row, text="  ", bg="#%02x%02x%02x" % (r, g, b), width=2,
                      relief="solid", borderwidth=1).pack(side="left")
-            tk.Label(row, text="  " + name, bg=bg, width=12, anchor="w",
-                     font=("Segoe UI", 9)).pack(side="left")
+            tk.Label(row, text="  " + name, bg=bg, fg=_UI["muted"], width=12,
+                     anchor="w", font=("Segoe UI", 9)).pack(side="left")
             var = tk.StringVar(value="0")
-            tk.Label(row, textvariable=var, bg=bg, width=5, anchor="e",
-                     font=("Consolas", 9, "bold")).pack(side="left")
+            tk.Label(row, textvariable=var, bg=bg, fg=_UI["text"], width=5,
+                     anchor="e", font=("Consolas", 9, "bold")).pack(side="left")
             self.legend_counts[name] = var
 
         total_row = tk.Frame(body, bg=bg)
         total_row.pack(anchor="w", fill="x", pady=(6, 0))
-        tk.Label(total_row, text="Total", bg=bg, width=15, anchor="w",
-                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        tk.Label(total_row, text="Total", bg=bg, fg=_UI["text"], width=15,
+                 anchor="w", font=("Segoe UI", 9, "bold")).pack(side="left")
         self.legend_total = tk.StringVar(value="0")
-        tk.Label(total_row, textvariable=self.legend_total, bg=bg, width=5,
-                 anchor="e", font=("Consolas", 9, "bold")).pack(side="left")
+        tk.Label(total_row, textvariable=self.legend_total, bg=bg,
+                 fg=_UI["accent_text"], width=5, anchor="e",
+                 font=("Consolas", 9, "bold")).pack(side="left")
 
         # Side friction is drawn on the same canvas but never appears in the
         # counts above, because these are obstructions rather than trips.
         # Without a key of its own a parked rickshaw is just an unexplained
         # blob, which is how it came to be mistaken for a moving one.
-        tk.Label(body, text="Side friction", font=("Segoe UI", 10, "bold"),
-                 bg=bg).pack(anchor="w", pady=(12, 2))
+        tk.Label(body, text="Side friction", font=("Segoe UI Semibold", 10),
+                 bg=bg, fg=_UI["accent_text"]).pack(anchor="w", pady=(12, 2))
         for name, colour in self.FRICTION_CATEGORIES:
             row = tk.Frame(body, bg=bg)
             row.pack(anchor="w", fill="x", pady=1)
             tk.Label(row, text="  ", bg=colour.to_hex(), width=2,
                      relief="solid", borderwidth=1).pack(side="left")
-            tk.Label(row, text="  " + name, bg=bg, width=20, anchor="w",
-                     font=("Segoe UI", 9)).pack(side="left")
+            tk.Label(row, text="  " + name, bg=bg, fg=_UI["muted"], width=20,
+                     anchor="w", font=("Segoe UI", 9)).pack(side="left")
 
         body.pack(anchor="w", fill="x", pady=(6, 0))
 
@@ -2077,9 +2219,12 @@ class DhakaSimFrame:
                 settings_btn.configure(text="+")
 
         tk.Label(settings_header, text="Run settings",
-                 font=("Segoe UI", 10, "bold"), bg=bg).pack(side="left")
+                 font=("Segoe UI Semibold", 10), bg=bg,
+                 fg=_UI["accent_text"]).pack(side="left")
         settings_btn = tk.Button(settings_header, text="\u2212", width=2,
-                                 relief="flat", bg=bg,
+                                 relief="flat", bg=bg, fg=_UI["muted"],
+                                 activebackground=bg,
+                                 activeforeground=_UI["text"],
                                  font=("Segoe UI", 10, "bold"), bd=0,
                                  command=toggle_settings, cursor="hand2")
         settings_btn.pack(side="right")
@@ -2088,14 +2233,14 @@ class DhakaSimFrame:
             row = tk.Frame(settings_body, bg=bg)
             row.pack(anchor="w", fill="x", pady=1)
             tk.Label(row, text=label, bg=bg, width=14, anchor="w",
-                     fg="#4a5560", font=("Segoe UI", 9)).pack(side="left")
+                     fg=_UI["muted"], font=("Segoe UI", 9)).pack(side="left")
             if label == self.DELAY_LABEL:
                 self._build_delay_control(row, value, unit, bg)
                 continue
-            tk.Label(row, text=value, bg=bg, width=6, anchor="e",
-                     font=("Consolas", 9, "bold")).pack(side="left")
+            tk.Label(row, text=value, bg=bg, fg=_UI["text"], width=6,
+                     anchor="e", font=("Consolas", 9, "bold")).pack(side="left")
             tk.Label(row, text=" " + unit, bg=bg, width=6, anchor="w",
-                     fg="#6b7683", font=("Segoe UI", 8)).pack(side="left")
+                     fg=_UI["faint"], font=("Segoe UI", 8)).pack(side="left")
 
         settings_body.pack(anchor="w", fill="x", pady=(4, 0))
         return legend
@@ -2132,10 +2277,21 @@ class DhakaSimFrame:
             if normalise and str(wanted) != self._delay_var.get():
                 self._delay_var.set(str(wanted))
 
-        spin = ttk.Spinbox(row, textvariable=self._delay_var, width=6,
-                           values=self.DELAY_CHOICES,
-                           command=lambda: apply(True),
-                           font=("Consolas", 9), justify="right")
+        # tk.Spinbox rather than ttk: the Windows theme paints ttk fields
+        # white whatever colours they are given, and this row sits on the
+        # dark legend panel.
+        spin = tk.Spinbox(row, textvariable=self._delay_var, width=6,
+                          values=self.DELAY_CHOICES,
+                          command=lambda: apply(True),
+                          font=("Consolas", 9), justify="right",
+                          relief="flat", bd=0,
+                          background=_UI["seg_off"], foreground=_UI["text"],
+                          insertbackground=_UI["accent"],
+                          buttonbackground=_UI["seg_off"],
+                          readonlybackground=_UI["seg_off"],
+                          highlightthickness=1,
+                          highlightbackground=_UI["edge"],
+                          highlightcolor=_UI["accent"])
         spin.pack(side="left")
         # command= only fires for the arrows, so typing needs its own hooks.
         spin.bind("<Return>", lambda _e: apply(True))
@@ -2146,7 +2302,7 @@ class DhakaSimFrame:
         # where the test thinks it is.
         self._commit_delay = lambda: apply(True)
         tk.Label(row, text=" " + unit, bg=bg, width=4, anchor="w",
-                 fg="#6b7683", font=("Segoe UI", 8)).pack(side="left")
+                 fg=_UI["faint"], font=("Segoe UI", 8)).pack(side="left")
 
     def update_legend_counts(self, vehicle_list) -> None:
         """Refresh the live per-type counts shown beside the colour key."""
@@ -2213,33 +2369,45 @@ class DhakaSimFrame:
         self.panel = panel
 
         # A toolbar that stays available for the whole run, so getting back to
-        # the setup screen never means restarting the program.
-        top_bar = ttk.Frame(self.container, padding=(8, 6))
-        ttk.Button(top_bar, text="◀  New simulation",
-                   command=self.new_simulation).pack(side="left")
-        self._report_button = ttk.Button(top_bar, text="Open report",
-                                         command=self.open_report,
-                                         state="disabled")
+        # the setup screen never means restarting the program.  Dressed as a
+        # band of the start screen -- same fills, same glass hairlines -- so
+        # pressing Start does not change which application you are in.
+        top_bar = tk.Frame(self.container, background=_UI["band"],
+                           padx=8, pady=6)
+        _ToolButton(top_bar, text="◀  New simulation",
+                    command=self.new_simulation).pack(side="left")
+        self._report_button = _ToolButton(top_bar, text="Open report",
+                                          command=self.open_report)
+        self._report_button.configure(state="disabled")
         self._report_button.pack(side="left", padx=(8, 0))
 
-        self._pause_button = ttk.Button(top_bar, command=self.toggle_pause)
+        self._pause_button = _ToolButton(top_bar, command=self.toggle_pause)
         self._pause_button.pack(side="left", padx=(8, 0))
         self._sync_pause_button()
 
         # The view can be flipped at any point in a run: it changes only how
         # the frame is drawn, never what is simulated.
-        self._view_button = ttk.Button(top_bar, command=self.toggle_view)
+        self._view_button = _ToolButton(top_bar, command=self.toggle_view)
         self._view_button.pack(side="left", padx=(8, 0))
         self._sync_view_button()
         self.root.bind("<KeyPress-v>", lambda _e: self.toggle_view())
         self.root.bind("<KeyPress-space>", lambda _e: self.toggle_pause())
         self.root.bind("<KeyPress-m>", lambda _e: self.toggle_basemap())
 
-        self._status = ttk.Label(top_bar, text="")
+        self._status = tk.Label(top_bar, text="", background=_UI["band"],
+                                foreground=_UI["accent_text"],
+                                font=("Segoe UI", 10))
         self._status.pack(side="left", padx=(12, 0))
         top_bar.pack(side="top", fill="x")
+        _glass(top_bar)
 
-        scale_slider = ttk.Scale(self.container, from_=100, to=0, orient="vertical")
+        scale_slider = tk.Scale(self.container, from_=100, to=0,
+                                orient="vertical", showvalue=False,
+                                borderwidth=0, highlightthickness=0,
+                                sliderrelief="flat", sliderlength=26, width=9,
+                                background=_UI["seg_off"],
+                                troughcolor=_UI["band"],
+                                activebackground=_UI["accent"])
         # The buttons in the legend drive this same slider rather than
         # calling set_scale directly, so the handle never disagrees with
         # the view after a click.

@@ -86,13 +86,15 @@ def _svg_bar_chart(rows, unit="", decimals=0):
         v = float(value) if _finite(value) else 0.0
         w = int(bar_w * v / vmax)
         cy = y + row_h / 2
+        # Light ink: the chart sits on the report's dark card (gui._UI's
+        # palette), where the old slate-blue labels disappear.
         parts.append(
             f'<text x="{label_w - 8}" y="{cy + 4:.0f}" text-anchor="end" '
-            f'font-size="13" fill="#12263a">{label}</text>'
+            f'font-size="13" fill="#F4F1ED">{label}</text>'
             f'<rect x="{label_w}" y="{y}" width="{max(w, 2)}" height="{row_h}" '
             f'rx="4" fill="{color}"></rect>'
             f'<text x="{label_w + max(w, 2) + 6}" y="{cy + 4:.0f}" font-size="12" '
-            f'fill="#5b6b7b">{v:,.{decimals}f}{unit}</text>'
+            f'fill="#C3BBB4">{v:,.{decimals}f}{unit}</text>'
         )
         y += row_h + gap
     parts.append("</svg>")
@@ -267,7 +269,7 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
         sw = "".join(
             f'<span style="width:12px;height:12px;border-radius:3px;'
             f'background:{colours[i]};display:inline-block;'
-            f'border:1px solid #00000022"></span>' for i in idxs)
+            f'border:1px solid #FFFFFF22"></span>' for i in idxs)
         return f'<span style="margin-left:6px">{sw}</span>'
 
     legend_html = '<div class="legend">' + "".join(
@@ -339,8 +341,13 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DhakaSim Simulation Report{place_title}</title>
 <style>
-  :root {{ --ink:#12263a; --muted:#5b6b7b; --line:#e2e8f0; --accent:#1b5e8c;
-          --bg:#f6f8fa; --card:#ffffff; }}
+  /* The start screen's palette (gui._UI), so the report reads as a page of
+     the same application: warm charcoal ground, panel cards, and the CNG
+     green as the accent.  The animations keep their own daylight inside
+     their frames -- they are the picture, not the chrome. */
+  :root {{ --ink:#F4F1ED; --muted:#C3BBB4; --faint:#948B84; --line:#443F3C;
+          --accent:#5BD986; --accent-strong:#1EA046;
+          --bg:#131211; --card:#242120; --band:#302C29; }}
   * {{ box-sizing:border-box; }}
   body {{ font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
          color:var(--ink); background:var(--bg); margin:0; padding:32px; }}
@@ -349,39 +356,44 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None) -> str:
            color:var(--accent); letter-spacing:.01em; }}
   h1 {{ font-size:26px; margin:0 0 4px; }}
   h2 {{ font-size:18px; margin:34px 0 12px; padding-bottom:6px;
-        border-bottom:2px solid var(--line); }}
+        color:var(--accent); border-bottom:2px solid var(--line); }}
   .sub {{ color:var(--muted); margin:0 0 8px; font-size:14px; }}
   .cards {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px;
             margin-top:18px; }}
   .card {{ background:var(--card); border:1px solid var(--line);
-           border-radius:12px; padding:16px; }}
+           border-radius:12px; padding:16px;
+           box-shadow:inset 0 1px 0 #524B47; }}
   .cv {{ font-size:28px; font-weight:700; color:var(--accent); }}
   .ck {{ font-size:13px; font-weight:600; margin-top:2px; }}
-  .cu {{ font-size:12px; color:var(--muted); }}
+  .cu {{ font-size:12px; color:var(--faint); }}
   table {{ width:100%; border-collapse:collapse; background:var(--card);
            border:1px solid var(--line); border-radius:12px; overflow:hidden;
            font-size:14px; }}
   th, td {{ padding:9px 12px; text-align:right; border-bottom:1px solid var(--line); }}
-  th {{ background:#eef3f7; font-weight:600; }}
+  th {{ background:var(--band); font-weight:600; color:var(--muted); }}
   td.t, th:first-child {{ text-align:left; }}
   td.d {{ text-align:left; color:var(--muted); font-size:13px; }}
   tr:last-child td {{ border-bottom:none; }}
   dl {{ background:var(--card); border:1px solid var(--line); border-radius:12px;
-        padding:8px 18px; }}
+        padding:8px 18px; box-shadow:inset 0 1px 0 #524B47; }}
   dt {{ font-weight:700; margin-top:12px; }}
   dd {{ margin:4px 0 12px; color:var(--muted); }}
-  .foot {{ color:var(--muted); font-size:12px; margin-top:28px; }}
+  .foot {{ color:var(--faint); font-size:12px; margin-top:28px; }}
+  code {{ color:var(--accent); }}
   .chart {{ background:var(--card); border:1px solid var(--line);
-            border-radius:12px; padding:14px 16px; margin-top:8px; }}
+            border-radius:12px; padding:14px 16px; margin-top:8px;
+            box-shadow:inset 0 1px 0 #524B47; }}
   .viz {{ background:var(--card); border:1px solid var(--line);
-          border-radius:12px; padding:10px; margin-top:8px; }}
+          border-radius:12px; padding:10px; margin-top:8px;
+          box-shadow:inset 0 1px 0 #524B47; }}
   .viz svg {{ max-width:100%; height:auto; border-radius:8px; }}
   .legend {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
              gap:10px 16px; background:var(--card); border:1px solid var(--line);
-             border-radius:12px; padding:16px; font-size:14px; }}
+             border-radius:12px; padding:16px; font-size:14px;
+             box-shadow:inset 0 1px 0 #524B47; }}
   .lgi {{ display:flex; align-items:center; gap:8px; }}
   .sw {{ width:16px; height:16px; border-radius:4px; flex:none;
-         border:1px solid #00000022; }}
+         border:1px solid #FFFFFF22; }}
 </style>
 </head>
 <body>

@@ -57,9 +57,9 @@ from __future__ import annotations
 
 import math
 import os
-import re
 
 from .parameters import Parameters
+from . import network_files
 from . import road_geometry
 
 
@@ -112,34 +112,30 @@ ATTRIBUTION = PROVIDERS["osm"]["attribution"]
 IMAGE_NAME = "basemap.png"
 INDEX_NAME = "basemap.txt"
 
-#: ``# Centre 23.79,90.40`` and ``centre 23.75,90.38, radius 28.8 m`` both
-#: appear in the shipped ``geometry.txt`` files, hence the loose match.
-_CENTRE_RE = re.compile(r"centre\s+(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)",
-                        re.IGNORECASE)
+def _geometry_facts(network: str):
+    """What ``geometry.txt`` states, or an empty answer when it cannot say.
 
-#: ``roundabout <node id> <radius>``.  A roundabout is the landmark a junction
-#: extract gets centred on, so where one is declared it names the anchor node.
-_ROUNDABOUT_RE = re.compile(r"^roundabout\s+(\d+)\s", re.MULTILINE)
-
-#: ``# Centre 24.68,46.74 at 1263.4,1245.1`` -- make_network records exactly
-#: where the centre lat/lon lands in network metres.  Where it is present the
-#: anchor rules below are guesses that cannot beat it: the busiest node or the
-#: bounding-box middle of an asymmetric extract can sit tens of metres from
-#: the true centre, which slides the whole basemap by the same amount.
-_ANCHOR_RE = re.compile(
-    r"centre\s+-?\d+\.\d+\s*,\s*-?\d+\.\d+\s+at\s+"
-    r"(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)", re.IGNORECASE)
+    The grammar lives in :mod:`dhakasim.network_files`; this wrapper only
+    supplies this module's resolution and its long-standing contract that a
+    missing or unreadable file is a network with nothing declared.
+    """
+    try:
+        return network_files.read_geometry(
+            network_path(network, "geometry.txt"))
+    except (OSError, ValueError):
+        return network_files.GeometryFacts()
 
 
 def read_anchor(network: str):
-    """The network point the recorded centre refers to, when it is recorded."""
-    path = network_path(network, "geometry.txt")
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            match = _ANCHOR_RE.search(handle.read())
-    except OSError:
-        return None
-    return (float(match.group(1)), float(match.group(2))) if match else None
+    """The network point the recorded centre refers to, when it is recorded.
+
+    ``# Centre 24.68,46.74 at 1263.4,1245.1`` -- make_network records exactly
+    where the centre lat/lon lands in network metres.  Where it is present
+    the anchor rules below are guesses that cannot beat it: the busiest node
+    or the bounding-box middle of an asymmetric extract can sit tens of
+    metres from the true centre, which slides the whole basemap with it.
+    """
+    return _geometry_facts(network).anchor
 
 
 # --------------------------------------------------------------------------
@@ -222,27 +218,13 @@ def network_path(network: str, *parts: str) -> str:
 
 def read_centre(network: str):
     """The lat/lon a network's ``geometry.txt`` says it was centred on."""
-    path = network_path(network, "geometry.txt")
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError:
-        return None
-    match = _CENTRE_RE.search(text)
-    if match is None:
-        return None
-    return (float(match.group(1)), float(match.group(2)))
+    return _geometry_facts(network).centre
 
 
 def read_roundabout(network: str):
     """The node id of the network's roundabout, when it declares exactly one."""
-    path = network_path(network, "geometry.txt")
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            found = _ROUNDABOUT_RE.findall(handle.read())
-    except OSError:
-        return None
-    return int(found[0]) if len(found) == 1 else None
+    declared = _geometry_facts(network).roundabouts
+    return next(iter(declared)) if len(declared) == 1 else None
 
 
 def anchor_point(link_list, node_list, roundabout=None):
@@ -325,85 +307,16 @@ def network_bounds(link_list, margin: float = 60.0):
 # a network, read without starting a simulation
 # --------------------------------------------------------------------------
 
-class _Segment:
-    __slots__ = ("sx", "sy", "ex", "ey", "width")
-
-    def __init__(self, sx, sy, ex, ey, width):
-        self.sx, self.sy, self.ex, self.ey, self.width = sx, sy, ex, ey, width
-
-    def get_start_x(self): return self.sx
-    def get_start_y(self): return self.sy
-    def get_end_x(self): return self.ex
-    def get_end_y(self): return self.ey
-    def get_segment_width(self): return self.width
-
-
-class _Link:
-    __slots__ = ("id", "up", "down", "segments")
-
-    def __init__(self, id_, up, down, segments):
-        self.id, self.up, self.down, self.segments = id_, up, down, segments
-
-    def get_id(self): return self.id
-    def get_up_node(self): return self.up
-    def get_down_node(self): return self.down
-    def get_number_of_segments(self): return len(self.segments)
-    def get_segment(self, i): return self.segments[i]
-    def get_first_segment(self): return self.segments[0]
-    def get_last_segment(self): return self.segments[-1]
-
-
-class _Node:
-    __slots__ = ("id", "x", "y", "links")
-
-    def __init__(self, id_, x, y, links):
-        self.id, self.x, self.y, self.links = id_, x, y, links
-
-    def get_id(self): return self.id
-    def number_of_links(self): return len(self.links)
-    def get_link(self, i): return self.links[i]
-
-    # node.txt says nothing about roundabouts -- that lives in geometry.txt and
-    # only applies under GeometryMode -- but road_geometry asks, so answer.
-    # Without these a caller that reads a network this way and then builds its
-    # geometry falls over on an attribute error rather than drawing a plain
-    # junction, which is what it should get.
-    def is_roundabout(self): return False
-    def get_roundabout_radius(self): return 0.0
-    def get_outer_radius(self): return 0.0
-
-
 def read_network(network: str):
-    """Read ``link.txt`` and ``node.txt`` into the accessors this module uses.
+    """Read ``link.txt`` and ``node.txt`` into real ``Link``/``Node`` objects.
 
     ``fetch_basemap.py`` needs a network's shape and nothing else, and starting
     the real loader would mean reading demand, generating routes and seeding a
-    fleet first.  The objects returned answer the same calls
-    :func:`anchor_point` and :func:`network_bounds` make of the simulator's
-    own, so both callers go down one code path.
+    fleet first.  The grammar and the light objects live in
+    :mod:`dhakasim.network_files`; this name survives because every caller and
+    the engineering notes know the reader by it.
     """
-    with open(network_path(network, "link.txt"), "r", encoding="utf-8") as f:
-        tokens = f.read().split()
-    at = 0
-    link_count = int(tokens[at]); at += 1
-    links = []
-    for _ in range(link_count):
-        link_id, up, down, count = (int(tokens[at + i]) for i in range(4))
-        at += 4
-        segments = []
-        for _ in range(count):
-            values = tokens[at:at + 6]
-            at += 6
-            segments.append(_Segment(*(float(v) for v in values[1:])))
-        links.append(_Link(link_id, up, down, segments))
-
-    nodes = []
-    with open(network_path(network, "node.txt"), "r", encoding="utf-8") as f:
-        lines = [ln.split() for ln in f if ln.split()]
-    for parts in lines[1:1 + int(lines[0][0])]:
-        nodes.append(_Node(int(parts[0]), float(parts[1]), float(parts[2]),
-                           [int(v) for v in parts[3:]]))
-    return links, nodes
+    return network_files.read_network(network)
 
 
 # --------------------------------------------------------------------------

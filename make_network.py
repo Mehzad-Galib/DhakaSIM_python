@@ -33,6 +33,12 @@ import math
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# First-party, not a dependency: the file format and its safeguards live in
+# the package, shared with fit_roads.py and the simulator's own readers.
+from dhakasim import network_files  # noqa: E402
+
 # Road classes worth simulating.  Footways and cycleways are excluded: the
 # model puts pedestrians on the carriageway rather than giving them their own
 # links, so importing them would invent roads that carry no traffic.
@@ -646,39 +652,26 @@ def write_network(edges, out_dir: str, margin: float, tolerance: float,
 
     os.makedirs(out_dir, exist_ok=True)
 
-    with open(os.path.join(out_dir, "link.txt"), "w", encoding="utf-8") as f:
-        f.write(f"{len(links)}\n")
-        for link in links:
-            # link.txt states whole metres, and rounding can collapse a
-            # sub-metre segment to zero length -- which downstream asks for
-            # a perpendicular it does not have.  Collapse duplicates after
-            # rounding instead; the endpoint coordinates survive because a
-            # dropped point was equal to its kept neighbour.
-            rounded = [(round(p[0]), round(p[1])) for p in link["points"]]
-            points = [rounded[0]]
-            for p in rounded[1:]:
-                if p != points[-1]:
-                    points.append(p)
-            f.write(f"{link['id']} {link['up']} {link['down']} {len(points) - 1}\n")
-            for segment, (a, b) in enumerate(zip(points, points[1:])):
-                f.write(f"{segment} {a[0]:.0f} {a[1]:.0f} {b[0]:.0f} {b[1]:.0f} "
-                        f"{link['width']:.1f}\n")
+    # The file format, the whole-metre rounding and the zero-length-segment
+    # defence live in dhakasim.network_files, shared with fit_roads.
+    network_files.write_link_rows(
+        os.path.join(out_dir, "link.txt"),
+        [(link["id"], link["up"], link["down"],
+          [(a[0], a[1], b[0], b[1], link["width"])
+           for a, b in zip(link["points"], link["points"][1:])])
+         for link in links])
 
-    with open(os.path.join(out_dir, "node.txt"), "w", encoding="utf-8") as f:
-        f.write(f"{len(node_ids)}\n")
-        for key, node_id in sorted(node_ids.items(), key=lambda kv: kv[1]):
-            incident = node_links[key]
-            # A junction is written at 0 0: the simulator treats that as "not a
-            # boundary point" and excludes it from the view's bounding box,
-            # taking the junction's real position from where its links meet.
-            # Only the degree-1 nodes, where vehicles enter and leave, carry
-            # coordinates.
-            if len(incident) > 1:
-                x = y = 0
-            else:
-                x, y = node_xy[key]
-            f.write(f"{node_id} {x:.0f} {y:.0f} "
-                    + " ".join(str(i) for i in incident) + "\n")
+    node_rows = []
+    for key, node_id in sorted(node_ids.items(), key=lambda kv: kv[1]):
+        incident = node_links[key]
+        # A junction is written at 0 0: the simulator treats that as "not a
+        # boundary point" and excludes it from the view's bounding box,
+        # taking the junction's real position from where its links meet.
+        # Only the degree-1 nodes, where vehicles enter and leave, carry
+        # coordinates.
+        x, y = (0, 0) if len(incident) > 1 else node_xy[key]
+        node_rows.append((node_id, x, y, incident))
+    network_files.write_node_rows(os.path.join(out_dir, "node.txt"), node_rows)
 
     boundary = [k for k in node_ids if len(node_links[k]) == 1]
     divided = [link for link in links if link["median"] > 0]

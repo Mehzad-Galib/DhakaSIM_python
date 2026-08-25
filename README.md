@@ -10,6 +10,69 @@ walking along the road, and heavy road-crossing pedestrian flow.
 Self-contained Python implementation — no third-party dependencies, the GUI uses
 `tkinter` from the standard library. Python 3.10 or newer.
 
+![The 3D view: the Kakrail Church roundabout under load, with the queue on
+Kakrail Mor hazing into the distance](docs/images/view3d_kakrail_corridor.png)
+
+## Features at a glance
+
+**The traffic model**
+
+- Strip-based, non-lane movement: a carriageway is a row of half-metre strips
+  and a vehicle occupies as many as its width needs, which is how a rickshaw,
+  a bus and a motorbike genuinely share one road.
+- 13 vehicle types, from bicycle and rickshaw to bus and truck, each with its
+  own size, speed and behaviour; the mix is per-network (`vehicle_mix.txt`).
+- 13 car-following models (`CF_model`, including Gipps and a modified
+  Newtonian model unique to this build) and 4 lane-changing models.
+- Side friction: parked cars, rickshaws and CNGs on the carriageway, standing
+  pedestrians, pedestrians walking along the road, and road-crossing flows.
+- Near-crash and accident modelling with a per-event log.
+- Traffic signals: fixed-time, biased-random, and two multi-objective
+  optimising controllers (Rahaman et al., IEEE Access 2025).
+- Time-of-day demand: networks with an hourly profile
+  (`demand_by_hour.txt`) can be run at any hour or at the peak.
+
+**Networks**
+
+- Seven shipped networks: four surveyed Dhaka junctions (Banani 23,
+  Banani 27, Bijoy Sarani, and the two-signal Kakrail corridor with its
+  roundabout) and three OSM-derived multi-intersection networks (Mohakhali,
+  Miami, Riyadh).
+- Real-geometry mode: medians, roundabouts, one-way links and turn lanes from
+  each network's `geometry.txt`; `GeometryMode Off` is the Java-parity mode.
+- Build your own network from OpenStreetMap with `make_network.py`, fetch map
+  imagery for it with `fetch_basemap.py`, and bend its links onto the real
+  roads with `fit_roads.py` — see the sections below.
+
+**Seeing a run**
+
+- A settings screen for picking the network, time of day, signal controller,
+  models and display options — no file editing needed for a normal run.
+- 2D plan view over real map imagery (OpenStreetMap rendering or aerial),
+  with street and junction names, pan/zoom, and a live legend.
+- A VISSIM-style 3D perspective view of the same run — orbit, pan and zoom —
+  in two styles: shaded solid, or line art. Switchable mid-run without
+  disturbing the simulation.
+- Pause/resume, trace recording and replay (`trace.txt`), and a live
+  vehicles-on-network panel.
+- A self-contained HTML report per run, carrying animated 2D and 3D replays,
+  per-type statistics and the run's settings — one file, openable anywhere.
+
+**Numbers out**
+
+- Per-link speed, waiting and flow CSVs; per-type speed, waiting, trip,
+  fuel, collision and accident CSVs; sampled per-vehicle trajectories — all
+  under `statistics/csv/`, appended per run.
+- An experiment-sweep harness (`experiments/`) and a paper-comparison report.
+
+**Trustworthiness**
+
+- Ported class-for-class from the Java original and validated against it:
+  matched seeds produce byte-identical output (see *Provenance*).
+- Thirteen test suites pin the numerics, the file grammar, the geometry and
+  the renderers; `hash_run.py` hashes a seeded run of every network
+  end-to-end so any behavioural drift is caught as one command (see *Tests*).
+
 ## Running
 
 The simulator reads `input/` and writes `statistics/` relative to the current
@@ -40,10 +103,18 @@ python run_dhakasim.py --headless --seed 4 --set StripWidth=2.5 --set CF_model=2
 ```
 
 In the GUI the option form lets you change the seed, end time, speed and road
-geometry before starting. Once running: drag to pan, and zoom with the mouse
+geometry before starting:
+
+![The settings screen: junction, time of day, signal control, road model and
+display options](docs/images/start_screen.png)
+
+Once running: drag to pan, and zoom with the mouse
 wheel, the right-hand slider, or the **+** and **&minus;** buttons in the
 legend panel. **Reset** there returns the zoom to its starting level. The
 bottom slider shows progress.
+
+![The 2D plan view: the Kakrail corridor drawn over the OpenStreetMap
+rendering, with the live legend on the right](docs/images/plan_kakrail_corridor.png)
 
 The legend also names the place being simulated, taken from the network's
 `place.txt`, and street names are drawn along the roads for networks that
@@ -80,17 +151,39 @@ parked cars and the other roadside objects are modelled too.
 | reset the camera | double-click |
 | switch views | the toolbar button, or the `V` key |
 
-`Render3D On` in `parameter.txt` (or the **3D View** radio on the start screen)
-opens straight into it. The view can be switched at any point in a run, without
-disturbing it: it is only a matter of how each frame is drawn, so the results,
-the report and `trace.txt` are identical either way. A recorded run replayed
-with `TraceMode On` renders in 3D as well — the trace stores no vehicle types,
-so the model is inferred from each footprint, which recovers all 13 correctly.
+The scene is lit and graded rather than flat: the sky shades from blue down
+to a pale horizon, the ground hazes out towards the distance, sunlit faces
+lean warm while shaded faces lean cool, and bodies fade towards the haze the
+further into the scene they sit — which is also what keeps a wide view of a
+busy network readable, because a bus half a kilometre away no longer shouts
+as loudly as one by the camera. Distant vehicles are still always drawn: past
+the point where a model would be smaller than a few pixels it becomes a
+single block, then a single dot, but it never disappears, so a wide framing
+still shows where the traffic is.
+
+There are two styles, chosen on the start screen (**Display → 3D view**) or
+with `Render3DStyle solid|line` in `parameter.txt`. Solid is the shaded look
+above; **line art** draws every vehicle as an ink outline over a pale wash of
+its own colour, which stays legible at the highest densities:
+
+![The same roundabout in line art: outlines fade with distance instead of
+piling into a thicket](docs/images/view3d_line_kakrail_corridor.png)
+
+`Render3D On` in `parameter.txt` (or the **3D View** buttons on the start
+screen) opens straight into it. The view can be switched at any point in a
+run, without disturbing it: it is only a matter of how each frame is drawn, so
+the results, the report and `trace.txt` are identical either way. A recorded
+run replayed with `TraceMode On` renders in 3D as well — the trace stores no
+vehicle types, so the model is inferred from each footprint, which recovers
+all 13 correctly.
 
 The renderer is `dhakasim/render3d.py`, drawing with plain `tkinter` polygons:
-no OpenGL, no GPU and, in keeping with the rest of the simulator, no third-party
-package. It costs roughly 3–4x a 2D frame at typical densities, so a busy
-network animates a little slower than in plan view.
+no OpenGL, no GPU and, in keeping with the rest of the simulator, no
+third-party package. While the camera is still — the usual case, watching a
+run — the sky, ground, roads and street names are kept on the canvas and only
+the vehicles are redrawn each frame, which roughly halves what a frame costs;
+orbiting, panning or zooming repaints everything and costs the other half
+back for those frames. Measured numbers are under **Performance** below.
 
 ### While a run is going
 
@@ -126,9 +219,14 @@ trace.txt         created by the GUI; one frame per simulation step
 dhakasim/         the simulator package
 run_dhakasim.py   launcher
 run_sim.py        route/demand generator (only needed if the network geometry changes)
+make_network.py   builds a new network from OpenStreetMap data (optional)
+make_grid.py      builds an idealised grid network (optional)
 fetch_basemap.py  downloads the map imagery a network is drawn over (optional)
 fit_roads.py      bends a network's links onto the real roads (optional)
+hash_run.py       end-to-end drift check: hashes a seeded run of every network
+experiments/      the sweep harness and paper-comparison report
 tests/            regression tests for the numeric layer
+docs/images/      the screenshots in this README
 ```
 
 Inside `dhakasim/`, three modules render the same picture through the same
@@ -422,31 +520,35 @@ fraction, because a white truck outlined in near-white on a near-white road is
 not there at all.
 
 **`solid`** is the original: every camera-facing face filled in its own colour,
-shaded by how much sun it catches.
+shaded by how much sun it catches — warm-tinted in the sun, cool-tinted in
+the shade, and faded towards the horizon haze with distance. The haze scales
+with the camera's own orbit distance, so it reads as depth at every zoom.
+Roads, kerbs and markings deliberately get none of this: they keep the exact
+2D palette, so the two views stay recognisably the same picture.
 
-Two other economies apply to both, and they are about the roads rather than the
-vehicles. A kerb arrives as a run of separate line calls, each starting where
-the last ended, and is collected into a single polyline -- one item for a whole
-kerb instead of one per point pair. And a line that ends up *alone* rather than
-in such a run, and projects to less than `Scene3D.MIN_LINE_PIXELS`, is dropped:
-that is the lane markings, which at Khamarbari are 979 canvas items against 204
-for every kerb in the network put together, at a median of three pixels each.
-A short line inside a run is never dropped, so a kerb can never come out
-gapped.
+Level of detail runs in three tiers. A vehicle whose body is too small on
+screen for its cabin to read (`LOD_PIXELS`) becomes a single block; smaller
+than a few pixels (`SPECK_PIXELS`) it becomes a single flat dot in its own
+colour — never dropped, because at a whole-network framing most vehicles are
+specks, and several hundred dots are exactly how a wide view shows where the
+traffic is. At full detail, parts that project under a couple of pixels
+(wheels, mostly) are skipped.
 
-Measured on one frame of Khamarbari with 444 vehicles and 94 roadside objects,
-1200x640:
+Two other economies apply to both styles, and they are about the roads rather
+than the vehicles. A kerb arrives as a run of separate line calls, each
+starting where the last ended, and is collected into a single polyline -- one
+item for a whole kerb instead of one per point pair. And a line that ends up
+*alone* rather than in such a run, and projects to less than
+`Scene3D.MIN_LINE_PIXELS`, is dropped: that is the lane markings, which on a
+surveyed junction outnumber every kerb item four to one at a median of three
+pixels each. A short line inside a run is never dropped, so a kerb can never
+come out gapped.
 
-| | ms/frame | fps | canvas items |
-| --- | --- | --- | --- |
-| solid, every line drawn | 111.7 | 8.9 | 2645 |
-| solid, chained + culled lines | 97.5 | 10.3 | 2227 |
-| line art, every line drawn | 97.6 | 10.2 | 1555 |
-| line art, chained + culled lines | **84.7** | **11.8** | **1137** |
-
-A third faster and 2.3x fewer items. The Python half of a frame barely moves
-(41.9 ms to 40.3 ms) -- all of the saving is Tk's, which is where it had to
-come from.
+Finally, the frame itself is split into layers. Sky, ground, roads and street
+names only change when the camera or the window does, so between camera moves
+they stay on the canvas untouched and each frame deletes and redraws the
+vehicles alone — the same trick the HTML report uses for its 3D animation.
+Current measured costs are under **Performance** below.
 
 ## Traffic signal scheduling
 
@@ -566,7 +668,13 @@ Each run writes a self-contained HTML report to `statistics/`, named
 `report_<YYYYMMDD_HHMMSS>.html`, summarising the run with two animations of the
 run -- the same captured frames in plan view and through the 3D camera -- metric
 cards, a configuration table, a per-type results table, colour-coded bar charts,
-a vehicle-colour legend and a glossary. The raw numeric CSVs below are written
+a vehicle-colour legend and a glossary. It is one file with everything inlined,
+so it can be mailed or archived and still opens anywhere:
+
+![The top of a run report: metric cards, then the animated plan view over the
+network's imagery](docs/images/report.png)
+
+The raw numeric CSVs below are written
 into `statistics/csv/` (paths in the table are relative to that folder), all
 **appended**, so repeated runs accumulate one row per run:
 
@@ -1236,12 +1344,17 @@ comparison instead of two or three times, took a step at Khamarbari from 27.3 ms
 to 19.3 ms with 750 vehicles on the network. None of it changes a result: the
 same seed produces a byte-identical end state.
 
-The 3D view is a different problem and no amount of tuning fixes it. A frame is
-about 73 ms, of which 17 ms is Python doing the projection and the rest is Tk
-rasterising some 1,500 polygons in software. Reusing canvas items instead of
-recreating them buys 1.1×, because the cost is the drawing rather than the
-bookkeeping. The only real lever is fewer polygons — `Scene3D`'s level of detail
-and `show_shadows`. A GPU cannot help: a Tk canvas has no path to one.
+The 3D view's cost is canvas items — Tk rasterises every polygon in software,
+so the levers are fewer items and reusing the ones that do not change. Both
+are pulled: while the camera is still, the sky, ground, roads and street
+names stay on the canvas and only the vehicles are deleted and redrawn; a
+vehicle too small to resolve is drawn as one block and, smaller still, as a
+single dot rather than a modelled body; and sub-pixel details (wheels,
+mostly) are skipped at mid distance. Measured on the Mohakhali network at
+1920x991 with 191 vehicles and ~500 side-friction props: a solid-style frame
+was 99 ms before, a full repaint is now 56–58 ms, and the steady-state frame
+while watching a run is 38–43 ms at every zoom. A GPU cannot help: a Tk
+canvas has no path to one.
 
 ## Tests
 
@@ -1284,6 +1397,32 @@ python tests/test_basemap.py
 ```bash
 python tests/test_fit_roads.py
 ```
+
+```bash
+python tests/test_network_files.py
+```
+
+```bash
+python tests/test_roundabout.py
+```
+
+```bash
+python tests/test_start_screen.py
+```
+
+None of the suites runs the traffic model itself — that check is a seeded
+headless run compared bit for bit against a known-good one, and it is one
+command:
+
+```bash
+python hash_run.py
+```
+
+It runs every network headless with a pinned seed, hashes the console summary
+and every CSV the run writes, and compares them per component against
+`run_hashes.txt`, so a drift report names exactly which output moved. After a
+change that is *supposed* to alter results has been verified, re-record the
+baseline with `python hash_run.py --record`.
 
 `dhakasim/javacompat.py` reproduces the arithmetic of the original
 implementation, because Python's defaults differ from it in ways that change

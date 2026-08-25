@@ -138,6 +138,11 @@ class _SVGCanvas:
     def delete(self, *_args) -> None:
         self.parts.clear()
 
+    def tag_raise(self, *_args) -> None:
+        # Stacking is emission order in SVG, and each capture is one frame,
+        # so there is never an earlier layer to lift anything above.
+        pass
+
     def create_rectangle(self, x0, y0, x1, y1, fill="", outline="", **_kw):
         self.parts.append(
             f'<rect x="{min(x0, x1):.1f}" y="{min(y0, y1):.1f}" '
@@ -689,15 +694,14 @@ class RunRecorder:
         """One frame of the 3D view: the vehicles only.
 
         The sky, the ground and the roads are the same in every frame, so they
-        are rendered once into the static layer and dropped here -- an opaque
-        ground rectangle repeated on every frame would hide the roads under it
-        as well as costing a copy of the network per frame.
+        are rendered once into the static layer and this capture asks for
+        ``keep_static`` -- an opaque ground repeated on every frame would hide
+        the roads under it as well as costing a copy of the network per frame.
         """
         canvas = _SVGCanvas()
         scene = self.scene
         scene.set_output(canvas)
-        scene.begin_frame(self.W3, self.H3, self.k)
-        canvas.parts.clear()
+        scene.begin_frame(self.W3, self.H3, self.k, keep_static=True)
         for v in vehicles:
             try:
                 # The type picks the 3D model, exactly as the GUI passes it.

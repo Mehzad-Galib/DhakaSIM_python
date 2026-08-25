@@ -5,8 +5,15 @@
 # island reads as a 6-7 m patch and the running surface reaches about 15.5 m.
 # The OSM way is a loop of radius 14.6-16.3 m about the same centre; 16.3 is
 # close to the outer kerb here, and nothing like the island.
+# Centre 23.737591,90.405234 at 500.0,500.0.
+# The recorded anchor above pins the georeference directly, so the fit's
+# arm-aiming no longer has to keep the mean of the stated ends on it and
+# every mouth can sit exactly on the circle.
 # Approaches are largely one-way.
 # Kakrail Rd carries a median; Minto Road approach is 3 lanes.
+median 0 1.5   # Anjuman Mufidul Islam Rd -- OSM maps it as a one-way pair
+median 1 1.5   # Sahid Capten Munsur Ali Ave -- one-way pair, ~12 m apart
 median 2 1.2   # Church -> Mosque (Kakrail Rd)
 median 3 1.2   # Minto Road
+median 4 1.5   # Hare Road pair toward Matsha Bhaban
 roundabout 4 6.5 9.0   # Kakrail Cir: island, then the ring
