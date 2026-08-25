@@ -1,0 +1,37 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Simulation output
+statistics/
+debug/
+trace.txt
+
+# Experiment sweep output (the harness itself is tracked, its results are not)
+experiments/results/
+experiments/results_paper/
+experiments/smoke/
+experiments/*.log
+experiments/*.err
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+DhakaSIM Papers/
+Lecture 4_VISSIM_Hadi(1).pdf
+Traffic Flow Data/
+
+# Map imagery: fetched by fetch_basemap.py, megabytes per network, and
+# rebuildable from the same command. The tile cache is scratch.
+input/*/basemap.png
+input/*/basemap.txt
+input/.tilecache/
+
+# Cached Overpass answer behind fit_roads.py. Re-downloadable, and the fitted
+# link.txt plus link.straight.txt are what actually matter.
+input/*/osm_roads.json
+
+# Knowledge graph: ~5 MB of generated artefacts, rebuilt from source by
+# `graphify update .`, so there is nothing in it worth versioning.
+graphify-out/

@@ -1,0 +1,66 @@
+RandomSeed 0
+SimulationSpeed 50
+SimulationEndTime 480
+PixelPerMeter 15
+EncounterPerAccident 0.01
+StripWidth 0.5
+FootpathStripWidth 0.5
+MaximumSpeed 60.0   # km/h; Miami and Riyadh override to 100 in defaults.txt
+GUIMode On
+DebugMode Off
+ObjectMode On
+TraceMode Off
+SignalChangeDuration 1
+DefaultTranslateX -1340
+DefaultTranslateY -580
+CenteredView On
+SlowVehicle 50
+MediumVehicle 25
+FastVehicle 25
+DemandType 2
+TTC_Threshold 0.6
+LowRate 200
+MediumRate 600
+HighRate 1000
+VehicleGenerationRate 1
+ErrorMode Off
+FTMethod 1
+NoOfReadings 2
+MFactor 0.0
+ALPHA 0.92
+BETA 0.1
+ETA 0
+DLC_model 0
+CF_model 0
+AcrossPedestrianMode On
+AlongPedestrianMode On
+AcrossPedestrianLimit 1
+AcrossPedestrianPerHour 400
+AlongPedestrianPerHour 50
+AlongPedestrianPercentage 99
+DensityPercentage 50
+PedestrianWeight 2
+PedestrianRandomLaneChangePercentage 20
+PedestrianLeftBiasPercentage 40
+PenaltyWait On
+ConsiderMinimum On
+NoOfRoutes 12
+BrakeHard Off
+ReportAnimationFrames 24
+Network kakrail_corridor
+TimeOfDay -1
+GeometryMode On
+# Traffic signal scheduling (Rahaman et al., IEEE Access 2025).  One of
+# fixed, biased-random, moo-v1, moo-v2.  "fixed" is the original behaviour:
+# every approach gets SignalChangeDuration seconds of green, in turn.
+SignalMode fixed
+SignalObjectiveWeight 0.5   # W in Eq 6; the paper finds this barely matters
+SignalMotorizedWeight 0.2   # w in Eq 3; this one matters, lower is better
+SignalGreenMin 5.0
+SignalGreenMax 600.0
+SignalPopulation 50
+SignalEvaluations 2000
+Render3D Off
+# How the 3D view draws vehicles: line (outlined silhouettes) or solid
+# (shaded faces).  Line is about a third fewer canvas items per frame.
+Render3DStyle line

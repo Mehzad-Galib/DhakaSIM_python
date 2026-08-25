@@ -1,0 +1,24 @@
+# Banani 23 Super Market -- real geometry from OpenStreetMap (export (1).geojson).
+# Centre 23.793749,90.406639. Kemal Ataturk Avenue is a dual carriageway.
+#
+# This coordinate has been wrong twice, and both times it was wrong in a way
+# that measured as right.
+#
+# It was 23.793246,90.406171 first, which put the junction 34 m off the
+# nearest road and drew every arm across the rooftops.  Correcting it to
+# 23.793369,90.406586 put the junction on a road to within a centimetre --
+# and on the wrong road.  Our node landed 42 m down Enamul Haque Chowdhury
+# Road (Road 10), so "distance to the nearest road" read as perfect while two
+# of the four arms are Kemal Ataturk Avenue and the node was thirty metres
+# off it.
+#
+# The test that settles it is not distance to *a* road.  It is the one point
+# where all three named streets meet: Kemal Ataturk Avenue, Road No. 23 and
+# Enamul Haque Chowdhury Road are each unique in the extract and each pass
+# through (505.4, 457.9) in the old frame at 0.0 m.  Bearings from there agree
+# with our arms to sixteen degrees -- Kemal Ataturk 270 against our 284, Road
+# No. 23 4 against our 348, Road 10 188 against our 180.  A plain best-fit
+# slide would not have found it: Banani is a regular grid, so sliding the
+# network onto the next block along scores just as well.
+median 0 1.5   # Kemal Ataturk Ave -> Banani Kakoli
+median 3 1.5   # Kemal Ataturk Ave -> Gulshan 2

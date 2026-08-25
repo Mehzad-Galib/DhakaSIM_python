@@ -1,0 +1,7 @@
+# Place-not-run settings for the Miami arterial network (see defaults.txt
+# handling in utilities.apply_network_defaults).
+MaximumSpeed 100.0          # km/h -- US-1 / SR 998 trunk arterials
+AcrossPedestrianMode Off    # no pedestrians on these arterials
+AlongPedestrianMode Off
+ObjectMode Off              # no roadside friction: no standing pedestrians or parked rickshaws/CNGs here
+SignalChangeDuration 30     # s of green per approach -- VISSIM-style fixed timing, not the 1 s Dhaka survey default

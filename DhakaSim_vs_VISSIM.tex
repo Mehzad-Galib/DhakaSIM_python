@@ -1,0 +1,337 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{times}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+
+\definecolor{hdr}{RGB}{234,240,246}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\yes}{\textbf{Yes}}
+\newcommand{\no}{No}
+\newcommand{\partialy}{Partial}
+
+\titleformat{\section}{\large\bfseries}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.6em}{}
+
+\setlist[itemize]{itemsep=1pt,topsep=3pt,leftmargin=1.3em}
+
+\title{\textbf{PTV VISSIM and DhakaSim (Python): A Comparative Assessment}\\[4pt]
+\large Capabilities, Distinctive Strengths, and a Path to Professional Parity}
+\author{Mehzad Galib}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+PTV VISSIM is the microscopic traffic simulator most widely used by government and
+consulting organisations in Bangladesh. DhakaSim is a research simulator built
+specifically for the non-lane-based, heterogeneous traffic of cities such as Dhaka,
+recently reimplemented in Python and extended with real survey data. This report
+compares the two: what each does well, where they genuinely differ in modelling
+philosophy rather than merely in polish, and what DhakaSim would need in order to
+support the professional workflow that VISSIM users expect. The comparison of
+professional practice follows the workflow set out in Dr.~Md.~Hadiuzzaman's
+lecture \emph{Microscopic Simulation Study} (BUET). The conclusion is that the two
+tools are complementary rather than competing: VISSIM is the stronger engineering
+platform, while DhakaSim models a traffic regime VISSIM does not represent. The
+recommended direction is therefore not to imitate VISSIM, but to add the workflow
+and evaluation machinery that would make DhakaSim's distinctive model usable and
+credible in professional studies.
+\end{abstract}
+
+\section{Scope and Basis of Comparison}
+This document compares VISSIM against DhakaSim \emph{as currently developed} --- the
+Python reimplementation together with the extensions described in
+Section~\ref{sec:dhakasim}. Statements about professional simulation practice follow
+the lecture's workflow: project definition, data collection, network coding, error
+checking, calibration and validation, scenario design, simulation runs, result
+analysis, and documentation. No code was modified in preparing this report; it is an
+assessment, not a change.
+
+\section{The Professional Workflow VISSIM Supports}
+The lecture frames a simulation study as a disciplined engineering process, and
+VISSIM is built around it:
+
+\begin{itemize}
+  \item \textbf{Data preparation:} geometry from construction drawings, aerial
+        photos and grades; controls from the operating agency's signal timings;
+        existing demand as turning volumes, OD tables and vehicle mix; calibration
+        data such as speeds, queues and travel times; and forecast future demand.
+  \item \textbf{Network coding:} importing and scaling an aerial or CAD overlay,
+        using coding templates, laying links and nodes over the image, then coding
+        link attributes (lanes, free-flow speeds), intersection attributes (control
+        type and parameters, turn-lane designations, stop bars, turn pockets),
+        source/sink zones, vehicle types and OD tables.
+  \item \textbf{Error checking:} verifying connectivity, geometry against the aerial
+        photo, controls, prohibited turns and lane restrictions, zone volumes against
+        counts, and vehicle-mix proportions --- assisted by practical strategies such
+        as colour-coding links by attribute, loading 50\% demand to expose coding
+        errors, following a single vehicle to spot unrealistic braking or lane
+        changes, and testing simple hand-computable cases.
+  \item \textbf{Calibration and validation:} treated as two distinct problems ---
+        \emph{supply side} (capacity and saturation flow; global car-following,
+        lane-changing and gap-acceptance parameters; then link-specific fine tuning)
+        and \emph{demand side} (route choice, driver familiarity, link cost
+        functions, free-flow speed) --- with explicit calibration targets, validation
+        against the fundamental diagram and field observation, and search algorithms
+        ranging from golden-section for a single parameter to contour plots and
+        genetic algorithms for two or more.
+  \item \textbf{Result analysis:} animation output (snapshots, hotspots, dynamic link
+        colouring, vehicle traces) alongside numerical output (volumes, travel time,
+        speed, delay, stops, density, queues), summarised through system indicators
+        such as VMT and VHT, localised indicators such as queue-overflow and hotspot
+        reports, and proper statistics including means, variances and hypothesis
+        testing.
+  \item \textbf{Bias correction:} discarding a warm-up period, keeping congestion
+        inside the study area and simulation period, and counting blocked or
+        unreleased vehicles.
+\end{itemize}
+
+\section{DhakaSim as Currently Developed}
+\label{sec:dhakasim}
+DhakaSim models each road as a set of thin lateral \emph{strips} rather than lanes; a
+vehicle occupies several strips and may move to any free strip. This is the core
+design decision, and it is what makes the tool able to represent traffic that has no
+lane discipline. The present build provides:
+
+\begin{itemize}
+  \item a validated Python reimplementation of the original Java simulator, with a
+        numeric-compatibility layer reproducing Java arithmetic exactly, pinned by a
+        regression test;
+  \item thirteen vehicle types spanning motorised and non-motorised traffic, and
+        side-friction modelling: parked cars, rickshaws and CNGs, standing
+        pedestrians, pedestrians walking along the road, and road-crossing
+        pedestrians;
+  \item a library of thirteen car-following models and four lane-changing models,
+        selectable per run;
+  \item five real intersections built from 24-hour classified turning-count surveys
+        --- the Kakrail corridor (two junctions), Bijoy Sarani, Khamarbari, Banani~23
+        and Banani~27 --- each with hourly demand and an hourly vehicle mix, selectable
+        from the GUI along with the hour of day;
+  \item an animated GUI with pan and zoom, per-type vehicle colours, named nodes, a
+        collapsible legend and a live per-type vehicle counter;
+  \item an automatic per-run HTML report containing headline metrics, a configuration
+        table, per-type results, charts, an embedded run animation and a glossary,
+        plus raw CSV outputs.
+\end{itemize}
+
+\section{Head-to-Head Comparison}
+
+\begin{longtable}{@{}p{0.26\textwidth}p{0.34\textwidth}p{0.34\textwidth}@{}}
+\toprule
+\textbf{Aspect} & \textbf{PTV VISSIM} & \textbf{DhakaSim (Python)} \\
+\midrule
+\endhead
+Traffic regime &
+Lane-based; heterogeneity supported but within lane discipline &
+\textbf{Non-lane-based by construction} --- strip occupancy, free lateral movement \\
+\addlinespace
+Vehicle population &
+User-defined classes, typically motorised &
+13 types including rickshaw, van/cart, CNG, bicycle; mix measured per site and hour \\
+\addlinespace
+Side friction &
+Not represented as a first-class phenomenon &
+\textbf{Explicitly modelled}: parked vehicles, standing/walking/crossing pedestrians \\
+\addlinespace
+Car-following &
+Wiedemann 74/99 psycho-physical models &
+\textbf{13 selectable models}, including a strip-based weighted model \\
+\addlinespace
+Lane changing &
+Rule-based with gap acceptance &
+4 selectable models (naive, GHR, Gipps, MOBIL) \\
+\addlinespace
+Network coding &
+Graphical editor over scaled aerial/CAD background; templates; turn pockets, stop bars &
+Hand-edited text files; no editor, no background image \\
+\addlinespace
+Demand input &
+OD matrices, turning volumes, dynamic assignment, time-sliced demand &
+OD demand per hour from survey counts; fixed shortest-path routes, constant rate within a run \\
+\addlinespace
+Signal control &
+Fixed-time, actuated, VAP/RBC logic, priority, external controllers &
+Fixed round-robin phase change only (adaptive control present but disabled) \\
+\addlinespace
+Calibration support &
+Documented supply/demand strategy; parameter sets; multi-run seeds &
+Manual; single legacy corridor calibration; seed handling prevents repeatability \\
+\addlinespace
+MOEs &
+Volumes, speed, delay, stops, density, queues, travel time, VMT/VHT, node evaluation &
+Speed, waiting time, trip time, fuel, flow, per-type and per-route CSVs; \textbf{no queue, density, delay, VMT/VHT} \\
+\addlinespace
+Statistical rigour &
+Multi-run replication, warm-up handling, confidence intervals &
+Single run; no warm-up exclusion, no replication or interval estimates \\
+\addlinespace
+Visual analysis &
+2D/3D animation, dynamic link colouring, hotspots, vehicle traces, video export &
+2D animation, per-type colours, live counter, embedded SVG run animation \\
+\addlinespace
+Scenario management &
+Scenario manager, alternatives, comparison reports &
+One network and hour per run; no scenario comparison \\
+\addlinespace
+Extensibility &
+COM API, external driver models, scripting &
+\textbf{Open Python source}, directly modifiable and scriptable \\
+\addlinespace
+Cost / access &
+Commercial licence &
+\textbf{Free, no dependencies}, standard-library Python \\
+\bottomrule
+\end{longtable}
+
+\section{What Makes DhakaSim Distinctive}
+Three of DhakaSim's properties are not matters of maturity, and would not be obtained
+by adopting VISSIM:
+
+\begin{enumerate}
+  \item \textbf{It models a traffic regime VISSIM does not.} VISSIM assumes lane
+        discipline as its organising principle. Where vehicles of very different
+        sizes and speeds share an undivided carriageway and position themselves
+        freely across it, the lane abstraction misrepresents the mechanism of
+        congestion, not merely its magnitude. DhakaSim's strips represent that
+        behaviour directly.
+  \item \textbf{Side friction is a modelled phenomenon, not a fudge factor.} In
+        professional practice the effects of parked vehicles and pedestrian
+        interference are usually absorbed into capacity adjustment factors.
+        DhakaSim generates those elements explicitly, which is what allows their
+        contribution to be studied rather than assumed.
+  \item \textbf{It is open, inspectable and free.} Every behavioural rule can be
+        read and changed; thirteen car-following models can be swapped and compared;
+        there is no licence barrier for a university or a public agency. This is
+        also what makes it a viable research platform for machine-learning work,
+        which a closed commercial tool is not.
+\end{enumerate}
+
+\section{Where VISSIM Is Ahead}
+The gaps are concentrated in engineering workflow rather than in traffic physics:
+network construction is manual and error-prone without a graphical editor or a scaled
+background image; signal control is limited to fixed round-robin phasing, which rules
+out the signal-design studies that motivate many professional projects; the standard
+intersection performance measures --- queue length, delay, density, stops, VMT/VHT ---
+are absent; and there is no support for the statistical hygiene the lecture treats as
+mandatory, namely warm-up exclusion, multi-run replication and confidence intervals.
+The last point is aggravated by a known defect: the random seed in the parameter file
+is ignored, so headless runs are not reproducible.
+
+\section{Improvement Roadmap}
+The following recommendations are ordered by the ratio of professional value to
+implementation effort. They are intentionally framed so that none of them compromises
+the model's validated numerical equivalence with the original Java implementation ---
+any change to vehicle movement rules should be made deliberately and documented, not
+as a side effect of adding features.
+
+\subsection*{Tier 1 --- Credibility (highest value, modest effort)}
+\begin{enumerate}
+  \item \textbf{Honour the random seed and add multi-run replication.} Make runs
+        reproducible, then add an $n$-replication mode that reports the mean and a
+        confidence interval per measure. Without this, no calibration result and no
+        scenario comparison is defensible.
+  \item \textbf{Add warm-up handling.} Exclude an initial loading period from the
+        statistics, as the lecture requires, and report the excluded interval.
+  \item \textbf{Add the missing MOEs:} queue length and queue-overflow reporting,
+        control delay, stops, density, and network totals VMT and VHT. These are the
+        measures agencies expect, and most are derivable from state the simulator
+        already tracks.
+  \item \textbf{Repair the accident and collision counters}, which currently report
+        zero while events are written only to the log.
+\end{enumerate}
+
+\subsection*{Tier 2 --- Workflow (high value, moderate effort)}
+\begin{enumerate}\setcounter{enumi}{4}
+  \item \textbf{Signal control worthy of the name:} per-approach phases with green
+        splits, cycle length and offsets, defined in an input file; then re-enable
+        and validate the existing adaptive controller. This unlocks the signal
+        studies that dominate professional practice, and connects directly to the
+        group's NSGA-II signal-scheduling research.
+  \item \textbf{Scaled background imagery and a network editor.} Even a read-only
+        georeferenced background image behind the animation would let networks be
+        checked against reality; a simple graphical editor for nodes and links would
+        remove the main barrier to building new sites. The four synthetic star
+        geometries currently in use are the clearest symptom of this gap.
+  \item \textbf{Error-checking tools} following the lecture's checklist: connectivity
+        and demand/route consistency checks, a reduced-demand diagnostic mode, and
+        single-vehicle tracing to expose implausible braking or strip changes.
+  \item \textbf{Time-varying demand within a run.} Demand is currently constant for
+        the whole run, so an hour is simulated as steady conditions. Supporting
+        demand profiles that change during a run would permit peak-spreading studies.
+\end{enumerate}
+
+\subsection*{Tier 3 --- Analysis and Presentation (valuable, larger effort)}
+\begin{enumerate}\setcounter{enumi}{8}
+  \item \textbf{Scenario management:} named scenarios with automatic side-by-side
+        comparison in the HTML report --- the natural extension of the existing
+        per-run reporting, and the format agencies actually consume.
+  \item \textbf{Richer visual diagnostics:} dynamic link colouring by speed or
+        density, hotspot highlighting, and vehicle trajectory traces, all of which
+        the lecture lists as standard animation output.
+  \item \textbf{Validation against the fundamental diagram:} flow--density--speed
+        plots from simulated data compared with field observation, which is the
+        lecture's stated validation criterion and is currently absent.
+  \item \textbf{Automated calibration.} The lecture's own progression --- golden
+        section, contour plots, genetic algorithms --- is the conventional route.
+        Given the simulator's runtime, a surrogate-assisted approach is preferable,
+        and this aligns with the planned MSc work on machine-learning-based
+        calibration.
+\end{enumerate}
+
+\subsection*{Deliberately Not Recommended}
+Pursuing 3D visualisation, a COM-style external API, or full dynamic traffic
+assignment would consume disproportionate effort for little research return, and
+would move DhakaSim toward competing with VISSIM on VISSIM's own terms. The
+comparative advantage lies elsewhere.
+
+\section{Priority Summary}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}p{0.40\textwidth}ccp{0.28\textwidth}@{}}
+\toprule
+\textbf{Improvement} & \textbf{Value} & \textbf{Effort} & \textbf{Unlocks} \\
+\midrule
+Seed fix + replication + warm-up & High & Low & Defensible results \\
+Queue, delay, density, VMT/VHT   & High & Low--Med & Agency-standard reporting \\
+Phase-based signal control        & High & Medium & Signal design studies \\
+Background image / network editor & High & Medium--High & Realistic new sites \\
+Error-checking toolkit            & Med  & Low & Trustworthy coding \\
+Time-varying demand               & Med  & Medium & Peak spreading \\
+Scenario comparison               & Med  & Medium & Alternatives analysis \\
+Fundamental-diagram validation    & High & Medium & Model credibility \\
+Automated calibration             & High & High & Thesis contribution \\
+\bottomrule
+\end{tabular}
+\caption{Improvement priorities by value and effort.}
+\end{table}
+
+\section{Conclusion}
+VISSIM is the more complete engineering platform, and for a conventional
+lane-disciplined study in Bangladesh it remains the appropriate tool. DhakaSim is not
+a weaker substitute for it; it is a different instrument, one that represents
+non-lane-based heterogeneous traffic and its side-friction elements in a way VISSIM
+structurally cannot, and it is open and free where VISSIM is closed and licensed.
+
+The most productive direction is therefore not to replicate VISSIM's feature list but
+to close the workflow gap around DhakaSim's distinctive model: make results
+reproducible and statistically sound, report the performance measures practitioners
+expect, give it credible signal control, and reduce the cost of building an accurate
+network. Those changes would let DhakaSim's model be taken seriously in professional
+studies, which is precisely where the value of a Dhaka-specific simulator lies.
+
+\vspace{1em}
+\noindent\textit{Reference:} Md.~Hadiuzzaman, \emph{Lecture 4: Microscopic Simulation
+Study}, Department of Civil Engineering, BUET.
+
+\end{document}

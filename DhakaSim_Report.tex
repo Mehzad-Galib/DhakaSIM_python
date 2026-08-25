@@ -1,0 +1,237 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{times}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+
+\definecolor{codebg}{RGB}{245,247,249}
+\definecolor{codekw}{RGB}{27,94,140}
+\definecolor{codecm}{RGB}{110,120,130}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecm}\itshape,
+  language=Python,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{codebg},
+  showstringspaces=false,
+  columns=fullflexible,
+  xleftmargin=6pt,
+  aboveskip=8pt,belowskip=8pt
+}
+
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+
+\titleformat{\section}{\large\bfseries}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.6em}{}
+
+\title{\textbf{DhakaSim: Java-to-Python Reimplementation and\\
+Interface/Architecture Improvements}\\[4pt]
+\large Progress Report}
+\author{Mehzad Galib}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+DhakaSim is an event-based microscopic traffic simulator for the non-lane-based,
+heterogeneous traffic characteristic of cities such as Dhaka. This report
+documents the work completed so far: the reimplementation of the original Java
+codebase as a dependency-free Python package validated for numeric fidelity
+against the Java reference, and a set of improvements to the graphical interface,
+the output architecture, and the run reporting. Together these turn a faithful
+but bare research port into a self-documenting, easier-to-use tool.
+\end{abstract}
+
+\section{Introduction}
+Traffic in Dhaka is non-lane-based and heterogeneous: motorised and non-motorised
+vehicles share the same right-of-way without lane discipline. DhakaSim models this
+by dividing each road into thin lateral \emph{strips} rather than lanes; a vehicle
+occupies several strips and may move to any free strip. This report covers two
+strands of completed work: (i)~the Java-to-Python reimplementation that forms the
+foundation (Section~\ref{sec:port}); and (ii)~the interface, architecture and
+reporting improvements built on top of it (Sections~\ref{sec:gui}
+and~\ref{sec:arch}). Section~\ref{sec:summary} lists the files changed.
+
+\section{The Python Reimplementation of DhakaSim}
+\label{sec:port}
+The simulator was reimplemented from its original Java form as a self-contained
+Python package (Python~3.10+, standard library only; the GUI uses \code{tkinter}).
+The goal was behavioural equivalence with the Java reference rather than idiomatic
+rewriting.
+
+\subsection{Translation approach}
+The translation follows a one-module-per-class correspondence: each original Java
+class becomes a Python module of the same responsibility---for example
+\code{vehicle.py}, \code{node.py}, \code{link.py}, \code{segment.py},
+\code{strip.py}, \code{processor.py}, \code{signal.py}, \code{pedestrian.py} and
+\code{intersection_strip.py}. The package reads its network, demand and parameter
+files from \code{input/} and writes results to \code{statistics/}, mirroring the
+original layout.
+
+\subsection{Numeric-fidelity layer}
+Python's default arithmetic differs from Java's in ways that would shift
+simulation results, so a dedicated compatibility layer, \code{javacompat.py},
+reproduces the Java semantics that matter:
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \code{min}/\code{max} that propagate \code{NaN} (Gipps braking produces
+        \code{NaN} routinely, and mishandling it shifts every speed statistic);
+  \item half-up rounding rather than banker's rounding;
+  \item integer casts that truncate toward zero;
+  \item division by zero and \code{sqrt} of a negative yielding
+        \code{Infinity}/\code{NaN} instead of raising;
+  \item the sign convention of \texttt{\%} on negative operands;
+  \item \texttt{"\%.3f"}-style formatting that rounds the shortest round-tripping
+        decimal half-up;
+  \item a seed-faithful reimplementation of \code{java.util.Random}.
+\end{itemize}
+These behaviours are pinned by a regression test, \code{tests/test_javacompat.py}.
+
+\subsection{Validation against the Java reference}
+With a matched random seed, the Python build reproduces byte-identical
+\code{statistics/csv/*.csv} files and identical printed metrics relative to the
+Java implementation, across all thirteen car-following models, all four
+lane-changing models, the pedestrian and roadside-object paths (including the
+per-step accident log), the route/demand generator output, and the drawing
+geometry written to \code{trace.txt}. Unseeded, repeated runs agree within
+statistical noise.
+
+\subsection{Testing and execution}
+The build was exercised end-to-end in headless mode: it completes a run, prints
+the summary metrics, and produces the full set of per-type and per-route output
+files. The numeric regression test passes, confirming the Java-compatible
+arithmetic has not drifted.
+
+\section{GUI and Usability Improvements}
+\label{sec:gui}
+A set of changes make the interface understandable to first-time users without
+reading the source.
+
+\subsection{Self-documenting option panel}
+Every field on the ``Start Simulation'' screen now carries its unit in the label
+and a plain-language explanation beside it---for example, the simulation end time
+in seconds, the simulation speed in milliseconds per frame, strip width in metres
+with the non-lane explanation, and maximum speed in km/h---along with a note of
+what the random seed and trace mode do. A subtitle explains that a report opens
+automatically when the run ends.
+
+\subsection{Named nodes}
+Network nodes can now be labelled by name rather than by numeric id. Names are read
+from an optional \code{input/node_names.txt} file (one \code{id name} pair per
+line), so any network can supply its own; nodes without a name fall back to their
+id. A latent bug was fixed in passing: junction labels, which had been drawn at the
+coordinate origin because junction centres are stored as $(0,0)$, are now placed at
+the true junction position, recovered as the mean of the link endpoints that meet
+there.
+
+\subsection{Units in terminal output}
+The summary metrics printed at the end of a run now carry units: speeds are
+reported in km/h and waiting times in seconds, matching the report.
+
+\subsection{Per-type vehicle colours}
+Vehicles were previously drawn in random colours, making them indistinguishable by
+type. A fixed colour per type is now defined once and used by both the animation
+and the report, with cars, buses and trucks sharing red, purple and grey families
+respectively and CNGs drawn green. The original random draw is preserved so runs
+remain seed-identical.
+\begin{lstlisting}
+VEHICLE_TYPE_COLORS = (
+    (0,160,160),  (230,130,20), (140,90,40),  (40,110,220),   # bicycle..motorbike
+    (210,50,50),  (170,30,60),  (240,105,105),                # car x3
+    (30,160,70),  (140,60,190), (200,70,170),                 # CNG, bus x2
+    (100,100,100),(55,55,55),   (0,0,0),                      # truck x2, pedestrian
+)
+\end{lstlisting}
+
+\subsection{Collapsible in-GUI legend}
+A small legend panel on the right of the simulation window maps each vehicle colour
+to its type, drawn from the same colour table as the vehicles. It is collapsible via
+a $-$/$+$ toggle so it can be tucked away on narrow screens.
+
+\section{Architecture and Reporting Improvements}
+\label{sec:arch}
+
+\subsection{Automated HTML report}
+A new module, \code{report.py}, writes a self-contained, dependency-free HTML
+report at the end of every run. It presents headline metric cards (overall,
+motorised and non-motorised speed and waiting), a ``what was simulated''
+configuration table, a per-vehicle-type results table (generated, trips completed,
+speed, waiting~\%, trip time, fuel), two SVG bar charts (vehicles generated by type
+and average speed by type), a colour legend, and a glossary defining every term. In
+the GUI, a dialog offers to open the report when the run finishes. The summary
+values are derived from the in-memory statistics rather than by re-reading files,
+so the report is independent of the CSV outputs.
+
+\subsection{Reorganised statistics output}
+The output layout was cleaned up so that the \code{statistics/} folder holds only
+the human-readable reports. Each run's report is written with a time-stamped
+filename, \code{report_YYYYMMDD_HHMMSS.html}, so successive runs are retained like
+log files rather than overwriting one another. The raw numeric CSVs (per-type,
+per-route, flow and the per-event accident log) are routed into a
+\code{statistics/csv/} subfolder, keeping the folder root uncluttered while
+preserving the full numeric record. This routing is centralised, so every CSV
+writer is redirected in one place.
+
+\subsection{Offline visualisation}
+Because the interactive \code{tkinter} window must run on the user's own machine, an
+offline renderer was produced that reuses the simulator's own vehicle-drawing
+geometry to rasterise frames into a still image and an animated preview. This makes
+it possible to inspect a run's behaviour without a live display, and it shares the
+per-type colour scheme so the output matches the in-GUI legend.
+
+\section{Summary of Changes}
+\label{sec:summary}
+Table~\ref{tab:files} lists the source files added or modified in this work.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}p{0.30\textwidth}p{0.64\textwidth}@{}}
+\toprule
+\textbf{File} & \textbf{Change} \\
+\midrule
+\code{dhakasim/report.py}      & New: HTML report generator (metric cards, tables, SVG charts, colour legend, glossary, time-stamped files) \\
+\code{dhakasim/gui.py}         & Annotated option panel; named nodes with corrected label placement; report dialog on finish; collapsible colour legend \\
+\code{dhakasim/processor.py}   & Per-type vehicle colours; node-name loading; report hook; km/h units in summary output; CSVs routed to \code{statistics/csv/} \\
+\code{dhakasim/constants.py}   & Fixed per-type vehicle-colour palette \\
+\code{dhakasim/parameters.py}  & Storage for optional node names \\
+\code{dhakasim/vehicle.py}     & Accident log written under \code{statistics/csv/} \\
+\code{input/node_names.txt}    & New: optional friendly node names \\
+\code{README.md}               & Documentation updated for the new output layout, node names and units \\
+\bottomrule
+\end{tabular}
+\caption{Source files added or modified.}
+\label{tab:files}
+\end{table}
+
+\section{Conclusion}
+\label{sec:conclusion}
+The simulator now stands as a validated Python reimplementation of DhakaSim that is
+considerably easier to understand and operate: named nodes, unit-labelled output,
+type-coloured vehicles and an in-GUI legend on the interface side, and an automatic,
+self-explaining per-run HTML report plus a tidy, time-stamped output layout on the
+architecture side. The numeric-fidelity guarantees of the original port are
+preserved throughout---all colour and reporting changes leave the random stream and
+computed statistics unchanged.
+
+\begin{thebibliography}{9}
+\small
+\bibitem{dev2014} H.\ Dev \emph{et al.}, ``DhakaSim: A Tool for Simulating Traffic
+Mobility in Dhaka City,'' \emph{MoHCI}, 2014.
+\bibitem{mushfiq2024} M.\ M.\ Mushfiq \emph{et al.}, ````To Lane or Not to
+Lane?''---Comparing On-Road Experiences in Developing and Developed Countries Using
+a New Simulator RoadBird,'' \emph{IEEE Trans.\ Intelligent Transportation Systems},
+vol.~25, no.~8, pp.~8486--8498, 2024.
+\end{thebibliography}
+
+\end{document}
