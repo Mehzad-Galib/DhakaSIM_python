@@ -1,9 +1,10 @@
-"""Pin the 3D surface's two economies: line art, and chained road lines.
+"""Pin the 3D surface's economies: line art, chained road lines, the static
+layer, part culling and aerial haze.
 
-Both are cost reductions, and a cost reduction that quietly drops the wrong
-thing looks exactly like one that works -- the frame gets faster and the
-picture gets worse in a way nobody notices until they look closely.  So what
-each of them is allowed to leave out is pinned here.
+All of them are cost reductions or depth cues, and a cost reduction that
+quietly drops the wrong thing looks exactly like one that works -- the frame
+gets faster and the picture gets worse in a way nobody notices until they
+look closely.  So what each of them is allowed to leave out is pinned here.
 
 Run with ``python tests/test_render3d.py``.
 """
@@ -45,6 +46,9 @@ class _Recorder:
 
     def create_text(self, *a, **kw):
         self.items.append(("text", a, kw))
+
+    def tag_raise(self, *a):
+        self.items.append(("raise", a, {}))
 
     def kinds(self, kind):
         return [item for item in self.items if item[0] == kind]
@@ -236,6 +240,151 @@ def test_an_arrow_is_never_swallowed_into_a_chain():
     scene.flush()
     arrows = [kw for _k, _a, kw in canvas.kinds("line") if "arrow" in kw]
     assert len(arrows) == 1
+
+
+# --------------------------------------------------------------------------
+# the static layer
+# --------------------------------------------------------------------------
+
+def test_keep_static_repaints_no_sky_or_ground():
+    """A reused frame is vehicles only; the sky and ground survive on the
+    canvas from the frame that painted them."""
+    scene, canvas = _scene("solid")
+    scene.begin_frame(900, 500, 15.0, keep_static=True)
+    assert canvas.kinds("rectangle") == []
+    _a_vehicle(scene)
+    scene.flush()
+    assert canvas.kinds("polygon")
+
+
+def test_static_and_dynamic_items_carry_their_tags():
+    """The whole reuse contract: the caller deletes DYNAMIC_TAG between
+    frames, so a road item tagged dynamic would vanish with the vehicles and
+    a vehicle tagged static would smear across every following frame."""
+    scene, canvas = _scene("line")
+    scene.set_color(Color(58, 65, 73))
+    scene.set_stroke(1.0)
+    scene.draw_line(100.0, 200.0, 160.0, 200.0)
+    scene.begin_dynamic()
+    _a_vehicle(scene)
+    scene.flush()
+    lines = canvas.kinds("line")
+    assert lines and all(
+        kw.get("tags") == Scene3D.STATIC_TAG for _k, _a, kw in lines), lines
+    polygons = canvas.kinds("polygon")
+    assert polygons and all(
+        kw.get("tags") == Scene3D.DYNAMIC_TAG for _k, _a, kw in polygons)
+
+
+def test_begin_dynamic_flushes_the_chain_first():
+    """A kerb run still buffered when the tag flips would be drawn later with
+    the dynamic tag and deleted with the vehicles next frame."""
+    scene, canvas = _scene("line")
+    scene.set_color(Color(58, 65, 73))
+    scene.set_stroke(1.0)
+    scene.draw_line(100.0, 200.0, 160.0, 200.0)
+    scene.begin_dynamic()
+    lines = canvas.kinds("line")
+    assert len(lines) == 1
+    assert lines[0][2].get("tags") == Scene3D.STATIC_TAG
+
+
+def test_a_reused_frame_lifts_the_labels_back_on_top():
+    """Node names live in the static layer under freshly created vehicles;
+    flush must raise them, exactly as a full frame draws them last."""
+    scene, canvas = _scene("solid")
+    scene.begin_frame(900, 500, 15.0, keep_static=True)
+    _a_vehicle(scene)
+    scene.flush()
+    raises = canvas.kinds("raise")
+    assert raises and raises[-1][1] == (Scene3D.LABEL_TAG,), raises
+
+
+def test_a_full_frame_grades_the_sky_and_the_ground():
+    """The gradient bands are the static layer's polish; a flat frame means
+    they were lost, a dynamic-tagged band means they get deleted per frame."""
+    canvas = _Recorder()
+    scene = Scene3D(canvas)
+    scene.camera.frame(0.0, 0.0, 400.0, 400.0)
+    scene.camera.pitch = math.radians(20.0)   # horizon well on screen
+    scene.begin_frame(900, 500, 15.0)
+    bands = canvas.kinds("rectangle")
+    assert len(bands) >= 10, len(bands)
+    assert len({kw.get("fill") for _k, _a, kw in bands}) >= 6
+    assert all(kw.get("tags") == Scene3D.STATIC_TAG for _k, _a, kw in bands)
+
+
+# --------------------------------------------------------------------------
+# part culling and aerial haze
+# --------------------------------------------------------------------------
+
+def test_a_mid_distance_car_loses_its_wheels_but_not_its_body():
+    near_scene, near_canvas = _scene("solid")
+    _a_vehicle(near_scene)
+    near_scene.flush()
+
+    far_canvas = _Recorder()
+    far_scene = Scene3D(far_canvas)
+    far_scene.camera.frame(0.0, 0.0, 400.0, 400.0)
+    far_scene.camera.pitch = math.radians(20.0)
+    # Pull the camera back until the body sits just above the whole-body LOD
+    # cut: still detailed, but its wheels project under PART_MIN_PIXELS.
+    far_scene.camera.distance = 2200.0
+    far_scene.begin_frame(900, 500, 15.0)
+    far_canvas.items = []
+    _a_vehicle(far_scene)
+    far_scene.flush()
+
+    near = len(near_canvas.kinds("polygon"))
+    far = len(far_canvas.kinds("polygon"))
+    assert far >= 3, far                  # body, cabin and shadow survive
+    assert near >= far + 4, (near, far)   # the wheels went
+
+
+def test_a_far_speck_is_still_drawn_and_costs_one_item():
+    """At a whole-network framing most props project under SPECK_PIXELS.
+    They are how a wide view shows where the traffic is, so they must
+    survive -- as exactly one canvas item each, not a box and a shadow."""
+    for style in ("line", "solid"):
+        canvas = _Recorder()
+        scene = Scene3D(canvas)
+        scene.style = style
+        scene.camera.frame(0.0, 0.0, 400.0, 400.0)
+        scene.camera.pitch = math.radians(20.0)
+        scene.camera.distance = 30000.0
+        scene.begin_frame(900, 500, 15.0)
+        canvas.items = []
+        _a_vehicle(scene)
+        scene.flush()
+        polygons = canvas.kinds("polygon")
+        assert len(polygons) == 1, (style, len(polygons))
+        assert polygons[0][2].get("fill"), style
+
+
+def test_haze_pulls_a_distant_body_towards_the_haze_colour():
+    for haze in (4, 8, 16):
+        pale = render3d._lit((210, 50, 50), 0.9, haze)
+        strong = render3d._lit((210, 50, 50), 0.9, 0)
+        for i, channel in enumerate(("red", "green", "blue")):
+            target = render3d.HAZE_RGB[i]
+            hazed = int(pale[1 + 2 * i:3 + 2 * i], 16)
+            plain = int(strong[1 + 2 * i:3 + 2 * i], 16)
+            assert abs(hazed - target) <= abs(plain - target), (haze, channel)
+
+
+def test_roads_keep_the_exact_2d_palette():
+    """_lit tints and hazes; _shaded must not, or the 3D roads drift away
+    from the 2D picture and the report legend."""
+    assert render3d._shaded((152, 160, 170), 1.0) == "#98a0aa"
+
+
+def test_a_near_vehicle_gets_no_haze():
+    scene, canvas = _scene("solid")
+    _a_vehicle(scene)                      # sits at the framed target
+    scene.flush()
+    shadows = [kw for _k, _a, kw in canvas.kinds("polygon")
+               if kw.get("fill") == render3d.SHADOW_COLOR]
+    assert shadows, "at the orbit distance the shadow is unhazed"
 
 
 # --------------------------------------------------------------------------

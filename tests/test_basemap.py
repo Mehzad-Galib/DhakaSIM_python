@@ -104,11 +104,18 @@ class AnchorTest(unittest.TestCase):
         self.assertEqual(basemap.read_roundabout("kakrail_corridor"), 4)
         x, y, rule = basemap.anchor_point(links, nodes, 4)
         self.assertIn("roundabout", rule)
-        # Half a metre, not exact: a roundabout's arms are aimed at the circle
-        # rather than all ending on one coordinate, and link.txt states whole
-        # metres, so the mean of the arms' ends carries the rounding.
-        self.assertAlmostEqual(x, 500.0, delta=0.5)
-        self.assertAlmostEqual(y, 500.0, delta=0.5)
+        # The arm-derived point is only *near* the circle now: kakrail's
+        # geometry.txt records its anchor outright, which freed the fit to
+        # put every arm's mouth exactly on the ring instead of holding their
+        # mean on (500, 500).  The point the imagery actually hangs off is
+        # the recorded one, and that is exact.
+        # ... so the arm mean can sit anywhere on the ring; being inside the
+        # outer kerb (15.5 m) is what says these ends belong to this circle.
+        self.assertAlmostEqual(x, 500.0, delta=16.0)
+        self.assertAlmostEqual(y, 500.0, delta=16.0)
+        geo = basemap.georeference("kakrail_corridor", links, nodes)
+        self.assertEqual(geo.source, "recorded")
+        self.assertEqual((geo.anchor_x, geo.anchor_y), (500.0, 500.0))
 
     def test_single_junction_uses_busiest_node(self):
         links, nodes = basemap.read_network("bijoy_sarani")

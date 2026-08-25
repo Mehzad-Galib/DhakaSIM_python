@@ -65,6 +65,35 @@ GROUND_COLOR = "#e6e3da"          # the ground plane the network sits on
 SHADOW_COLOR = "#9aa0a8"          # roughly the road fill at 72% brightness
 HORIZON_COLOR = "#c3ccd6"
 
+#: The sky and the ground are graded, not flat: a handful of horizontal bands
+#: from a blue zenith down to a pale warm horizon, and from a hazed far ground
+#: up to the true ground colour underfoot.  Tk has no gradients, but the bands
+#: are screen-space rectangles in the *static* layer, so they cost a dozen
+#: canvas items once per camera move rather than anything per frame.
+SKY_TOP_RGB = (164, 196, 227)
+SKY_HORIZON_RGB = (236, 242, 246)
+GROUND_RGB = (230, 227, 218)      # GROUND_COLOR, as numbers the bands can mix
+GROUND_FAR_RGB = (216, 220, 222)  # the ground just under the horizon, hazed
+
+#: Aerial perspective.  Everything solid fades towards this colour with
+#: distance -- the single strongest depth cue a picture this simple can give,
+#: and it declutters the far half of a big network for free, because a fully
+#: saturated bus half a kilometre away no longer shouts as loudly as one by
+#: the camera.  The colour sits between the far ground and the horizon sky so
+#: hazed bodies sink into both.
+HAZE_RGB = (222, 227, 231)
+#: How much haze a body at the camera's own orbit distance gets (none), and
+#: the most any body may get -- full haze would erase it entirely.
+HAZE_MAX = 0.52
+
+#: The sun is warm and the shade is cool.  Faces are tinted as well as
+#: brightened: full sun pulls the colour a little towards amber, full shade a
+#: little towards blue.  Small on any one face, but it is what separates two
+#: faces of the same body far better than brightness alone, and it is the
+#: whole difference between "shaded" and "lit".
+_WARM_TINT = (1.05, 1.00, 0.93)
+_COOL_TINT = (0.94, 0.98, 1.05)
+
 #: Line-art style.  The face a part shows the camera is not painted in its own
 #: shaded colour; the part is drawn once as its outline over a pale wash of
 #: the same colour.  The wash is not decoration -- it is what stops the drawing
@@ -85,20 +114,29 @@ LINE_SHADOW = "#c3c8cf"
 _line_cache: dict = {}
 
 
-def _line_colours(rgb):
-    """``(fill, outline)`` for one part in line style, cached like _shaded."""
-    hexed = _line_cache.get(rgb)
+def _line_colours(rgb, haze=0):
+    """``(fill, outline)`` for one part in line style, cached like _shaded.
+
+    ``haze`` is a quantised haze step (0..16); a distant part's outline fades
+    towards :data:`HAZE_RGB`, which is the line-art reading of aerial
+    perspective -- far vehicles thin out instead of staying full-ink thickets.
+    """
+    key = (rgb, haze)
+    hexed = _line_cache.get(key)
     if hexed is None:
+        h = haze / 16.0
         luma = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
         factor = min(LINE_OUTLINE, LINE_LUMA_CEILING / max(luma, 1.0))
         outline = "#%02x%02x%02x" % tuple(
-            int(_clamp(component * factor, 0, 255)) for component in rgb)
+            int(_clamp(component * factor * (1.0 - h) + HAZE_RGB[i] * h,
+                       0, 255))
+            for i, component in enumerate(rgb))
         blend = LINE_FILL_BLEND
         fill = "#%02x%02x%02x" % tuple(
             int(_clamp(component + (255 - component) * blend, 0, 255))
             for component in rgb)
         hexed = (fill, outline)
-        _line_cache[rgb] = hexed
+        _line_cache[key] = hexed
     return hexed
 
 GLASS = (58, 76, 92)
@@ -133,6 +171,53 @@ def _shaded(rgb, light):
             int(_clamp(rgb[1] * f, 0, 255)),
             int(_clamp(rgb[2] * f, 0, 255)))
         _shade_cache[key] = hexed
+    return hexed
+
+
+_lit_cache: dict = {}
+
+
+def _lit(rgb, light, haze=0):
+    """A model face's colour: brightness, sun tint and aerial haze together.
+
+    Separate from :func:`_shaded` on purpose.  Roads, kerbs and markings keep
+    the exact 2D palette so the two views stay recognisably the same picture;
+    the lighting model applies only to the solid bodies stood on top of it.
+    ``haze`` is quantised to sixteenths and ``light`` to 64 steps, so the
+    cache stays small and almost every call is a dict hit.
+    """
+    key = (rgb, int(light * 64), haze)
+    hexed = _lit_cache.get(key)
+    if hexed is None:
+        f = key[1] / 64.0
+        # 0 in full shade, 1 in full sun -- how far to lean warm over cool.
+        sun = _clamp((f - _AMBIENT) / (1.0 - _AMBIENT), 0.0, 1.0)
+        h = haze / 16.0
+        channels = []
+        for i in range(3):
+            tint = _COOL_TINT[i] + (_WARM_TINT[i] - _COOL_TINT[i]) * sun
+            value = rgb[i] * f * tint
+            channels.append(int(_clamp(
+                value * (1.0 - h) + HAZE_RGB[i] * h, 0, 255)))
+        hexed = "#%02x%02x%02x" % tuple(channels)
+        _lit_cache[key] = hexed
+    return hexed
+
+
+_SHADOW_RGB = (154, 160, 168)     # SHADOW_COLOR, as numbers haze can reach
+_shadow_cache: dict = {}
+
+
+def _shadow_colour(haze=0):
+    """The drop shadow, faded into the ground with distance like its owner."""
+    hexed = _shadow_cache.get(haze)
+    if hexed is None:
+        h = haze / 16.0
+        hexed = "#%02x%02x%02x" % tuple(
+            int(_clamp(_SHADOW_RGB[i] * (1.0 - h) + GROUND_FAR_RGB[i] * h,
+                       0, 255))
+            for i in range(3))
+        _shadow_cache[haze] = hexed
     return hexed
 
 
@@ -419,6 +504,34 @@ class Scene3D:
     #: ones that stand alone, so an outline can never come out gapped.
     MIN_LINE_PIXELS = 3.0
 
+    #: A model part whose largest dimension projects smaller than this is
+    #: skipped.  It sits below :data:`LOD_PIXELS`' whole-body cut: between the
+    #: two, a mid-distance car keeps its cabin but loses its wheels, which at
+    #: two pixels were costing a box each while reading as noise on the tyre
+    #: line of the road.
+    PART_MIN_PIXELS = 2.5
+
+    #: A prop whose footprint projects smaller than this is drawn as a single
+    #: flat quad -- a speck.  At a whole-network framing *most* props are
+    #: specks (a 4 m car on a 2 km network lands under a pixel), and they must
+    #: not be dropped: several hundred dots are exactly how a wide view shows
+    #: where the traffic is.  What they must not cost is a box each -- one
+    #: canvas item marks the spot as well as three faces and a shadow do.
+    SPECK_PIXELS = 6.0
+
+    #: Canvas tags for the static-layer economy.  The report has always
+    #: rendered sky, ground and roads once and repainted only the vehicles
+    #: (``RunRecorder._capture_3d``); these tags let the live window do the
+    #: same.  Everything the scene creates while the frame is static carries
+    #: STATIC_TAG, everything after :meth:`begin_dynamic` carries DYNAMIC_TAG,
+    #: and a caller that passed ``keep_static=True`` to :meth:`begin_frame`
+    #: deletes only the dynamic items between frames.  Labels carry LABEL_TAG
+    #: as well, so a reused frame can lift the (static) node names back above
+    #: the vehicles just created on top of them.
+    STATIC_TAG = "scene3d_static"
+    DYNAMIC_TAG = "scene3d_dyn"
+    LABEL_TAG = "scene3d_label"
+
     def __init__(self, canvas):
         self.canvas = canvas
         self.camera = Camera()
@@ -439,8 +552,10 @@ class Scene3D:
         # drawn as a single polyline: one canvas item for a whole kerb rather
         # than one per point pair.
         self._chain = None     # (colour, width, [x0, y0, x1, y1, ...])
-        self._props = []       # (depth, [(screen points, fill, outline), ...])
-        self._labels = []      # (depth, x, y, text, colour, anchor, size)
+        self._props = []       # (depth, [(screen points, fill, outline), ...], tag)
+        self._labels = []      # (depth, x, y, text, colour, anchor, size, tag)
+        self._tag = self.STATIC_TAG
+        self._kept_static = False
         self._extent = None
         self._focal = 1.0
         self._eye = (0.0, 0.0, 1.0)
@@ -472,7 +587,12 @@ class Scene3D:
         something rather than floating in the sky."""
         self._extent = (x0, y0, x1, y1)
 
-    def begin_frame(self, width, height, pixel_per_meter) -> None:
+    def begin_frame(self, width, height, pixel_per_meter,
+                    keep_static=False) -> None:
+        """Start a frame.  With ``keep_static=True`` the caller is reusing the
+        static layer from the previous frame -- same camera, same window, same
+        roads -- so the sky and ground are not repainted and everything drawn
+        from here on is tagged dynamic for the caller to delete next frame."""
         self.width = max(1, width)
         self.height = max(1, height)
         self.pixel_per_meter = pixel_per_meter or 1.0
@@ -481,6 +601,11 @@ class Scene3D:
         self._props = []
         self._labels = []
         self._prop = None
+        self._chain = None
+        self._kept_static = keep_static
+        self._tag = self.DYNAMIC_TAG if keep_static else self.STATIC_TAG
+        if keep_static:
+            return
 
         canvas = self.canvas
         canvas.configure(bg=SKY_COLOR)
@@ -495,30 +620,84 @@ class Scene3D:
         # diagonal.  A ground plane has no roll here, so its horizon is exactly
         # a horizontal line, and one rectangle gives the same picture with no
         # arithmetic to go wrong.
+        #
+        # Both halves are graded in horizontal bands -- deep sky at the top,
+        # pale at the horizon; hazed ground under the horizon, true ground
+        # colour underfoot.  The bands live in the static layer, so their cost
+        # is per camera move, not per frame.
         horizon = self.height / 2.0 - self._focal * math.tan(self.camera.pitch)
+
+        def band(y0, y1, colour):
+            canvas.create_rectangle(0, y0, self.width, y1,
+                                    fill="#%02x%02x%02x" % colour, outline="",
+                                    tags=self._tag)
+
+        def mix(a, b, t):
+            return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+        if horizon > 0:
+            # Squared interpolation keeps the pale part pinned to the horizon
+            # where the eye expects it, instead of washing the whole sky out.
+            # Sixteen bands is where the steps stop being visible at typical
+            # window heights; they are static items, so the count is cheap.
+            top = min(horizon, self.height)
+            steps = 16
+            for i in range(steps):
+                t0, t1 = i / steps, (i + 1) / steps
+                band(top * t0, top * t1,
+                     mix(SKY_TOP_RGB, SKY_HORIZON_RGB, t1 * t1))
         if horizon < self.height:
-            canvas.create_rectangle(0, max(horizon, 0), self.width, self.height,
-                                    fill=GROUND_COLOR, outline="")
+            start = max(horizon, 0)
+            # The haze hugs the horizon: it fades out over the first quarter
+            # of the visible ground and the rest is one plain rectangle.
+            reach = min(self.height, start + (self.height - start) * 0.28)
+            steps = 6
+            for i in range(steps):
+                t0, t1 = i / steps, (i + 1) / steps
+                band(start + (reach - start) * t0,
+                     start + (reach - start) * t1,
+                     mix(GROUND_FAR_RGB, GROUND_RGB, t0))
+            band(reach, self.height, GROUND_RGB)
             if 0 < horizon < self.height:
                 canvas.create_line(0, horizon, self.width, horizon,
-                                   fill=HORIZON_COLOR)
+                                   fill=HORIZON_COLOR, tags=self._tag)
+
+    def begin_dynamic(self) -> None:
+        """Declare the static half of the frame finished.
+
+        Everything drawn before this call -- sky, ground, roads, markings,
+        node names -- is tagged static; everything after it is tagged dynamic.
+        A caller that keeps the static layer across frames deletes only the
+        dynamic tag.  The chain buffer is flushed first, so a kerb run still
+        being collected cannot leak into the dynamic layer and be deleted
+        with the vehicles next frame.
+        """
+        self._flush_chain()
+        self._tag = self.DYNAMIC_TAG
 
     def flush(self) -> None:
         """Paint the raised geometry, farthest vehicle first."""
         self._flush_chain()
         canvas = self.canvas
         self._props.sort(key=lambda item: -item[0])
-        for _depth, faces in self._props:
+        for _depth, faces, tag in self._props:
             for points, fill, outline in faces:
-                canvas.create_polygon(points, fill=fill, outline=outline)
-        for _depth, x, y, text, colour, anchor, size in sorted(
+                canvas.create_polygon(points, fill=fill, outline=outline,
+                                      tags=tag)
+        for _depth, x, y, text, colour, anchor, size, tag in sorted(
                 self._labels, key=lambda item: -item[0]):
             font = ("Segoe UI", size, "bold")
             for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 canvas.create_text(x + ox, y + oy, text=text, anchor=anchor,
-                                   fill="#ffffff", font=font)
+                                   fill="#ffffff", font=font,
+                                   tags=(tag, self.LABEL_TAG))
             canvas.create_text(x, y, text=text, anchor=anchor, fill=colour,
-                               font=font)
+                               font=font, tags=(tag, self.LABEL_TAG))
+        if self._kept_static:
+            # The node names live in the static layer, but the vehicles were
+            # just created on top of them; lift them back.  Only reached on a
+            # live canvas -- the report and the tests always run full frames.
+            canvas.tag_raise(self.LABEL_TAG)
 
     # ---- projection ------------------------------------------------------
 
@@ -555,7 +734,16 @@ class Scene3D:
         drops near the road: a road quad reaching past the lens has to be cut,
         not discarded, or the surface tears open under the viewer.
         """
-        view = [self._view(*p) for p in points]
+        return self._project_views([self._view(*p) for p in points])
+
+    def _project_views(self, view):
+        """The second half of :meth:`_project`, from view space on.
+
+        Split out so a box can transform its eight corners once and project
+        each of its faces from the shared result -- every corner sits on
+        three faces, so projecting per face transforms half as much again
+        for nothing.
+        """
         if all(v[2] >= self.NEAR for v in view):
             out = []
             for v in view:
@@ -645,7 +833,7 @@ class Scene3D:
             if ribbon:
                 self._flush_chain()
                 self.canvas.create_polygon(ribbon, fill=_shaded(self._color, 1.0),
-                                           outline="")
+                                           outline="", tags=self._tag)
             return
 
         points = self._project([(x1, y1, 0.0), (x2, y2, 0.0)])
@@ -662,7 +850,8 @@ class Scene3D:
         if arrow:
             self._flush_chain()
             self.canvas.create_line(points[0], points[1], points[2], points[3],
-                                    fill=colour, width=width, **opts)
+                                    fill=colour, width=width, tags=self._tag,
+                                    **opts)
             return
 
         chain = self._chain
@@ -698,7 +887,8 @@ class Scene3D:
             if math.hypot(points[2] - points[0],
                           points[3] - points[1]) < self.MIN_LINE_PIXELS:
                 return
-        self.canvas.create_line(*points, fill=colour, width=width)
+        self.canvas.create_line(*points, fill=colour, width=width,
+                                tags=self._tag)
 
     def fill_polygon(self, xs, ys, n) -> None:
         self._flush_chain()
@@ -708,7 +898,7 @@ class Scene3D:
         points = self._project([(xs[i], ys[i], 0.0) for i in range(n)])
         if points:
             self.canvas.create_polygon(points, fill=_shaded(self._color, 1.0),
-                                       outline="")
+                                       outline="", tags=self._tag)
 
     def fill_oval(self, x, y, w, h) -> None:
         self._flush_chain()
@@ -722,7 +912,7 @@ class Scene3D:
         points = self._project(_disc(cx, cy, w / 2.0, h / 2.0))
         if points:
             self.canvas.create_polygon(points, fill=_shaded(self._color, 1.0),
-                                       outline="")
+                                       outline="", tags=self._tag)
 
     def draw_oval(self, x, y, w, h) -> None:
         self._flush_chain()
@@ -732,7 +922,8 @@ class Scene3D:
         depth = self._view(x + w / 2.0, y + h / 2.0, 0.0)[2]
         width = _clamp(self._stroke * self._focal / max(depth, self.NEAR), 1.0, 8.0)
         self.canvas.create_line(*points, points[0], points[1],
-                                fill=_shaded(self._color, 1.0), width=width)
+                                fill=_shaded(self._color, 1.0), width=width,
+                                tags=self._tag)
 
     def draw_string(self, text, x, y, anchor="sw") -> None:
         # Node labels are drawn as a white halo behind black text.  In 3D the
@@ -750,7 +941,8 @@ class Scene3D:
         # shrinks with distance exactly as the road under it does.
         size = int(_clamp(self._font[1] * self._focal / view[2], 8, 34))
         self._labels.append((view[2], sx, sy, text,
-                             _shaded(self._color, 1.0), anchor, size))
+                             _shaded(self._color, 1.0), anchor, size,
+                             self._tag))
 
     # ---- solid objects ---------------------------------------------------
 
@@ -795,7 +987,33 @@ class Scene3D:
                 and -margin <= cy <= self.height + margin):
             return
 
+        # Aerial haze, quantised to sixteenths for the colour caches.  Zero at
+        # the camera's orbit distance -- the depth the framed network sits at
+        # -- growing on everything beyond it, so haze reads as distance into
+        # the scene whatever the zoom rather than kicking in at a fixed range.
+        haze = int(_clamp((depth / max(self.camera.distance, 1.0) - 1.05)
+                          * 0.6, 0.0, HAZE_MAX) * 16.0)
+
         height = _MODEL_HEIGHT.get(id(model), 2.0)
+        wide = math.hypot(rx, ry)
+        if max(body, wide) * scale < self.SPECK_PIXELS:
+            # Too small even for the one-block LOD: one flat quad at the
+            # model's roofline, in the body colour, and done.
+            top = height * 0.72 * self.pixel_per_meter
+            quad = self._project_views([
+                self._view(ox, oy, top),
+                self._view(ox + fx, oy + fy, top),
+                self._view(ox + fx + rx, oy + fy + ry, top),
+                self._view(ox + rx, oy + ry, top)])
+            if quad:
+                if self.style == "line":
+                    # Ink, not wash: a three-pixel wash is invisible.
+                    colour = _line_colours(self._color, haze)[1]
+                else:
+                    colour = _lit(self._color, 0.9, haze)
+                self._props.append((depth, [(quad, colour, "")], self._tag))
+            return
+
         detailed = body * scale >= self.LOD_PIXELS
         if self.show_shadows and detailed:
             # Thrown away from the sun, by the amount a body of this height
@@ -814,10 +1032,12 @@ class Scene3D:
                 # looks like it is sitting in a puddle.
                 if self.style == "line":
                     self.canvas.create_polygon(shadow, fill="",
-                                               outline=LINE_SHADOW)
+                                               outline=LINE_SHADOW,
+                                               tags=self._tag)
                 else:
-                    self.canvas.create_polygon(shadow, fill=SHADOW_COLOR,
-                                               outline="")
+                    self.canvas.create_polygon(shadow,
+                                               fill=_shadow_colour(haze),
+                                               outline="", tags=self._tag)
 
         if not detailed:
             # Too small to resolve: one block, and no shadow either -- at this
@@ -828,12 +1048,23 @@ class Scene3D:
         ppm = self.pixel_per_meter
         eye = self._eye
         line = self.style == "line"
+        # A part's screen size is judged from its fractions of the body
+        # length, the body width and the metre unit, all computed above.
         faces = []
         for part in model:
-            _emit_box(faces, self._project, eye, base, ppm,
-                      ox, oy, fx, fy, rx, ry, part, line)
+            if detailed and max((part[1] - part[0]) * body,
+                                (part[3] - part[2]) * wide,
+                                (part[5] - part[4]) * ppm) * scale \
+                    < self.PART_MIN_PIXELS:
+                # A wheel two pixels long is noise that costs a whole box.
+                # Only detail parts can land here: the body spans the model,
+                # and a model small enough for its body to go is one block
+                # already.
+                continue
+            _emit_box(faces, self, eye, base, ppm,
+                      ox, oy, fx, fy, rx, ry, part, line, haze)
         if faces:
-            self._props.append((depth, faces))
+            self._props.append((depth, faces, self._tag))
 
 
 def _silhouette(points):
@@ -879,8 +1110,8 @@ def _disc(cx, cy, rx, ry, steps=28):
             for i in range(steps)]
 
 
-def _emit_box(faces, project, eye, base, ppm, ox, oy, fx, fy, rx, ry, part,
-              line=False):
+def _emit_box(faces, scene, eye, base, ppm, ox, oy, fx, fy, rx, ry, part,
+              line=False, haze=0):
     """Append one model part to ``faces`` as ``(points, fill, outline)``.
 
     Solid style emits the camera-facing faces, each shaded by how much sun it
@@ -901,6 +1132,11 @@ def _emit_box(faces, project, eye, base, ppm, ox, oy, fx, fy, rx, ry, part,
     c = (corner(u0, v0, z0), corner(u1, v0, z0), corner(u1, v1, z0),
          corner(u0, v1, z0), corner(u0, v0, z1), corner(u1, v0, z1),
          corner(u1, v1, z1), corner(u0, v1, z1))
+    # Every corner sits on three faces; transform the eight once and let each
+    # face project from the shared result.
+    view = [scene._view(*p) for p in c]
+    if all(v[2] < scene.NEAR for v in view):
+        return
     mid = (sum(p[0] for p in c) / 8.0,
            sum(p[1] for p in c) / 8.0,
            sum(p[2] for p in c) / 8.0)
@@ -938,7 +1174,7 @@ def _emit_box(faces, project, eye, base, ppm, ox, oy, fx, fy, rx, ry, part,
                 + nz * (eye[2] - face_mid[2])) <= 0.0:
             continue     # facing away from the camera
 
-        points = project([c[i] for i in indices])
+        points = scene._project_views([view[i] for i in indices])
         if not points:
             continue
         if line:
@@ -950,12 +1186,12 @@ def _emit_box(faces, project, eye, base, ppm, ox, oy, fx, fy, rx, ry, part,
             continue
         lit = nx * _SUN[0] + ny * _SUN[1] + nz * _SUN[2]
         light = _AMBIENT + (1.0 - _AMBIENT) * (lit if lit > 0.0 else 0.0)
-        faces.append((points, _shaded(rgb, light), ""))
+        faces.append((points, _lit(rgb, light, haze), ""))
 
     if line and seen:
         outline = _silhouette(seen)
         if outline:
-            fill_hex, line_hex = _line_colours(side_rgb)
+            fill_hex, line_hex = _line_colours(side_rgb, haze)
             faces.append((outline, fill_hex, line_hex))
 
 

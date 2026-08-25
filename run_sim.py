@@ -32,6 +32,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dhakasim.javacompat import JavaRandom, jround  # noqa: E402
+from dhakasim import network_files  # noqa: E402
 from dhakasim.parameters import Parameters  # noqa: E402
 from dhakasim.processor import Processor  # noqa: E402
 
@@ -188,65 +189,49 @@ class Sim:
         # moving it ahead of the network read changes nothing else.
         self._read_parameters()
 
-        # Each link's endpoints, read from link.txt itself: the up -> down
-        # order is the link's own statement of direction, which is what a
-        # one-way declaration in geometry.txt refers to.
-        link_ends = []
-        with open(Processor.input_path("link.txt"), "r") as f:
-            num_of_links = int(f.readline())
-            for _ in range(num_of_links):
-                header = f.readline().split()
-                link_ends.append((int(header[1]), int(header[2])))
-                for _ in range(int(header[3])):
-                    f.readline()
+        # The file grammar lives in dhakasim.network_files; what this
+        # generator wants from it is each link's up -> down endpoints (the
+        # link's own statement of direction, which is what a one-way
+        # declaration refers to) and which nodes are boundary points.
+        link_rows = network_files.read_link_rows(
+            Processor.input_path("link.txt"))
+        link_ends = [(row.up, row.down) for row in link_rows]
+        num_of_links = len(link_rows)
 
         # One-way links, so no route is generated against the direction the
         # road carries.  The simulator opens a one-way link's full width to
         # its up -> down direction and warns if demand runs both ways.
-        oneway = set()
         try:
-            with open(Processor.input_path("geometry.txt"), "r",
-                      encoding="utf-8") as f:
-                for line in f:
-                    tokens = line.split("#", 1)[0].split()
-                    if len(tokens) == 2 and tokens[0].lower() == "oneway":
-                        oneway.add(int(tokens[1]))
-        except OSError:
-            pass
+            oneway = network_files.read_geometry(
+                Processor.input_path("geometry.txt")).oneways
+        except (OSError, ValueError):
+            oneway = set()
 
-        with open(Processor.input_path("node.txt"), "r") as br:
-            num_of_nodes = int(br.readline())
+        node_rows = network_files.read_node_rows(
+            Processor.input_path("node.txt"))
+        num_of_nodes = len(node_rows)
+        for i, row in enumerate(node_rows):
+            if len(row.link_ids) == 1:
+                self.out_node.append(i)
 
-            temp_matrix = [[0] * num_of_nodes for _ in range(num_of_links)]
+        self.adj_matrix = [[INF] * num_of_nodes for _ in range(num_of_nodes)]
+        self.path_matrix = [[0] * num_of_nodes for _ in range(num_of_nodes)]
 
-            for i in range(num_of_nodes):
-                split = br.readline().rstrip("\n").split(" ")
-                links = split[3:]
+        for i in range(num_of_nodes):
+            self.adj_matrix[i][i] = 0
 
-                for link in links:
-                    temp_matrix[int(link)][i] = 1
+        for i in range(num_of_links):
+            # up -> down from link.txt rather than the node listing:
+            # identical for a two-way link (both directions get set),
+            # and the only orientation a one-way link can be trusted in.
+            row, col = link_ends[i]
 
-                if len(links) == 1:
-                    self.out_node.append(i)
-
-            self.adj_matrix = [[INF] * num_of_nodes for _ in range(num_of_nodes)]
-            self.path_matrix = [[0] * num_of_nodes for _ in range(num_of_nodes)]
-
-            for i in range(num_of_nodes):
-                self.adj_matrix[i][i] = 0
-
-            for i in range(num_of_links):
-                # up -> down from link.txt rather than the node listing:
-                # identical for a two-way link (both directions get set),
-                # and the only orientation a one-way link can be trusted in.
-                row, col = link_ends[i]
-
-                print(f"{row}, {col}")
-                self.adj_matrix[row][col] = 1
-                self.path_matrix[row][col] = i
-                if i not in oneway:
-                    self.adj_matrix[col][row] = 1
-                    self.path_matrix[col][row] = i
+            print(f"{row}, {col}")
+            self.adj_matrix[row][col] = 1
+            self.path_matrix[row][col] = i
+            if i not in oneway:
+                self.adj_matrix[col][row] = 1
+                self.path_matrix[col][row] = i
 
     def _read_parameters(self) -> None:
         # parameter.txt is global, not per-network: Utilities.initialize reads

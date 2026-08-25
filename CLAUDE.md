@@ -69,6 +69,36 @@ no-op them; `Scene3D` uses the type to pick a 3D model. `type_index=None` means
 "infer from the footprint", which is what trace replay needs, since `trace.txt`
 records corners and a colour but not the vehicle type.
 
+## The network files
+
+`dhakasim/network_files.py` is the one home of the input-file grammar:
+`link.txt`, `node.txt`, `geometry.txt` and the name files, every reader
+UTF-8. It exists because the grammar used to live in four independent
+readers and seven partial `geometry.txt` parsers, and three real defects
+(cp1252 on Arabic street names, a BOM, a zero-length segment) were each
+fixed in one reader while staying latent in the others. **Do not open a
+network file directly; go through this module**, and put any new directive
+or comment-borne fact in its `read_geometry`, where every consumer will
+see it.
+
+Two things about it are deliberate. The processor still builds its heavy
+`Segment`/`Node` objects itself from the rows -- a `Segment` measures its
+sensor and builds its strips in its constructor, which needs the run's
+configuration and has no place in a file reader; parity was verified by
+byte-identical seeded runs, not by eye. And the recorded anchor
+(`# Centre <lat>,<lon> at <x>,<y>`) is honoured only on a line that
+*starts* with `Centre`, because an unanchored match let prose in a
+provenance note hijack the georeference. `tests/test_network_files.py`
+pins both.
+
+The writers live here too (`write_link_rows` / `write_node_rows`), shared
+by `make_network` and `fit_roads`, and the zero-length defence travels
+with them: consecutive points that round to the same whole metre are
+collapsed, and a link that collapses entirely is refused -- the producer
+must merge its end nodes (`make_network`'s collapse-merge loop is the
+model). Byte-parity of both producers through the shared writers was
+verified against their previous output, not assumed.
+
 ## Scene3D
 
 Reads a vehicle's four footprint corners as a frame — `corner0` rear-left,
@@ -86,8 +116,44 @@ artefacts that no test will catch:
 - **Every part is a convex box**, so its visible faces never overlap each other
   on screen and need no sorting among themselves.
 - **The camera never rolls.** The ground's horizon is therefore exactly a
-  horizontal line, which is why the ground is filled as a screen-space
-  rectangle rather than a projected quad.
+  horizontal line, which is why the ground is filled as screen-space
+  rectangles rather than a projected quad — a stack of graded bands now, sky
+  above the horizon and hazed ground below it, but still screen-space and
+  still in the static layer.
+
+**The frame is split into a static and a dynamic layer, by canvas tag.**
+Everything drawn before `begin_dynamic()` — sky, ground, roads, markings,
+node names — carries `Scene3D.STATIC_TAG`; everything after carries
+`DYNAMIC_TAG`. While the camera, the window and the road geometry are
+unchanged, `gui.paint_component` deletes only the dynamic tag and passes
+`keep_static=True` to `begin_frame`, so the several hundred static items
+survive on the canvas and only vehicles are re-created — the same economy the
+report has always used in `RunRecorder._capture_3d`. Three rules keep it
+honest: `begin_dynamic` flushes the kerb chain first (a chain flushed later
+would carry the dynamic tag and vanish next frame); labels also carry
+`LABEL_TAG` so a reused frame can `tag_raise` the static node names back
+above the new vehicles; and the map furniture is tagged `furniture`, deleted
+and redrawn every reused frame, or vehicles would stack above the compass.
+The reuse decision is `_static3d_key` in `gui.py` — anything new that draws
+per-frame-changing content into the *static* phase must either move after
+`begin_dynamic` or join that key. A 2D frame clears the key, because its
+untagged items must never be mistaken for a 3D static layer.
+
+**Colour is two functions, and the split is deliberate.** `_shaded` is
+brightness only and paints everything flat on the road, so the 3D roads stay
+the exact 2D palette. `_lit` is for model faces: warm-tinted in sun,
+cool-tinted in shade, and faded towards `HAZE_RGB` with distance (quantised
+sixteenths, keyed into the cache). The haze factor is relative to
+`camera.distance`, so it reads as depth at every zoom instead of kicking in
+at a fixed range.
+
+**Three LOD tiers, coarse to fine: speck, block, parts.** A prop whose
+footprint projects under `SPECK_PIXELS` is one flat quad — never dropped,
+because at a whole-network framing *most* props are specks and several
+hundred dots are exactly how a wide view shows where the traffic is. Under
+`LOD_PIXELS` it is one block. At full detail, any single part smaller than
+`PART_MIN_PIXELS` (wheels, mostly) is skipped. `tests/test_render3d.py` pins
+all of this, the tag contract included.
 
 Two pieces of arithmetic worth knowing before touching the camera:
 
@@ -637,7 +703,13 @@ its neighbours were rewritten to ask each vehicle for its distance once instead
 of twice, which means the strict `<` that keeps the first of equal candidates
 and the NaN comparisons that silently drop a vehicle both had to survive
 untouched. The check is a seeded run hashed end to end, not the test suite —
-the suites do not run the traffic model.
+the suites do not run the traffic model. That check is now one command:
+`python hash_run.py` runs every network headless (seed 7, 90 steps) and
+compares the console summary and every CSV against `run_hashes.txt`,
+per component, so a drift report names the output that moved. Re-record with
+`--record` only after a change is *verified* — recording is the same statement
+as updating `test_javacompat.py`'s expected values. The HTML report is
+deliberately not hashed; it carries wall-clock timestamps.
 
 **The 3D view is Tk-bound, not Python-bound**, and the way to speed it up is
 to hand the canvas fewer items. One frame of Khamarbari, 444 vehicles, is
@@ -661,9 +733,21 @@ each -- and the "alone" part is load-bearing: kerb segments are short too, and
 dropping one on length alone gaps the outline.
 
 The chain buffer has to be flushed before anything else reaches the canvas
-(`fill_polygon`, `fill_oval`, `draw_oval`, a ribbon, an arrow, `flush`). Paint
-order in this renderer is call order, so a kerb still sitting in the buffer
-while a junction patch is filled comes back out on top of it.
+(`fill_polygon`, `fill_oval`, `draw_oval`, a ribbon, an arrow, `flush`,
+`begin_dynamic`). Paint order in this renderer is call order, so a kerb still
+sitting in the buffer while a junction patch is filled comes back out on top
+of it.
+
+**Measured again 26 Aug 2026**, after the static layer, the speck tier and
+the part cull went in (see Scene3D above). One frame of demo_backup at
+1920x991, 191 vehicles plus ~500 side-friction props, `paint_component` +
+`update_idletasks`, median of 24: solid was 99 ms at 2371 items; a full frame
+is now 56-58 ms at ~960 items and a reused-static frame — the steady state
+while the camera is still — 38-43 ms, at close zoom as well as wide. The
+remaining cost splits roughly evenly between Python (projection and
+`_stand_model`) and Tk's own rasterising, so the next saving, if one is ever
+needed, is again fewer or simpler items, not faster arithmetic. The
+benchmark harness is `benchmark_3d.py` in the session scratchpad.
 
 ## Development environment gotchas
 
@@ -762,6 +846,18 @@ under the Windows theme and ignore yours, so the form uses a classic
 `tk.Scrollbar` and a `_Dropdown` built from a `tk.Label` and a `tk.Menu`;
 switching the app to the `clam` theme to fix that would restyle the simulation
 panel too.
+
+**The run screen and the report wear the same palette now.** The run view's
+toolbar, legend panel, sliders and spinner all read their colours from `_UI`,
+and the ttk rule above extends to them: every widget there is plain `tk`
+(`_ToolButton` is the toolbar's `ttk.Button` replacement — a label with the
+start screen's fills and hover, answering `configure(text=…)` and
+`configure(state=…)` so the callers that flip the pause caption or enable the
+report button did not change). The HTML report's CSS carries the same values
+**copied**, not imported — `report.py` cannot import the GUI — so a palette
+change means editing `_UI` and the `:root` block in `report.py` together.
+The one place the light look survives is inside the animation frames: the
+plan/3D pictures are daylight scenes and stay so, framed by the dark cards.
 
 **Start is in a footer outside the scroller.** An earlier version put it at the
 top of the form for the same reason — the settings were taller than a short

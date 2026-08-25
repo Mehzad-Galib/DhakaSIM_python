@@ -326,7 +326,10 @@ class DualCarriagewayTest(unittest.TestCase):
         self.assertAlmostEqual(once[len(once) // 2][1], 8.0, 1)
 
     def test_the_networks_declare_their_dual_carriageways(self):
-        self.assertEqual(fit.read_medians("kakrail_corridor"), {2, 3})
+        # All five arms: OSM maps every kakrail approach as a one-way pair
+        # (measured 26 Aug 2026 -- Anjuman, Sahid Capten and Hare Road are
+        # dual carriageways just like Kakrail Rd and Minto Road).
+        self.assertEqual(fit.read_medians("kakrail_corridor"), {0, 1, 2, 3, 4})
         self.assertEqual(fit.read_medians("bijoy_sarani"), {0, 1, 2, 3})
         self.assertEqual(fit.read_medians("demo_backup"), set())
 

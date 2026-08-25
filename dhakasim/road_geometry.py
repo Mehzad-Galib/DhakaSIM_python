@@ -935,14 +935,42 @@ class _WiderSegment:
     come from the real ``Segment``, which is untouched.
     """
 
-    __slots__ = ("_seg", "_extra")
+    __slots__ = ("_seg", "_extra", "_sx", "_sy", "_ex", "_ey")
 
     def __init__(self, seg, extra):
         self._seg = seg
         self._extra = extra
+        # The painter spans the band from the stated kerb along the segment
+        # normal, so widening only the width grows it entirely on the far
+        # side: the drawn band slides half the extra off the road it is
+        # meant to cover, and roadside objects on the stated side poke
+        # outside the kerb.  Shift the stated kerb back by half the extra so
+        # the widening grows both kerbs equally.
+        x1, y1 = seg.get_start_x(), seg.get_start_y()
+        x2, y2 = seg.get_end_x(), seg.get_end_y()
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length > 0:
+            nx = -(y2 - y1) / length * extra / 2.0
+            ny = (x2 - x1) / length * extra / 2.0
+        else:
+            nx = ny = 0.0
+        self._sx, self._sy = x1 - nx, y1 - ny
+        self._ex, self._ey = x2 - nx, y2 - ny
 
     def get_segment_width(self):
         return self._seg.get_segment_width() + self._extra
+
+    def get_start_x(self):
+        return self._sx
+
+    def get_start_y(self):
+        return self._sy
+
+    def get_end_x(self):
+        return self._ex
+
+    def get_end_y(self):
+        return self._ey
 
     def __getattr__(self, name):
         return getattr(self._seg, name)

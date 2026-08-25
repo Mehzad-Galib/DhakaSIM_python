@@ -107,6 +107,7 @@ import urllib.parse
 import urllib.request
 
 from dhakasim import basemap
+from dhakasim import network_files
 from dhakasim import road_geometry
 
 
@@ -523,56 +524,36 @@ def snap_to_roads(centre, index, cell, snap_limit, max_offset, cos_limit,
 # --------------------------------------------------------------------------
 
 def read_link_file(network: str):
-    """``link.txt`` as ``[(id, up, down, [(sx, sy, ex, ey, width), ...])]``."""
-    with open(basemap.network_path(network, "link.txt"),
-              "r", encoding="utf-8") as handle:
-        tokens = handle.read().split()
-    at = 0
-    count = int(tokens[at]); at += 1
-    links = []
-    for _ in range(count):
-        link_id, up, down, segments = (int(tokens[at + i]) for i in range(4))
-        at += 4
-        rows = []
-        for _ in range(segments):
-            values = tokens[at:at + 6]
-            at += 6
-            rows.append(tuple(float(v) for v in values[1:]))
-        links.append((link_id, up, down, rows))
-    return links
+    """``link.txt`` as ``[(id, up, down, [(sx, sy, ex, ey, width), ...])]``.
+
+    The grammar lives in :mod:`dhakasim.network_files`; the fit works on
+    bare tuples it rewrites freely, so this is the row view flattened.
+    """
+    rows = network_files.read_link_rows(
+        basemap.network_path(network, "link.txt"))
+    return [(r.link_id, r.up, r.down,
+             [(s.sx, s.sy, s.ex, s.ey, s.width) for s in r.segments])
+            for r in rows]
 
 
 def read_node_file(network: str):
     """``node.txt`` as ``[(id, x, y, [link id, ...])]``."""
-    with open(basemap.network_path(network, "node.txt"),
-              "r", encoding="utf-8") as handle:
-        lines = [line.split() for line in handle if line.split()]
-    count = int(lines[0][0])
-    nodes = []
-    for parts in lines[1:1 + count]:
-        nodes.append((int(parts[0]), float(parts[1]), float(parts[2]),
-                      [int(v) for v in parts[3:]]))
-    return nodes
+    return [(r.node_id, r.x, r.y, list(r.link_ids))
+            for r in network_files.read_node_rows(
+                basemap.network_path(network, "node.txt"))]
 
 
 def write_node_file(network: str, nodes) -> None:
-    path = basemap.network_path(network, "node.txt")
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(f"{len(nodes)}\n")
-        for node_id, x, y, link_ids in nodes:
-            arms = "".join(f" {i}" for i in link_ids)
-            handle.write(f"{node_id} {x:.0f} {y:.0f}{arms}\n")
+    network_files.write_node_rows(
+        basemap.network_path(network, "node.txt"), nodes)
 
 
 def write_link_file(network: str, links) -> None:
-    path = basemap.network_path(network, "link.txt")
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(f"{len(links)}\n")
-        for link_id, up, down, rows in links:
-            handle.write(f"{link_id} {up} {down} {len(rows)}\n")
-            for index, (sx, sy, ex, ey, width) in enumerate(rows):
-                handle.write(f"{index} {sx:.0f} {sy:.0f} {ex:.0f} {ey:.0f} "
-                             f"{width:.1f}\n")
+    # The shared writer also carries the zero-length defence this one never
+    # had: a fitted segment that rounds to nothing is collapsed rather than
+    # written for the simulator to choke on.
+    network_files.write_link_rows(
+        basemap.network_path(network, "link.txt"), links)
 
 
 def stated_line(rows):
@@ -601,6 +582,15 @@ def anchor_node_id(network, link_list, node_list):
     return None
 
 
+def _geometry_facts(network: str):
+    """``geometry.txt``'s statements, or nothing declared when unreadable."""
+    try:
+        return network_files.read_geometry(
+            basemap.network_path(network, "geometry.txt"))
+    except (OSError, ValueError):
+        return network_files.GeometryFacts()
+
+
 def read_medians(network: str):
     """Link ids that ``geometry.txt`` says carry a median.
 
@@ -608,21 +598,7 @@ def read_medians(network: str):
     dual carriageway -- two OSM ways with a gap between them -- which is what
     :func:`spanning_road_point` needs to know.
     """
-    try:
-        with open(basemap.network_path(network, "geometry.txt"),
-                  "r", encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
-    except OSError:
-        return set()
-    out = set()
-    for line in lines:
-        parts = line.split("#", 1)[0].split()
-        if len(parts) >= 2 and parts[0] == "median":
-            try:
-                out.add(int(parts[1]))
-            except ValueError:
-                pass
-    return out
+    return set(_geometry_facts(network).medians)
 
 
 def read_straight(network: str):
@@ -634,24 +610,10 @@ def read_straight(network: str):
     real street that pull is real but wrong.  Bijoy Sarani's western arm came
     out wandering twenty-nine metres off its own chord for that reason.
 
-    The simulator's own reader ignores directives it does not know, so this
-    costs nothing there.
+    The simulator's own reader collects but does not use the directive, so
+    this costs nothing there.
     """
-    try:
-        with open(basemap.network_path(network, "geometry.txt"),
-                  "r", encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
-    except OSError:
-        return set()
-    out = set()
-    for line in lines:
-        parts = line.split("#", 1)[0].split()
-        if len(parts) == 2 and parts[0].lower() == "straight":
-            try:
-                out.add(int(parts[1]))
-            except ValueError:
-                pass
-    return out
+    return _geometry_facts(network).straight
 
 
 def fit_circle(points):
@@ -742,6 +704,12 @@ def aim_arms_at_the_circle(arms, centre, anchor):
         feet.append((px + dx * along, py + dy * along))
         dirs.append((dx, dy))
 
+    # No anchor to protect (it is recorded in geometry.txt rather than
+    # derived from these ends): the feet stand exactly where the circle
+    # wants them, overshooting into the ring for the processor to cut back.
+    if anchor is None:
+        return feet
+
     # Slide along the arms by the least amount that lands the mean on the
     # anchor: minimise sum(t^2) subject to sum(t * direction) = residual.
     n = len(feet)
@@ -793,11 +761,20 @@ def _aim_at_circle(fitted, circle_id, circle, link_list, node_list, network):
     -- the anchor -- is easiest to state on its own.
     """
     cx, cy, radius, rms = circle
-    anchor = basemap.anchor_point(link_list, node_list,
-                                  basemap.read_roundabout(network))
-    if anchor is None:
-        return fitted
-    anchor = (anchor[0], anchor[1])
+    # A geometry.txt that records its anchor explicitly ("Centre ... at x,y")
+    # frees the arms entirely: the georeference no longer hangs off the mean
+    # of the stated ends, so there is nothing for the slide below to
+    # preserve, and every mouth can go exactly where the circle wants it.
+    # Without the recorded anchor the mean must stay put or the imagery
+    # slides with it.
+    if basemap.read_anchor(network) is not None:
+        anchor = None
+    else:
+        anchor = basemap.anchor_point(link_list, node_list,
+                                      basemap.read_roundabout(network))
+        if anchor is None:
+            return fitted
+        anchor = (anchor[0], anchor[1])
 
     arms, where = [], []
     for index, (link_id, up, down, rows) in enumerate(fitted):
@@ -832,9 +809,10 @@ def _aim_at_circle(fitted, circle_id, circle, link_list, node_list, network):
         fitted[index] = (link_id, up, down, rows)
         moved.append((link_id, distance(before, end)))
 
+    where_anchor = ("anchor recorded in geometry.txt" if anchor is None else
+                    f"{distance(anchor, (cx, cy)):.1f} m from the anchor")
     print(f"  node {circle_id}: OSM's roundabout loop fits r={radius:.1f} m "
-          f"(rms {rms:.2f} m); arms aimed at its centre, "
-          f"{distance(anchor, (cx, cy)):.1f} m from the anchor")
+          f"(rms {rms:.2f} m); arms aimed at its centre, {where_anchor}")
     print("    " + ", ".join(f"link {i} end moved {d:.0f} m"
                              for i, d in moved))
     return fitted
