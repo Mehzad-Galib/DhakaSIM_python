@@ -1,0 +1,31 @@
+# Khamarbari / Bangabandhu Square -- real geometry from OpenStreetMap.
+# The junction is a ROUNDABOUT: centre 23.758496,90.383775, one-way
+# circulation.  Island 14 m, circulatory carriageway 17 m, so the outer kerb
+# is at 31 m.
+#
+# Re-measured off the map's own rendering, which draws the island kerb as its
+# own feature.  Walking outwards from the circle centre on every bearing, that
+# kerb reads 12.2-15.5 m and a circle fitted to it comes back at 14.2 m; the
+# outer edge of the painted running surface reads about 31 m between the arms.
+# The circle those two agree on is NOT centred where the survey's arms say:
+# both the island kerb and OSM's junction=roundabout loop centre about six
+# metres away, and the loop -- 27.3 m, rms 0.06 m -- pins that centre far
+# better than a hand-drawn radius pins a size.  So the centre is taken from
+# the loop and the radii from the island kerb, which is why 27.3 appears
+# nowhere below.  It used to be recorded as the island, which made the circle
+# half again too big; then 12 m, measured off photography, which put our whole
+# ring inside the island the map draws.
+#
+# Dual carriageways (separate one-way carriageways in OSM) carry a median.
+# fit_roads.py reads these lines too: a link that stands for two carriageways
+# is aimed at the middle of the pair rather than at the nearer of them.
+median 2 2.0   # Manik Mia Avenue  (7 + 4 lanes)
+median 5 2.0   # Sangsad Avenue / Begum Rokeya Sharani (3 + 3 lanes)
+roundabout 6 14.0 17.0   # Khamar Bari Goal Chottor: island, ring
+
+# One-way arms, confirmed from the survey demand: Khamar Bari Rd only feeds
+# INTO the circle (out=0) and Indira Rd only takes traffic OUT (in=0), so each
+# uses its whole carriageway rather than reserving half for a direction that
+# carries no traffic.
+oneway 0   # Indira Road   (exit only)
+oneway 1   # Khamarbari Rd (entry only)
