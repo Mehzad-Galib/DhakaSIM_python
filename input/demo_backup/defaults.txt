@@ -1,0 +1,9 @@
+# Place-not-run settings (see defaults.txt handling in
+# utilities.apply_network_defaults).
+SignalChangeDuration 20     # s of green per approach -- VISSIM-style fixed timing. The Java
+                            # survey default of 1 s cycles the signal every step, which only
+                            # worked while queues packed the junction box; with KeepClearMode
+                            # holding traffic at real stop lines it discharges nobody.
+ShowLabels Off              # the owner-supplied map already carries every street
+                            # and place name; a second set of labels drawn over
+                            # it (link names, node ids) is clutter.

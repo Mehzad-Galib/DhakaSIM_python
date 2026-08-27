@@ -214,6 +214,14 @@ def _flatten(args):
 class RunRecorder:
     """Captures frames during a run and encodes them as SVG for the report."""
 
+    #: How far past the whole-network fit the report's 3D camera is pulled in,
+    #: and the widest junction-scale view it may stop at.  1.0 frames every
+    #: kerb; the pull-in trades the network's edges for vehicles big enough
+    #: that their modelled shapes read, and the metre cap keeps that true on
+    #: a network too large for any fraction of its fit to be close.
+    CLOSE_3D = 0.45
+    CLOSE_3D_METRES = 240.0
+
     def __init__(self, processor, ppm=2.5, max_frames=24, margin=30):
         self.ok = False
         self.frames = []
@@ -283,23 +291,34 @@ class RunRecorder:
             road.append((cx - outer, cy - outer))
             road.append((cx + outer, cy + outer))
         extent.extend(road)
-        # Street names sit on the carriageway itself, so they are kept apart
-        # from self.labels, which carries leader lines and a 3D counterpart
-        # that a road name has no use for.
+        # Street names sit just off the carriageway (the same probe the
+        # window uses), but they are kept apart from self.labels, which
+        # carries leader lines and a 3D counterpart that a road name has no
+        # use for.
         self.link_labels = []
-        for link in processor.link_list:
+        # ShowLabels Off empties both label lists, so every downstream track
+        # -- plan frame, 3D frame, extent -- goes unlabelled together.
+        link_list_for_labels = (processor.link_list
+                                if Parameters.SHOW_LABELS else [])
+        for link in link_list_for_labels:
             link_name = Parameters.LINK_NAMES.get(link.get_id(),
                                                   str(link.get_id()))
             count = link.get_number_of_segments()
             if count <= 0:
                 continue
-            seg = link.get_segment(count // 2)
-            mx = (seg.get_start_x() + seg.get_end_x()) / 2.0 * self.k
-            my = (seg.get_start_y() + seg.get_end_y()) / 2.0 * self.k
+            # Half the text's reach in metres: the report draws the name in
+            # output pixels at font 11 (~3.3 px per character each side), so
+            # convert back through the frame scale and the build scale.
+            out_px_per_m = max(self.scale * self.k, 1e-9)
+            px, py = road_geometry.link_label_offset(
+                link, self.geometry, self.k,
+                len(link_name) * 3.3 / out_px_per_m,
+                text_up_m=9.0 / out_px_per_m)
+            mx, my = px * self.k, py * self.k
             self.link_labels.append((link_name, mx, my))
             extent.append((mx, my))
 
-        for node in processor.node_list:
+        for node in (processor.node_list if Parameters.SHOW_LABELS else []):
             name = Parameters.NODE_NAMES.get(node.get_id(), str(node.get_id()))
             px, py = self._node_point(processor, node)
             dx, dy = self._label_direction(processor, node, px, py)
@@ -384,7 +403,7 @@ class RunRecorder:
                 f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}" '
                 f'font-family="Segoe UI,Arial,sans-serif" font-size="14" '
                 f'font-weight="bold" fill="#12263a">{_esc(name)}</text>')
-        # Street names, drawn on the road with the same halo treatment.
+        # Street names, drawn beside the road with the same halo treatment.
         for name, mx_r, my_r in getattr(self, "link_labels", []):
             mx, my = self._tx(mx_r), self._ty(my_r)
             bg.append(
@@ -551,6 +570,20 @@ class RunRecorder:
             for name, px, py, lx, ly, nx, ny, anchor in self.labels]
 
         self._fit_3d_camera(extent)
+        # Pulled in past the whole-network fit, aimed at the busiest junction.
+        # Framing every last kerb left each vehicle a few pixels tall, which
+        # defeats the one thing the 3D track adds over the plan view: seeing
+        # the modelled shapes.  The edges of a large network fall out of
+        # frame; the traffic does not, because the junction with the most
+        # arms is where it queues.
+        node = max(processor.node_list,
+                   key=lambda n: n.number_of_links(), default=None)
+        if node is not None and node.number_of_links() > 1:
+            x_m, y_m = self._node_point(processor, node)
+            scene.camera.target = [x_m * self.k, y_m * self.k]
+        scene.camera.distance = min(scene.camera.distance * self.CLOSE_3D,
+                                    self.CLOSE_3D_METRES * self.k)
+        scene.begin_frame(self.W3, self.H3, self.k)
 
         canvas = _SVGCanvas()
         scene.set_output(canvas)
@@ -673,6 +706,14 @@ class RunRecorder:
             vehicles = self.proc.get_vehicle_list()
         except Exception:
             vehicles = []
+        try:
+            # Signal state moves with the run, so the bars belong to the
+            # captured frame, under the vehicles, exactly as in the window.
+            road_geometry.signal_bars(g, self.proc.link_list,
+                                      self.proc.node_list,
+                                      Parameters.pixel_per_meter)
+        except Exception:
+            pass
         for v in vehicles:
             try:
                 # the simulator's own parameters: vehicles in junctions are
@@ -702,6 +743,12 @@ class RunRecorder:
         scene = self.scene
         scene.set_output(canvas)
         scene.begin_frame(self.W3, self.H3, self.k, keep_static=True)
+        try:
+            # Stop-line bars first, so the vehicles crossing them paint over.
+            road_geometry.signal_bars(scene, self.proc.link_list,
+                                      self.proc.node_list, self.k)
+        except Exception:
+            pass
         for v in vehicles:
             try:
                 # The type picks the 3D model, exactly as the GUI passes it.

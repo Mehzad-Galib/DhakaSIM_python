@@ -28,7 +28,9 @@ Kakrail Mor hazing into the distance](docs/images/view3d_kakrail_corridor.png)
   pedestrians, pedestrians walking along the road, and road-crossing flows.
 - Near-crash and accident modelling with a per-event log.
 - Traffic signals: fixed-time, biased-random, and two multi-objective
-  optimising controllers (Rahaman et al., IEEE Access 2025).
+  optimising controllers (Rahaman et al., IEEE Access 2025), with red/green
+  stop-line bars drawn per approach and a VISSIM-style keep-clear junction
+  discipline (`KeepClearMode`).
 - Time-of-day demand: networks with an hourly profile
   (`demand_by_hour.txt`) can be run at any hour or at the peak.
 
@@ -36,8 +38,8 @@ Kakrail Mor hazing into the distance](docs/images/view3d_kakrail_corridor.png)
 
 - Seven shipped networks: four surveyed Dhaka junctions (Banani 23,
   Banani 27, Bijoy Sarani, and the two-signal Kakrail corridor with its
-  roundabout) and three OSM-derived multi-intersection networks (Mohakhali,
-  Miami, Riyadh).
+  roundabout) and three OSM-derived multi-intersection networks (the
+  BUET-DU-DMC Area of Dhaka, Miami, Riyadh).
 - Real-geometry mode: medians, roundabouts, one-way links and turn lanes from
   each network's `geometry.txt`; `GeometryMode Off` is the Java-parity mode.
 - Build your own network from OpenStreetMap with `make_network.py`, fetch map
@@ -103,22 +105,31 @@ python run_dhakasim.py --headless --seed 4 --set StripWidth=2.5 --set CF_model=2
 ```
 
 In the GUI the option form lets you change the seed, end time, speed and road
-geometry before starting:
+geometry before starting. The **Side friction** row carries two switches:
+crossing pedestrians, and the parked cars, rickshaws and CNGs with standing
+pedestrians that block the kerbside (`ObjectMode`). Both follow the network's
+`defaults.txt` — Miami and Riyadh pin them off and drop the row entirely:
 
 ![The settings screen: junction, time of day, signal control, road model and
 display options](docs/images/start_screen.png)
 
-Once running: drag to pan, and zoom with the mouse
-wheel, the right-hand slider, or the **+** and **&minus;** buttons in the
-legend panel. **Reset** there returns the zoom to its starting level. The
-bottom slider shows progress.
+Once running the view opens on the whole network -- a surveyed junction lands
+around a 100 m scale bar, the BUET-DU-DMC demo on its full three kilometres.
+Drag to pan, and zoom with the mouse wheel or the **Zoom slider** in the
+legend panel (logarithmic, so every framing from whole-network to kerb-level
+gets its share of the slider's travel). **Reset** returns to the opening
+whole-network view. The bottom slider shows progress. While the background
+map is shown, zooming snaps to the scales the imagery can be drawn at
+exactly and stops at its sharpest step, so the picture never magnifies into
+blocks; the slider's handle settles on what the view actually did.
 
 ![The 2D plan view: the Kakrail corridor drawn over the OpenStreetMap
 rendering, with the live legend on the right](docs/images/plan_kakrail_corridor.png)
 
 The legend also names the place being simulated, taken from the network's
-`place.txt`, and street names are drawn along the roads for networks that
-ship a `link_names.txt`.
+`place.txt`, and street names are drawn beside the roads for networks that
+ship a `link_names.txt` — just off the kerb rather than on the carriageway,
+so a name (or a bare link number) is never buried under the traffic.
 
 Changing the **Intersection** moves the speed limit with it, because a
 limit is a property of the roads rather than of the run. Miami and Riyadh state
@@ -147,7 +158,7 @@ parked cars and the other roadside objects are modelled too.
 | --- | --- |
 | orbit | drag |
 | pan | right-drag, or Shift+drag |
-| zoom | mouse wheel, or the right-hand slider |
+| zoom | mouse wheel, or the legend's Zoom slider |
 | reset the camera | double-click |
 | switch views | the toolbar button, or the `V` key |
 
@@ -330,10 +341,14 @@ report legend, so a rickshaw is the same orange everywhere. Cars, buses and
 trucks each span a few shades of one hue.
 
 Side friction is separate. Parked cars, parked rickshaws, parked CNGs and
-standing pedestrians are obstructions rather than traffic, and they carry a
-yellow family no moving vehicle uses, varying by lightness within it. They never
-appear in the per-type counts, because they do not travel, so both the GUI
-legend and the report give them a key of their own.
+standing pedestrians are obstructions rather than traffic. Each carries its own
+pale hue — vivid yellow, sky blue, lavender and pale green — washed out beside
+the saturated moving palette so an obstruction is never read as traffic, and no
+two of them can be confused with each other (they used to share one yellow
+family and could not be told apart). They never appear in the per-type counts,
+because they do not travel, so both the GUI legend and the report give them a
+key of their own — a collapsible section in the window, and only when the run
+actually generated the objects.
 
 The road itself is white. On a blank canvas that is a hair off pure white --
 the background is white too, and at report scale the kerb is a sub-pixel line,
@@ -373,7 +388,7 @@ input/kakrail_corridor/      Kakrail Church + Kakrail Mosque (2 junctions)
 input/bijoy_sarani/          Bijoy Sarani
 input/banani_23/             Banani 23 Super Market
 input/banani_27/             Banani 27 Kacha Bazar
-input/demo_backup/           the original demonstration network
+input/demo_backup/           BUET-DU-DMC Area (multi-intersection demo)
 ```
 
 Pick one under **Junction** on the GUI's start screen, or set
@@ -412,7 +427,7 @@ enormously across the day — the Kakrail corridor carries about 1,500 veh/h at
 | `demand_all.txt` | the unthinned demand `run_sim.py` produced before `DemandType` filtering |
 | `demand-low/medium/high.txt` | alternative demand levels; copy one over `demand.txt` to use it |
 | `node_names.txt` | optional `id name` per line; friendly node labels for the GUI and report |
-| `link_names.txt` | optional `id name` per line; street names drawn on the roads. Links without a name are labelled with their id, which is what the per-link CSV columns are indexed by |
+| `link_names.txt` | optional `id name` per line; street names drawn beside the roads. Links without a name are labelled with their id, which is what the per-link CSV columns are indexed by |
 | `place.txt` | optional single line naming the place, shown in the GUI legend and the report heading. Falls back to the folder name |
 | `defaults.txt` | optional `Name Value` per line; settings that belong to the place rather than the run. Beats `parameter.txt`, loses to `--set` |
 | `vehicle_mix.txt` | optional `typeIndex percentage` per line; the survey-measured vehicle mix for that intersection |
@@ -557,6 +572,42 @@ turn on green for `SignalChangeDuration` seconds, round and round, whatever the
 traffic is doing. That is what most of the few working signals in Dhaka do, and
 it is the behaviour the Java original had.
 
+Every signalised approach is drawn with a **stop-line signal bar** across its
+half of the carriageway — red or green with the approach's phase, the way
+VISSIM draws a signal head in its 2D view — in the window, both view modes,
+and the report's animations. Roundabouts get none: they have no phases, only
+the give-way rule.
+
+The junction itself runs a VISSIM-style discipline (`KeepClearMode`, on by
+default). A red light holds traffic at a stop line a car length behind the
+visible edge of the junction box — the setback is read off the very outline
+the junction patch is painted from, corner flares included, plus a 6 m
+clearance, and a box deeper than the arm's short mouth segment walks its
+line (and its signal bar) back into the earlier segments rather than
+letting it stand inside the paint — rather than at the point where the
+surveyed arms geometrically converge, so queues form on the approaches
+instead of on top of the drawn junction. A vehicle the phase change catches already past the stop line
+**clears the box** (a red-runner, exactly as a driver caught by the amber
+does) instead of parking in the mouth for the whole red. And a vehicle on
+green enters the box only when it would not have to *stop* inside it: its
+exit must have room for it and for everyone already inside bound for the
+same strips, and no standing queue may reach back into the exit's stretch of
+the box. Two-arm nodes and roundabouts are exempt (measured: the rule there
+only cost throughput).
+
+The fixed controller's timing is set on the start screen — **s green per
+approach**, under Signal control — the way a VISSIM signal program states
+its greens; an approach's red is the other approaches' greens. Choosing a
+junction loads its `defaults.txt` timing, and an edit after that beats it.
+
+Real stop lines need real greens, so every Dhaka network's `defaults.txt`
+now sets `SignalChangeDuration 20` (Miami and Riyadh already had 30). The
+Java survey default of 1 s cycles the signal every simulation step, which
+only moved traffic while queues packed the box. The discipline has a
+measured price — see *Behaviour worth knowing about* — and
+`KeepClearMode Off` plus `--set SignalChangeDuration=1` restores the
+original behaviour byte-for-byte.
+
 `SignalMode` swaps that for one of three alternatives, implementing
 
 > M. Rahaman, A. M. S. Rumi, M. S. Islam, T. R. Toha, M. M. Mushfiq, M. S.
@@ -665,10 +716,19 @@ be added to every allocated green in a real deployment.
 ## Output files
 
 Each run writes a self-contained HTML report to `statistics/`, named
-`report_<YYYYMMDD_HHMMSS>.html`, summarising the run with two animations of the
-run -- the same captured frames in plan view and through the 3D camera -- metric
-cards, a configuration table, a per-type results table, colour-coded bar charts,
-a vehicle-colour legend and a glossary. It is one file with everything inlined,
+`report_<YYYYMMDD_HHMMSS>.html`. It opens on a **network dashboard**: KPI
+tiles (throughput, completion, speeds, time stopped, flow, trip time, fuel)
+over a grid of charts -- per-minute network flow, time stopped and trip time
+by type, the busiest links by sensor flow with their speeds, and a
+speed-against-waiting scatter -- every series of which is also written to
+`statistics/csv/` for ML pipelines. Then the full run-settings table
+(network, seed, models, signal control, geometry and junction discipline), a
+per-type results table, a donut chart of the traffic composition beside a
+vertical bar chart of speeds (hover any slice or bar for exact values), the
+colour legends and a glossary. The two run animations -- the same captured
+frames in plan view and through the 3D camera, the 3D one framed on the
+busiest junction so the vehicle models read as shapes -- close the report.
+It is one file with everything inlined,
 so it can be mailed or archived and still opens anywhere:
 
 ![The top of a run report: metric cards, then the animated plan view over the
@@ -737,7 +797,7 @@ touch:
 | `MaximumSpeed` | network speed limit in **km/h** (shipped: 100) |
 | `DemandType` | 0 low, 1 medium, 2 high — used by `run_sim.py` |
 | `LowRate`, `MediumRate`, `HighRate` | vehicles/hour for each `DemandType` |
-| `ObjectMode` | `On` generates parked cars/rickshaws/CNGs and standing pedestrians |
+| `ObjectMode` | `On` generates parked cars/rickshaws/CNGs and standing pedestrians. On the start screen as the **Side friction — parked** switch |
 | `AcrossPedestrianMode` | `On` generates road-crossing pedestrians |
 | `AlongPedestrianMode` | `On` generates pedestrians walking along the road |
 | `AcrossPedestrianPerHour`, `AlongPedestrianPerHour` | pedestrian arrival rates |
@@ -747,6 +807,8 @@ touch:
 | `Network` | which `input/` sub-folder to simulate (e.g. `bijoy_sarani`); the GUI's Junction picker and `--network` override it |
 | `TimeOfDay` | hour of the surveyed day to simulate, `0`-`23`; `-1` uses the busiest hour. The GUI's Time of day strip and `--hour` override it |
 | `GeometryMode` | `On` (default) applies the network's `geometry.txt`: physical medians, one-way arms and roundabouts. `Off` keeps byte-identical parity with the Java reference |
+| `KeepClearMode` | `On` (default) runs the VISSIM-style junction discipline: red lights hold traffic at a stop line at the edge of the junction box, and a vehicle enters the box only when its exit has room for it and for everyone already inside bound for the same strips. `Off` is the Java-parity behaviour, where queues form on the junction itself |
+| `ShowLabels` | `On` (default) draws street names beside the links and node names (or bare ids) beside the junctions, in the plan view, the 3D view and the report. The BUET-DU-DMC demo sets `Off` in its `defaults.txt`: its imagery already carries every street name, and a second set of labels drawn over it is clutter. Drawing only — the simulation never reads it |
 | `Seed` | pins the RNG to this value, unlike `RandomSeed` (below), which discards it. `--seed` sets the same thing |
 | `NetworkRoadLength` | km of road used to size the roadside-object population. `auto` (the default) measures it from the loaded network; a number pins it, and `1.01` reproduces the Java original |
 | `StatsDir` | where this run writes its CSVs and report (default `statistics`). Give each run of a batch its own, since every CSV is appended to |
@@ -788,8 +850,24 @@ otherwise.
   most of what the traffic negotiates. `--seed` now routes them through the
   seeded generator (`parameters.scratch_random`); without it they behave as
   before. Only the distributions were ever reproducible here, never the stream.
+- **Junctions run a VISSIM-style discipline by default.** `KeepClearMode On`
+  holds red-light queues at a stop line at the drawn edge of the junction
+  box and lets a vehicle enter only when it would not have to stop inside it
+  (see *Traffic signal scheduling*), and the Dhaka networks' `defaults.txt`
+  pins 20 s greens in place of the Java survey's 1 s. Together they change
+  every statistic at a signalised junction: the box stays clear of standing
+  traffic, and throughput drops — banani completes ~27% fewer trips than the
+  box-packing behaviour at matched 20 s greens (measured after the stop
+  lines moved a car length behind the drawn box edge; the big Dhaka boxes
+  put the line 20–35 m up the approach) — because green time is genuinely
+  spent covering the box approach instead of being banked as vehicles packed
+  inside it. Notably, the old 1 s box-packing chaos
+  out-throughputs disciplined signals on every network: a real property of
+  oversaturated junctions, and worth knowing before comparing runs.
+  `KeepClearMode Off --set SignalChangeDuration=1` restores the original
+  behaviour byte-for-byte.
 - **Every demand row gets `+30` vehicles/hour.** Negligible on an 8-row
-  junction, but `demo_backup` has 110 OD pairs, so it adds 3,300 veh/h.
+  junction, but `demo_backup` has 446 OD pairs, so it adds 13,380 veh/h.
   `DemandOffset 0` removes it.
 - **`DLC_model 1` used to crash with `ObjectMode On`.** The GHR branch of
   `is_object_in_proximity` evaluated the GHR acceleration against the cached
@@ -804,7 +882,7 @@ otherwise.
   a density — 19.77 parked cars, 15.61 rickshaws, 15.61 standing pedestrians and
   4.67 CNGs per kilometre — but they were baked against a fixed 1.01 km, and
   they are compared against one network-wide counter. So every network got the
-  same absolute number of objects: on the 3.83 km `demo_backup` that spread
+  same absolute number of objects: on the old synthetic 3.83 km demo that spread
   roughly a kilometre's worth of side friction over four. The length is now
   measured from the loaded network, so all six are correctly provisioned;
   `NetworkRoadLength 1.01` restores the old fixed value.
@@ -978,10 +1056,14 @@ two networks with a roundabout and on no others. It now re-reads the survey
 files for the anchor, and a test moves a network under it to check that the
 imagery stays put.
 
-One network cannot be placed and gets no basemap: `demo_backup` is the synthetic
-network from the paper and is nowhere in particular. Pass `--centre lat,lon` to
-supply a coordinate by hand for anything else, naming the junction the network
-was drawn around.
+All seven shipped networks record a centre and carry imagery; `demo_backup`
+(BUET-DU-DMC Area) carries an owner-supplied Google Maps hybrid screenshot
+rather than fetched tiles — georeferenced by registering the network's own
+centrelines against the image's yellow-road mask — because the network exists
+to be read against that exact picture. Its street names come from the imagery,
+so the network sets `ShowLabels Off`. Pass `--centre lat,lon` to supply a
+coordinate by hand for a network whose `geometry.txt` records none, naming the
+junction the network was drawn around.
 
 **Banani 23's centre was 44 m out**, which drew every arm across the rooftops
 and put the junction 34 m from the nearest road. The junction is the one
@@ -1253,20 +1335,20 @@ mean, in **vehicles per hour per OD pair**. The harness's defaults are
 100 / 400 / 800, which are *not* the rates `run_sim.py` builds a network's
 `demand.txt` from. Those come from `DemandType` and divide a total across the
 boundary nodes — `LOW_RATE // acceptable_node` and so on — which for
-`demo_backup` (11 boundary nodes, 110 OD pairs) works out to:
+`demo_backup` (BUET-DU-DMC Area: 38 boundary nodes, 446 OD pairs) works out to:
 
-| DemandType | total | per OD pair |
-| --- | --- | --- |
-| 0 low | 200 | 66 |
-| 1 medium | 700 | 100 |
-| 2 high | 1200 | 120 |
+| DemandType | per OD pair |
+| --- | --- |
+| 0 low | 16 |
+| 1 medium | 24 |
+| 2 high | 27 |
 
-The shipped `input/demo_backup/demand.txt` is a uniform 100, i.e. the medium
-one. So the harness's default "low" already equals the simulator's *medium*,
-and its medium and high sit three to seven times beyond the simulator's *high*.
-That is a legitimate stress test, but it is a different demand range from the
-one the shipped networks are built around — pass `--rates 66 100 120` to sweep
-the range the simulator itself uses.
+The shipped `input/demo_backup/demand.txt` is a uniform 27, i.e. the high one.
+So the harness's default "low" already sits nearly four times beyond the
+simulator's *high*, and its medium and high are further out still. That is a
+legitimate stress test, but it is a different demand range from the one the
+shipped networks are built around — pass `--rates 16 24 27` to sweep the range
+the simulator itself uses.
 
 **A change of `--rates` needs a fresh `--out`.** A run's identity is its label,
 not its rate, so a `done` marker written at one rate will be silently reused for
@@ -1350,7 +1432,8 @@ are pulled: while the camera is still, the sky, ground, roads and street
 names stay on the canvas and only the vehicles are deleted and redrawn; a
 vehicle too small to resolve is drawn as one block and, smaller still, as a
 single dot rather than a modelled body; and sub-pixel details (wheels,
-mostly) are skipped at mid distance. Measured on the Mohakhali network at
+mostly) are skipped at mid distance. Measured on the Mohakhali network (the
+demo network before the BUET-DU-DMC Area took over) at
 1920x991 with 191 vehicles and ~500 side-friction props: a solid-style frame
 was 99 ms before, a full repaint is now 56–58 ms, and the steady-state frame
 while watching a run is 38–43 ms at every zoom. A GPU cannot help: a Tk
@@ -1450,11 +1533,16 @@ including the per-step accident log, the route/demand generator output, and the
 drawing geometry written to `trace.txt`. Unseeded, repeated runs agree within
 statistical noise.
 
-Two later changes deviate from that reference on purpose, both listed under
-**Behaviour worth knowing about** above and both revertible with a setting:
+Three later changes deviate from that reference on purpose, all listed under
+**Behaviour worth knowing about** above and all revertible with a setting:
 roadside-object density now scales with network size (`NetworkRoadLength 1.01`
-pins it back), and `CF_model 13` is new here with no Java counterpart. Set those
-two and parity is unchanged.
+pins it back), `CF_model 13` is new here with no Java counterpart, and
+`KeepClearMode` (on by default) runs the VISSIM-style junction discipline
+with 20 s greens on the Dhaka networks (`KeepClearMode Off` plus
+`--set SignalChangeDuration=1` restores the original queuing and timing).
+Set those and parity is unchanged — verified byte-identical against the
+pre-change baselines before `run_hashes.txt` was re-recorded for the new
+defaults.
 
 ## Further reading
 

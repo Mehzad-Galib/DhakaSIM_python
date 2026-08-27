@@ -20,7 +20,9 @@ class Segment:
                  "_sensor_vehicle_avg_speed", "_accident_count", "_total_waiting_time",
                  "_forward_vehicle_count", "_reverse_vehicle_count",
                  "middle_low_strip_index", "middle_high_strip_index",
-                 "last_vehicle_strip_index", "_strip_list")
+                 "last_vehicle_strip_index", "_strip_list",
+                 "stop_setback_at_end", "stop_setback_at_start",
+                 "stop_total_at_end", "stop_total_at_start")
 
     def __init__(self, link_index, index, id_, start_x, start_y, end_x, end_y,
                  segment_width, last_segment, first_segment, parent_link_id):
@@ -52,6 +54,22 @@ class Segment:
         self.middle_low_strip_index = 0
         self.middle_high_strip_index = 0  # first strip of the 2nd side of the road
         self.last_vehicle_strip_index = 0
+        # VISSIM-style stop line, in metres back from each end of this
+        # segment.  Zero everywhere except the mouth segments of a signalised
+        # junction, where the processor sets it to the crossing arm's
+        # half-width (see Processor._set_stop_lines) so a red light holds
+        # traffic at the edge of the junction box rather than at the point
+        # where the arms geometrically converge.  Consulted only under
+        # KeepClearMode, so the Java-parity path never sees it.
+        self.stop_setback_at_end = 0.0
+        self.stop_setback_at_start = 0.0
+        # The full reach of the junction box from that chain end, uncapped by
+        # this segment's own length.  A box deeper than a short mouth segment
+        # walks its stop line back into earlier segments (the per-segment
+        # setbacks above carry the distribution); the keep-clear box test
+        # wants the whole reach, so it is kept separately here on the mouth.
+        self.stop_total_at_end = 0.0
+        self.stop_total_at_start = 0.0
         self._strip_count = 0
         self._initialize()
 
@@ -307,10 +325,19 @@ class Segment:
             (self._sensor_vehicle_avg_speed * (self._sensor_vehicle_count - 1) + speed)
             / self._sensor_vehicle_count)
 
-    def get_strip_index_in_entering_segment(self, vehicle, intended_entering_strip_index
-                                           ) -> int:
+    def get_strip_index_in_entering_segment(self, vehicle, intended_entering_strip_index,
+                                            required_length=None) -> int:
         """:return: the strip index where the vehicle can be added; -1 if
-        there is no strip available"""
+        there is no strip available.
+
+        ``required_length`` asks for a longer clear stretch than the vehicle
+        itself -- KeepClearMode reserves room for the vehicles already inside
+        the junction bound for the same exit.  Left as None (the default,
+        and the only value the Java-parity path ever passes) the test is the
+        vehicle's own length, exactly as it always was.
+        """
+        length = (vehicle.get_length() if required_length is None
+                  else required_length)
         reverse = intended_entering_strip_index >= self.middle_high_strip_index
 
         if not reverse:  # straight
@@ -324,7 +351,7 @@ class Segment:
             flag = True
             for j in range(vehicle.get_number_of_strips()):
                 if not self.get_strip(i + j).has_gap_for_adding_vehicle(
-                        vehicle.get_length()):
+                        length):
                     flag = False
                     break
             if flag:

@@ -506,6 +506,10 @@ def apply_network_defaults(network: str) -> dict:
 
 def initialize() -> None:
     """Read ``input/parameter.txt`` into :class:`Parameters`."""
+    # Settings a network's defaults.txt may pin but parameter.txt does not
+    # carry go back to their built-in value here, or a previous network's
+    # override would survive a re-initialisation.
+    Parameters.SHOW_LABELS = True
     try:
         with open("input/parameter.txt", "r") as bufferedReader:
             for data_line in bufferedReader:
@@ -524,6 +528,7 @@ def initialize() -> None:
         Parameters.BASE_ALONG_PEDESTRIAN_MODE = Parameters.along_pedestrian_mode
         Parameters.BASE_OBJECT_MODE = Parameters.OBJECT_MODE
         Parameters.BASE_SIGNAL_CHANGE_DURATION = Parameters.SIGNAL_CHANGE_DURATION
+        Parameters.BASE_SHOW_LABELS = Parameters.SHOW_LABELS
 
         # Not in finalise_settings(): this transform feeds on its own output,
         # so running it twice would give a different answer.
@@ -585,6 +590,10 @@ def apply_setting(name: str, value: str) -> bool:
         Parameters.OBJECT_MODE = value.lower() == "on"
     elif name == "TraceMode":
         Parameters.TRACE_MODE = value.lower() == "on"
+    elif name == "KeepClearMode":
+        Parameters.KEEP_CLEAR_MODE = value.lower() == "on"
+    elif name == "ShowLabels":
+        Parameters.SHOW_LABELS = value.lower() == "on"
     elif name == "RandomSeed":
         # the value in the file is deliberately ignored -- see `Seed` below
         Parameters.seed = JavaRandom().next_int_bound(101)

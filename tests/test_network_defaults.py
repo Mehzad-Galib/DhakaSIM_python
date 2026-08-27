@@ -55,6 +55,21 @@ def test_dhaka_networks_keep_the_base_limit():
         assert kmh() == 60.0, f"{network}: {kmh()}"
 
 
+def test_the_demo_turns_its_labels_off_and_nothing_else_does():
+    # The BUET-DU-DMC demo's imagery already carries every street name, so its
+    # defaults.txt suppresses the drawn labels; a re-initialisation or another
+    # network must get them back.
+    fresh()
+    assert Parameters.SHOW_LABELS is True
+    applied = Utilities.apply_network_defaults("demo_backup")
+    assert applied.get("ShowLabels"), "demo_backup no longer pins ShowLabels"
+    assert Parameters.SHOW_LABELS is False
+    fresh()
+    assert Parameters.SHOW_LABELS is True, "initialize() must reset ShowLabels"
+    Utilities.apply_network_defaults("kakrail_corridor")
+    assert Parameters.SHOW_LABELS is True
+
+
 def test_base_limit_survives_a_network_override():
     """What the GUI falls back to when the dropdown leaves Miami."""
     fresh()

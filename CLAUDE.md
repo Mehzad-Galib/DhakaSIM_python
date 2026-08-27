@@ -187,6 +187,16 @@ Lane dividers are paint, not model. The simulator has no lanes; they are drawn
 at `LANE_WIDTH_METRES` spacing because 0.5 m strip boundaries would be
 hatching. Do not let anything in `vehicle.py` consult them.
 
+**The drawn bends are smoothed, the model's are not.** `_smooth_segs` rounds a
+link's interior corners (capped corner-cutting, `SMOOTH_CUT_METRES`, two
+passes) before the ribbon is offset and before the lane dashes are laid — both
+must go through it or the dashes kink across the very bends the kerbs now
+round. Endpoints never move, so junction mouths, stop lines and signal bars
+stay exactly where the model puts them, and `segment_quads` stays unsmoothed
+because the hull probing and stop-line rays reason against the model's own
+segments. The cap is what keeps a vehicle on its straight segment from visibly
+leaving the relaxed ribbon; verified drawing-only by a clean `hash_run.py`.
+
 Two functions in this module take a segment's kerb corners, and **both** must
 test segment length before calling `Utilities.return_x3`, which divides by zero
 on a zero-length segment: `_arm_at_node` and `lane_markings`. Both were caught
@@ -474,7 +484,23 @@ report draws it at first.
 
 `ReportAnimationFrames` is the main control over report size — every frame is
 stored in full, so a 23-frame run is roughly 3.5 MB. Set it to `0` to disable
-both animations.
+both animations. The 3D track is deliberately framed closer than the network
+fit (`RunRecorder.CLOSE_3D`), trading the network's edges for vehicle models
+big enough to read.
+
+**`Statistics.flow` is not the flow.** The Java original's counter watches one
+hardcoded sensor — link 0, 950 m in, reverse direction — which only the
+retired synthetic network had, so on every shipped network `flow.csv` is
+zeros and must stay that way (it is hashed). The report's dashboard reads
+`Statistics.flow_series`, a report-only counter fed by every segment sensor
+(the `update_information` call site in `_move_vehicle_at_segment_middle`),
+rolled per minute alongside the parity one. Do not "fix" flow.csv from it.
+
+The report's dashboard charts (donut, vertical bars, line, scatter) are
+hand-built SVG in `report.py` with `<title>` children as the dependency-free
+hover tooltips; the whole page is centred, and the per-link series reach the
+report through the `series=` argument of `write_html_report`, filled in
+`Processor._generate_statistics` where the link arrays already exist.
 
 ## Where a fitted link's endpoints go
 
@@ -645,6 +671,115 @@ The island is painted opaque in both modes. It is the one place the imagery is
 deliberately covered, and the justification is that it is the one part of the
 picture nobody can drive on.
 
+## Junction discipline and signal bars
+
+`KeepClearMode` (default On, Off = byte-identical Java parity, pinned by
+running `hash_run.py` with it Off before its baseline was re-recorded) is the
+VISSIM-style junction behaviour, in three pieces:
+
+- **Stop lines.** `Processor._set_stop_lines` stores a per-end setback on
+  each mouth segment of every ≥3-arm non-roundabout node, read off **the
+  drawn junction patch itself**: `road_geometry.stop_line_setbacks` casts
+  rays from the mouth corners along each arm through the very outline
+  `junction_hulls` paints (`junction_outline` is the shared piece), fillets
+  included, plus `STOP_LINE_CLEARANCE_METRES` (6 m — one metre put the first
+  vehicle's nose on the paint and the owner read it as queuing inside the
+  box). A circle of crossing half-widths was tried first
+  and landed every queue *inside* the patch — the patch reaches a full
+  arm-width past the mouths before the fillets even start; on the big Dhaka
+  junctions the line lands 20–35 m up the arm. **A box deeper than a short
+  mouth segment walks its stop line back into earlier segments**: the
+  distribution lives in `_set_stop_lines` (a segment wholly inside the box
+  carries its full length as its setback, the first with room to spare
+  carries the line; clamped to 0.85 of the *link* so it stays enterable),
+  the phantom appears wherever the line is via
+  `Vehicle._segment_carries_a_stop_line` (red only — mid-link green traffic
+  must not brake for a rolling phantom it would never meet), `signal_bars`
+  walks inward to draw the bar on the carrier segment, and the keep-clear
+  box test reads the *whole* reach from `Segment.stop_total_at_*`. Banani
+  23's east leg is the reason: a 15.6 m mouth against a 21 m box put the
+  bar and the line in the middle of the drawn junction, and no cap inside
+  the mouth segment could fix that.
+  `Vehicle._create_dummy_vehicle_at_link_end` moves the red light's phantom
+  leader back to that line, so queues brake to it instead of to the point
+  where the surveyed arms converge — that convergence, not box occupancy,
+  was most of the "clogged junction" look. A vehicle the phase change
+  caught *past* the line is a **red-runner**: its phantom rolls (the green
+  behaviour) and the second arm of the bundle-active test in
+  `_move_vehicle_at_segment_end` lets it cross on red and clear the box,
+  still subject to the keep-clear test — parking it in the mouth (the first
+  design) read as a queue standing on the junction, and a phantom at the
+  line behind a caught vehicle is a negative gap that freezes the approach.
+  The red-runner arm is guarded on the leaving segment carrying a real
+  setback, or an approach whose rays found no outline would run its red
+  freely.
+- **Keep-clear entry.** `Processor._exit_has_room`: the exit must offer clear
+  road for this vehicle plus everyone already inside bound for overlapping
+  strips, capped at the exit segment's own length, via
+  `get_strip_index_in_entering_segment` with a `required_length` override —
+  the *lateral search* is load-bearing: testing only the intended strips
+  halved banani's completed trips. On top of that, the box-exit test asks
+  VISSIM's question — would this vehicle have to *stop* inside the box? —
+  by looking for a **standing** (< 0.5 m/s) vehicle within the exit's own
+  stop-line setback plus clearance. It must not count moving vehicles:
+  reserving that stretch as empty road throttled a green to one vehicle per
+  box-crossing. Roundabouts and two-arm nodes are exempt, both measured,
+  not argued (holding against ring space backs the corridor up; a chain
+  joint has no cross traffic to keep the box clear for).
+- **Signal timing.** The Dhaka networks' `defaults.txt` now pins
+  `SignalChangeDuration 20` (miami/riyadh already had 30). The Java survey
+  default of 1 s cycles the signal every step, which only moved traffic
+  while queues packed the box; against real stop lines it discharges
+  nobody. The measured price of the whole discipline at matched 20 s
+  greens: banani −20% completed trips, saturated kakrail −40% — and 1 s
+  box-packing chaos out-throughputs disciplined signals everywhere, which
+  is a finding about oversaturated junctions, not a bug. Moving the stop
+  lines a car length behind the drawn box (owner request, 27 Aug) deepened
+  the price again — banani 111 → 81 completions in the 400-step harness —
+  because the big Dhaka boxes put the line 20–35 m up the approach and
+  every green pays the travel-up time. The green is also settable per run
+  from the start screen ("s green per approach", under Signal control),
+  following the network's defaults.txt on a junction change exactly as the
+  speed limit does. Full Java parity
+  needs `KeepClearMode Off` *and* `--set SignalChangeDuration=1` on the
+  Dhaka networks; that combination was verified byte-identical against the
+  pre-change baselines before `run_hashes.txt` was re-recorded.
+- **Signal bars.** `road_geometry.signal_bars` draws one cased red/green bar
+  per approach across the *approaching half* of the carriageway, at the stop
+  line. It is dynamic content — signal state moves every few steps — so the
+  GUI calls it after `begin_dynamic` and both report captures call it per
+  frame; putting it in the cached road layer freezes the lights. The
+  near-black casing is what stops a red bar reading as a car and a green one
+  as a CNG. One-way links get no bar at their entry end; roundabouts and
+  light `network_files` nodes (no bundles → `Node.is_signalised()` False)
+  get none at all. `tests/test_signals.py` pins all of this.
+
+## Node labels and the text halo
+
+`draw_node_id` places a junction's name by probing candidate directions (the
+midpoints of the angular gaps between the arms, widest first) against **the
+drawn road itself** — the cached geometry's segment quads and junction
+patches, via `_point_clear_of_roads`, testing the label point and the reach
+of the text to either side. Probing idealised arm *rays* was tried first and
+failed: a fitted arm bends right after its mouth, so a ray from the mouth's
+bearing says nothing about where the road actually goes, and Banani 27's
+name landed straight on its west approach. The answer depends only on the
+network, so it is cached (`_label_dirs`, cleared when the geometry
+rebuilds). Text halos are eight white copies (`_HALO_OFFSETS`, diagonals
+included) — four offsets left pinholes at the corners over imagery.
+
+Link names (usually the bare numeric ids) come off the carriageway the same
+way: `road_geometry.link_label_offset` walks outwards perpendicular to the
+link's middle segment, **both sides**, and takes the first spot where the
+text — its horizontal reach *and* the row one text height up, since the
+anchor is the baseline — lands on no quad and no hull. Both sides, because
+`link.txt` states a kerb edge: one side clears in a step, the other must
+cross the whole carriageway, and over imagery the widened geometry moves
+both. The window (`_link_label_pts`, cleared with `_label_dirs`) and the
+report (`visualize.py`'s `link_labels`) share the function, so the two
+pictures agree. Fallback when nothing within reach is clear is the old
+on-road midpoint.
+
 ## Traffic signal scheduling
 
 `dhakasim/signal_schedule.py` implements Rahaman et al., IEEE Access 2025.
@@ -739,7 +874,8 @@ sitting in the buffer while a junction patch is filled comes back out on top
 of it.
 
 **Measured again 26 Aug 2026**, after the static layer, the speck tier and
-the part cull went in (see Scene3D above). One frame of demo_backup at
+the part cull went in (see Scene3D above). One frame of demo_backup (then the
+Mohakhali network, before Shahbag replaced it) at
 1920x991, 191 vehicles plus ~500 side-friction props, `paint_component` +
 `update_idletasks`, median of 24: solid was 99 ms at 2371 items; a full frame
 is now 56-58 ms at ~960 items and a reused-static frame — the steady state
@@ -859,6 +995,17 @@ change means editing `_UI` and the `:root` block in `report.py` together.
 The one place the light look survives is inside the animation frames: the
 plan/3D pictures are daylight scenes and stay so, framed by the dark cards.
 
+**The legend's collapsible sections re-pack with `after=`.** Vehicles on
+network, Side friction and Run settings each carry a minimise button; a
+section expanded again is `pack`ed with `after=its own header`, because a
+plain re-pack appends it below every section built later — collapse
+Vehicles, expand it, and it came back underneath Run settings. The Side
+friction section (its own header since 28 Aug, one hue per type — vivid
+yellow / sky blue / lavender / pale green, the old single yellow family was
+indistinguishable) is built only when `Parameters.OBJECT_MODE` is on, and
+the report drops its side-friction key under the same test: a key for
+objects the run never generated is a lie on Miami and Riyadh.
+
 **Start is in a footer outside the scroller.** An earlier version put it at the
 top of the form for the same reason — the settings were taller than a short
 window, so a button below them was a button nobody could see. Captions moved
@@ -902,10 +1049,25 @@ its title bar and its taskbar, and the DPI setting, the taskbar's edge and
 its auto-hiding all move that number. The check is
 `tray.winfo_reqheight()` against `canvas.winfo_height()`.
 
-Measured at 96 DPI, the rungs are 793 / 707 / 640 / 444 pixels of settings
-against viewports of 819 (1080p), 644 (1536x864), 535 (720p). So a 1080p
+Measured at 96 DPI, the rungs are 812 / 751 / 681 / 421 pixels of settings
+against viewports of 816 (1080p), 644 (1536x864), 535 (720p). So a 1080p
 screen gets `roomy`, this machine's own desktop gets `dense`, and 720p gets
-`minimal`.
+`minimal`. Roomy sits four pixels under its budget, and that is deliberate:
+the signal-timing line (27 Aug) had to come out of roomy's paddings
+(`row_pad` 6 → 4, `pad` bottom 22 → 12, header 102 → 96) because a full
+captioned row pushed 1080p off the top rung, and packing the timer beside
+the mode strip instead widened the column enough to stack the form at
+1280 px. Anything else added to the form must pay for itself the same way.
+The side-friction switch (28 Aug) paid by not being a row: it shares the old
+Pedestrians row (now titled "Side friction", two Off/On strips side by side,
+labelled `peds` / `parked`), which costs zero height — and both of its first
+two drafts failed the suite before fitting: labels one word longer
+(`crossing`, `parked / standing`) widened the right column enough to stack
+the form at 1280 px, and a caption one wrapped line longer than the old
+row's pushed roomy to 828 against its 816. Short labels and a one-line
+caption are load-bearing, not style. The row is trimmed like its
+neighbours: `_trimmed_rows` is a **three**-tuple (time, pedestrians, side
+friction), hidden where defaults.txt pins `ObjectMode` (miami, riyadh).
 
 **`minimal` drops the captions, and it has to.** 720p leaves about 1070
 pixels of settings across two columns and the roomiest layout wants 1570.

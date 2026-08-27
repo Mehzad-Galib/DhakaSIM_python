@@ -201,9 +201,10 @@ def test_a_rebuilt_strip_stops_watching_its_variable():
 
 
 def test_a_place_that_cannot_use_a_setting_loses_its_row():
-    """Miami's defaults pin the pedestrians off and it has no hourly demand
-    profile, so both rows leave the form; moving back to a surveyed Dhaka
-    junction brings them back, along with parameter.txt's pedestrian mode."""
+    """Miami's defaults pin the pedestrians and side friction off and it has
+    no hourly demand profile, so those rows leave the form; moving back to a
+    surveyed Dhaka junction brings them back, along with parameter.txt's
+    pedestrian and object modes."""
     from dhakasim.parameters import Parameters
     frame = panel(1920, 1000)
     option = frame.option_panel
@@ -213,17 +214,21 @@ def test_a_place_that_cannot_use_a_setting_loses_its_row():
         frame.root.update()             # the rebuild rides on after_idle
     trimmed = option._shown_rows
     pinned_off = option.pedestrian_var.get()
+    friction_pinned_off = option.friction_var.get()
     option.network_var.set("kakrail_corridor")
     for _ in range(10):
         frame.root.update_idletasks()
         frame.root.update()
     restored = option._shown_rows
     restored_mode = Parameters.across_pedestrian_mode
+    restored_friction = Parameters.OBJECT_MODE
     frame.root.destroy()
-    assert trimmed == (False, False), trimmed
+    assert trimmed == (False, False, False), trimmed
     assert pinned_off == "Off", pinned_off
-    assert restored == (True, True), restored
+    assert friction_pinned_off == "Off", friction_pinned_off
+    assert restored == (True, True, True), restored
     assert restored_mode == Parameters.BASE_ACROSS_PEDESTRIAN_MODE
+    assert restored_friction == Parameters.BASE_OBJECT_MODE
 
 
 if __name__ == "__main__":

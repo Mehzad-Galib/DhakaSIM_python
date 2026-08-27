@@ -500,6 +500,20 @@ class Processor:
                     "num_links": len(self.link_list),
                     "num_nodes": len(self.node_list),
                     "num_od": len(self.demand_list),
+                    "network": Parameters.NETWORK_DIR,
+                    "time_of_day": Parameters.TIME_OF_DAY,
+                    "geometry_mode": Parameters.GEOMETRY_MODE,
+                    "keep_clear": Parameters.KEEP_CLEAR_MODE,
+                },
+                # Per-link measures and the per-minute flow series, for the
+                # report's dashboard.  Copies, not references: the report may
+                # outlive this method's arrays.
+                series={
+                    "flow_per_min": list(Statistics.flow_series or []),
+                    "link_names": dict(Parameters.LINK_NAMES),
+                    "link_flow": list(sensor_vehicle_count),
+                    "link_speed": [s * 3.6 for s in avg_speed_in_link],
+                    "link_waiting": list(avg_waiting_time_in_link),
                 },
                 per_type={
                     "avg_speed": Statistics.avg_speed_of_vehicle,
@@ -1198,6 +1212,8 @@ class Processor:
         if not previous and now:
             vehicle.get_link().get_segment(
                 vehicle.get_segment_index()).update_information(vehicle.get_speed())
+            # Report-only network-wide flow (see Statistics.flow_series).
+            Statistics.flow_series_count += 1
 
         self._update_flow(old_dist_in_segment, new_dist_in_segment, vehicle)
 
@@ -1286,6 +1302,130 @@ class Processor:
                                  end_point_x, end_point_y, leaving_segment,
                                  entering_segment)
 
+    def _set_stop_lines(self) -> None:
+        """Place each signalised approach's stop line, for KeepClearMode.
+
+        The survey states arms that geometrically converge on the node point,
+        so "the segment end" -- where a red light's phantom leader stands
+        (``Vehicle._create_dummy_vehicle_at_link_end``) -- is the *middle* of
+        the drawn junction, and every queue used to stand on top of the box.
+        The stop lines are read off the very outline the junction patch is
+        painted from (``road_geometry.stop_line_setbacks``), so a queue held
+        at one visibly stands outside the box, corner fillets included.  The
+        setbacks are stored on the mouth segments and consulted only under
+        KeepClearMode, so computing them is free for a parity run.
+
+        Two-arm nodes keep a zero setback: they are chain joints, and holding
+        traffic a carriageway-width short of a road that continues straight
+        on reads as a phantom obstruction.
+        """
+        # A runtime import, matching how the stop line is defined: by the
+        # painted junction.  road_geometry is pure geometry -- no Tk.
+        from . import road_geometry
+        setbacks = road_geometry.stop_line_setbacks(
+            self.link_list, self.node_list, Parameters.pixel_per_meter)
+        for (node_id, link_index), setback in setbacks.items():
+            link = self.link_list[link_index]
+            count = link.get_number_of_segments()
+            at_up = link.get_up_node() == node_id
+            # The whole reach, for the keep-clear box test (_exit_has_room):
+            # a box deeper than a short mouth segment is still a box.
+            mouth = link.get_first_segment() if at_up \
+                else link.get_last_segment()
+            if at_up:
+                mouth.stop_total_at_start = setback
+            else:
+                mouth.stop_total_at_end = setback
+            # Distribute the line across the chain, walking inward from the
+            # node.  A fitted arm often meets the junction with a short
+            # mouth segment (Banani 23's east leg: a 15.6 m mouth against a
+            # 21 m box), and a line capped inside that one segment stood in
+            # the middle of the drawn box.  A segment wholly inside the box
+            # carries its full length -- its own line position degenerates
+            # to "everything here is past the line", which is exactly what
+            # the red-runner rule wants -- and the first segment with room
+            # left carries the line itself.  Clamped so the innermost
+            # stretch of a link shorter than the box stays enterable.
+            total = sum(link.get_segment(i).get_length()
+                        for i in range(count))
+            remaining = min(setback, total * 0.85)
+            order = range(count) if at_up else range(count - 1, -1, -1)
+            for i in order:
+                seg = link.get_segment(i)
+                inside = min(remaining, seg.get_length())
+                if at_up:
+                    seg.stop_setback_at_start = inside
+                else:
+                    seg.stop_setback_at_end = inside
+                remaining -= inside
+                if remaining <= 0:
+                    break
+
+    @staticmethod
+    def _exit_has_room(node, entering_segment, vehicle, new_link_index,
+                       new_strip_index) -> bool:
+        """Whether a vehicle entering the junction now could also leave it.
+
+        The exit strips must offer, from their entrance, clear road for this
+        vehicle *plus* every vehicle already inside the junction bound for
+        the same strips, each with its following headway.  Inflating the
+        length handed to ``has_gap_for_adding_vehicle`` reserves exactly that
+        stretch -- which is what stops five vehicles entering against one gap
+        that fits one, while a queue standing further down a long exit than
+        the reservation reaches costs nothing.  The reservation is capped at
+        the exit segment's own length, or the short links between paired
+        junctions could demand more clear road than exists and hold the
+        approach for ever.  Only KeepClearMode calls this.
+        """
+        committed = 0.0
+        first = new_strip_index
+        last = new_strip_index + vehicle.get_number_of_strips() - 1
+        for i in range(node.number_of_vehicles()):
+            inside = node.get_vehicle(i)
+            try:
+                strip = node.get_intersection_strip(
+                    inside.get_intersection_strip_index())
+            except (IndexError, TypeError):
+                continue
+            if strip.end_link_index != new_link_index:
+                continue
+            low = strip.end_strip
+            high = low + inside.get_number_of_strips() - 1
+            if high < first or low > last:
+                continue          # bound for the same link but other strips
+            committed += inside.get_length() + Constants.THRESHOLD_DISTANCE
+        usable = (entering_segment.get_length()
+                  - Constants.THRESHOLD_DISTANCE - 0.16)
+        needed = min(vehicle.get_length() + committed,
+                     max(usable, vehicle.get_length()))
+        # The same lateral search the parity path makes -- a vehicle blocked
+        # on its intended strips but fitting two strips over may enter, or
+        # the rule costs half the junction's throughput for no discipline.
+        # With nothing committed, `needed` is the vehicle's own length and
+        # this is exactly the test the parity path already made.
+        index = entering_segment.get_strip_index_in_entering_segment(
+            vehicle, new_strip_index, required_length=needed)
+        if index == -1:
+            return False
+        # The first stretch of the exit lies inside the drawn junction box
+        # (its stop-line setback measures exactly how much).  The question is
+        # VISSIM's: would this vehicle have to *stop* inside the box?  A
+        # standing queue whose tail is still in that stretch means yes; a
+        # moving vehicle discharging ahead does not, and counting it -- an
+        # earlier version reserved the stretch as empty road -- throttled a
+        # green to one vehicle per box-crossing and collapsed throughput.
+        box = max(entering_segment.stop_total_at_end,
+                  entering_segment.stop_total_at_start)
+        if box > 0.0:
+            limit = box + vehicle.get_length() + committed
+            for j in range(vehicle.get_number_of_strips()):
+                for other in entering_segment.get_strip(
+                        index + j).get_vehicle_list():
+                    if (other.get_speed() < 0.5
+                            and other.get_distance_in_segment() < limit):
+                        return False
+        return True
+
     def _move_vehicle_at_segment_end(self, vehicle) -> None:
         if ((vehicle.is_reverse_link()
              and vehicle.get_link().get_segment(
@@ -1351,7 +1491,43 @@ class Processor:
                                               new_link_index, old_strip_index):
                     # wrong lane for this turn: hold at the stop line
                     vehicle.set_speed(0)
-                elif node.is_bundle_active(old_link_index):
+                elif (Parameters.KEEP_CLEAR_MODE and not node.is_roundabout()
+                      and node.number_of_links() >= 3
+                      and not self._exit_has_room(node, entering_segment,
+                                                  vehicle, new_link_index,
+                                                  new_strip_index)):
+                    # VISSIM-style keep-clear: the box is entered only when it
+                    # can be left.  The plain gap test below samples the exit
+                    # at the moment of entry, so several vehicles enter against
+                    # the same gap and the spares wait *inside* the junction --
+                    # held at the stop line instead, the box stays passable for
+                    # the approaches whose green comes next.  Two exemptions,
+                    # both measured rather than assumed: roundabouts, whose
+                    # give-way rule already meters entry and where holding
+                    # against ring space backed the corridor up; and two-arm
+                    # nodes, which are chain joints with no cross traffic to
+                    # keep the box clear *for*, so the rule there was pure
+                    # throughput cost.
+                    vehicle.set_speed(0)
+                elif (node.is_bundle_active(old_link_index)
+                      or (Parameters.KEEP_CLEAR_MODE
+                          and not node.is_roundabout()
+                          and node.number_of_links() >= 3
+                          and (leaving_segment.stop_setback_at_start
+                               if vehicle.is_reverse_segment()
+                               else leaving_segment.stop_setback_at_end) > 0)):
+                    # The second arm of the test is the VISSIM red-runner
+                    # rule.  Under KeepClearMode a red light's phantom leader
+                    # stands at the stop line, so the only vehicles that can
+                    # reach the link end on red are the ones the phase change
+                    # caught already past the line -- and a caught vehicle
+                    # clears the box (still subject to the keep-clear test
+                    # above) instead of parking in the mouth, exactly as a
+                    # driver caught by the amber does.  Without this they
+                    # stood between line and box for the whole red, which
+                    # read as a queue standing on the junction.  Guarded on a
+                    # real stop line existing (setback > 0), or an approach
+                    # whose rays found no outline would run its red freely.
                     vehicle.set_intersection_strip_index(node.get_my_intersection_strip(
                         old_link_index, old_strip_index, new_link_index, new_strip_index))
                     vehicle.set_node(node)
@@ -1472,9 +1648,13 @@ class Processor:
             self.accident_check_all_vehicles_at_last(vehicle)
 
         if Parameters.simulation_step % (60 * Constants.TIME_STEP) == 0:
-            Statistics.flow[(Parameters.simulation_step
-                             // jint(60 * Constants.TIME_STEP)) - 1] = Statistics.flow_count
+            minute = (Parameters.simulation_step
+                      // jint(60 * Constants.TIME_STEP)) - 1
+            Statistics.flow[minute] = Statistics.flow_count
             Statistics.flow_count = 0
+            if 0 <= minute < len(Statistics.flow_series):
+                Statistics.flow_series[minute] = Statistics.flow_series_count
+            Statistics.flow_series_count = 0
 
     def _control_signal(self) -> None:
         # A roundabout has no phases at all -- it gives way to circulating
@@ -1637,6 +1817,7 @@ class Processor:
 
             self._validate_network()
             self._setup_roundabouts()
+            self._set_stop_lines()
 
             left = DOUBLE_MAX_VALUE
             right = 0
