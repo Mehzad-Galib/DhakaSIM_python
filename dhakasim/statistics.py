@@ -25,6 +25,14 @@ class Statistics:
     no_accidents_per_demand = None
     flow = None
     flow_count = 0
+    # Report-only, network-wide flow series.  ``flow``/``flow_count`` are the
+    # Java original's counter and watch one hardcoded sensor (link 0, 950 m in,
+    # reverse direction) that only the retired synthetic network had -- on the
+    # shipped networks it reads zero forever.  This pair counts every segment
+    # sensor instead, per minute, and feeds the report's dashboard; flow.csv
+    # still carries the parity counter untouched.
+    flow_series = None
+    flow_series_count = 0
     no_of_generated_vehicles = None
 
     vehicle_stats = None
@@ -50,6 +58,8 @@ class Statistics:
         cls.flow = [0.0] * (Parameters.simulation_end_time
                             // jint(60 * Constants.TIME_STEP))
         cls.flow_count = 0
+        cls.flow_series = [0.0] * len(cls.flow)
+        cls.flow_series_count = 0
 
     @classmethod
     def save_vehicle_stat(cls, stats) -> None:

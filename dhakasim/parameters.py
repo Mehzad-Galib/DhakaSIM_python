@@ -80,6 +80,21 @@ class Parameters:
     # experiments/ comparison need.  A network with no geometry.txt is
     # unaffected either way.
     GEOMETRY_MODE = True
+    # VISSIM-style junction discipline: a vehicle may enter the intersection
+    # box only when its exit has room for it *and* for everyone already inside
+    # bound for the same strips.  Without it the entry gap is checked once, at
+    # the moment of entry, so several vehicles enter against one gap and the
+    # spares wait inside the box -- which is exactly the clogged junction a
+    # signal is supposed to prevent.  Off is the Java-parity behaviour.
+    KEEP_CLEAR_MODE = True
+    # Whether the plan/3D views and the report label the network: street names
+    # along the links, node names (or bare ids) beside the junctions.  A
+    # network drawn over imagery that already carries its own street names --
+    # the BUET-DU-DMC demo's owner-supplied map -- sets this Off in its
+    # defaults.txt, because a second set of labels over the first is clutter.
+    # Drawing only: the simulation never reads it.
+    SHOW_LABELS = True
+    BASE_SHOW_LABELS = True
     # link id -> median width in metres
     MEDIAN_WIDTHS = {}
     # node id -> roundabout radius in metres
@@ -117,7 +132,7 @@ class Parameters:
     # is otherwise only reachable by rewriting demand.txt between runs.
     DEMAND_OVERRIDE = -1.0
     # Added to every demand row. The Java original hardcodes 30, which is
-    # nothing on an 8-row junction and +3300 veh/h across demo_backup's 110
+    # nothing on an 8-row junction and +13,380 veh/h across demo_backup's 446
     # rows, so a demand sweep usually wants this at 0.
     DEMAND_OFFSET = 30
     simulation_step = 1

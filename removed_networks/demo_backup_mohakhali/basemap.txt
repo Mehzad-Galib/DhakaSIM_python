@@ -1,0 +1,10 @@
+# DhakaSim basemap, written by fetch_basemap.py.
+# (c) OpenStreetMap contributors
+# Anchored on bounding box at 23.777900,90.405400.
+#
+# bounds are west north east south, in degrees.
+source https://tile.openstreetmap.org/{z}/{x}/{y}.png
+zoom 18
+size 3328 2560
+bounds 90.3968811 23.7840882 90.4147339 23.7715209
+attribution (c) OpenStreetMap contributors

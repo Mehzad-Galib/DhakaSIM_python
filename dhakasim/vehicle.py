@@ -940,8 +940,30 @@ class Vehicle:
         v._length = 0.1
         v._maximum_speed_capable = self._maximum_speed_capable
         v._current_max_speed = self._current_max_speed
-        v._distance_in_segment = self.get_link().get_segment(
-            self.get_segment_index()).get_length()
+        segment = self.get_link().get_segment(self.get_segment_index())
+        v._distance_in_segment = segment.get_length()
+        if Parameters.KEEP_CLEAR_MODE and signal != SIGNAL.GREEN:
+            # VISSIM-style stop line: a red light stands its phantom car at
+            # the edge of the junction box, not at the point where the arms
+            # geometrically converge -- so the queue forms outside the drawn
+            # junction instead of on top of it.  On green the phantom stays
+            # at the segment end, rolling, or nobody would ever enter.
+            # A vehicle the change of phase caught *past* the line keeps the
+            # phantom at the segment end instead: a leader standing behind
+            # its follower is a negative gap, and the car-following models
+            # answer that by freezing the approach solid.
+            line = (segment.get_length()
+                    - (segment.stop_setback_at_start
+                       if self.is_reverse_segment()
+                       else segment.stop_setback_at_end))
+            if self._distance_in_segment + self._length <= line:
+                v._distance_in_segment = line
+            else:
+                # Caught past the line: the phantom rolls (the green
+                # behaviour), so the vehicle carries on to the node, where
+                # the red-runner rule in _move_vehicle_at_segment_end lets
+                # it clear the box rather than park in the mouth.
+                v._speed = 5
         v._prev_speeds = deque()
         v._prev_gaps = deque()
         for _ in range(Vehicle.TIME_WINDOW):
@@ -1014,11 +1036,27 @@ class Vehicle:
                                                  else self._link.get_last_segment())
 
         if leader is None:
-            if last_segment_for_this_in_current_link is self.get_segment():
+            if (last_segment_for_this_in_current_link is self.get_segment()
+                    or self._segment_carries_a_stop_line()):
                 leader = self._create_dummy_vehicle_at_link_end(self._signal_on_link)
             else:
                 leader = self._create_dummy_vehicle_at_infinity()
         return leader
+
+    def _segment_carries_a_stop_line(self) -> bool:
+        """Whether this (mid-link) segment holds the approach's stop line.
+
+        A junction box deeper than a short mouth segment walks its stop line
+        back into earlier segments (Processor._set_stop_lines), and the red
+        phantom has to appear wherever the line actually is, not only in the
+        link's last segment.  Green keeps the old behaviour -- mid-link
+        traffic must not brake for a rolling phantom it would never meet.
+        """
+        if not Parameters.KEEP_CLEAR_MODE or self._signal_on_link == SIGNAL.GREEN:
+            return False
+        segment = self.get_segment()
+        return (segment.stop_setback_at_start if self.is_reverse_segment()
+                else segment.stop_setback_at_end) > 0.0
 
     def _get_a_leader_as_necessary_for_my_model(self, side_strips_to_consider):
         leader = self.get_my_probable_leader(side_strips_to_consider)
@@ -1027,7 +1065,8 @@ class Vehicle:
                                                  else self._link.get_last_segment())
 
         if leader is None:
-            if last_segment_for_this_in_current_link is self.get_segment():
+            if (last_segment_for_this_in_current_link is self.get_segment()
+                    or self._segment_carries_a_stop_line()):
                 leader = self._create_dummy_vehicle_at_link_end(self._signal_on_link)
             else:
                 leader = self._create_dummy_vehicle_at_infinity()

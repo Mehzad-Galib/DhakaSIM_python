@@ -176,8 +176,20 @@ class ProgressSlider:
         return int(self.var.get())
 
 
+#: Unit offsets for the white text halo: the four sides and the four
+#: diagonals (at 0.7 so the corner copies sit on the same radius).
+_HALO_OFFSETS = ((-1, 0), (1, 0), (0, -1), (0, 1),
+                 (-0.7, -0.7), (0.7, -0.7), (-0.7, 0.7), (0.7, 0.7))
+
+
 class DhakaSimPanel:
     """Port of ``thesisfinal.DhakaSimPanel``."""
+
+    # The 2D zoom range every control shares -- slider, wheel and Reset.  Wide
+    # enough for the BUET-DU-DMC demo at one end (whole network ~0.037) and
+    # kerb-level inspection at the other.
+    ZOOM_MIN = 0.02
+    ZOOM_MAX = 3.0
 
     def __init__(self, frame, parent):
         self.frame = frame
@@ -192,6 +204,10 @@ class DhakaSimPanel:
         self._reference_y = -999999999
         self._road_geometry = None
         self._road_geometry_widen = 0.0
+        # node id -> chosen label direction, and link id -> label point,
+        # both keyed off the drawn geometry; cleared whenever it is rebuilt.
+        self._label_dirs = {}
+        self._link_label_pts = {}
         # What the 3D static layer on the canvas was built from; None means
         # there is no reusable static layer.  See paint_component.
         self._static3d_key = None
@@ -248,6 +264,10 @@ class DhakaSimPanel:
         else:
             self.translate_x = Parameters.DEFAULT_TRANSLATE_X
             self.translate_y = Parameters.DEFAULT_TRANSLATE_Y
+        # The view a zoom Reset goes back to: this pan, and the whole-network
+        # scale fit_scale() works out once the canvas has a size.
+        self._home_translate = (self.translate_x, self.translate_y)
+        self.home_scale = self.scale
 
         # Map imagery, when this network has had any fetched for it.  Absent
         # is the normal case, so nothing downstream may assume it is there.
@@ -365,6 +385,13 @@ class DhakaSimPanel:
             # trajectories from now on are tagged for per-frame deletion.
             g2d.begin_dynamic()
             self._static3d_key = static_key
+
+        # Signal state changes every few steps, so the bars are dynamic
+        # content -- drawn each frame, under the vehicles that cross them.
+        # A trace replay has no live signal state to show.
+        if self.draw_roads and not Parameters.TRACE_MODE:
+            road_geometry.signal_bars(g2d, self.link_list, self.node_list,
+                                      Parameters.pixel_per_meter)
 
         if self.draw_trajectories:
             self.draw_all_trajectories(g2d)
@@ -511,6 +538,26 @@ class DhakaSimPanel:
     def _node_label_point(self, node):
         """World (metre) point at which to draw a node's label."""
         return road_geometry.node_point(self.link_list, node)
+
+    def _point_clear_of_roads(self, x_m, y_m) -> bool:
+        """Whether a world (metre) point lands on no drawn road surface.
+
+        Tested against the cached geometry's segment quads and junction
+        patches -- the actual paint, not idealised arm directions, because
+        fitted arms bend right after their mouths.
+        """
+        if self._road_geometry is None:
+            return True
+        ppm = Parameters.pixel_per_meter
+        px, py = x_m * ppm, y_m * ppm
+        quads, hulls = self._road_geometry[0], self._road_geometry[1]
+        for xs, ys in quads:
+            if road_geometry.point_in_polygon(px, py, xs, ys):
+                return False
+        for hxs, hys, _cx, _cy, _radius, _kerb in hulls:
+            if road_geometry.point_in_polygon(px, py, hxs, hys):
+                return False
+        return True
     def draw_node_id(self, g2d, node) -> None:
         # Prefer a friendly name (input/node_names.txt) over the numeric id.
         name = Parameters.NODE_NAMES.get(node.get_id(), str(node.get_id()))
@@ -528,7 +575,7 @@ class DhakaSimPanel:
                 widest = max(widest, link.get_segment(k).get_segment_width())
         # Junction names sit inside the network, so they need the most room.
         if node.number_of_links() > 1:
-            clearance = widest * 1.6 + 16.0
+            clearance = widest * 2.0 + 26.0
         else:
             clearance = widest * 0.8 + 10.0
 
@@ -558,15 +605,39 @@ class DhakaSimPanel:
                     seg = link.get_last_segment()
                     fx, fy = seg.get_start_x(), seg.get_start_y()
                 bearings.append(math.atan2(fx - x_m, -(fy - y_m)) % (2 * math.pi))
-            # midpoint of the largest angular gap between consecutive arms
-            best, best_gap = 0.0, -1.0
+            # Candidate directions: the midpoint of every angular gap
+            # between consecutive arms, widest gap first.  The widest gap
+            # alone is not enough, and neither is probing idealised arm
+            # rays -- a fitted arm bends right after its mouth, so a ray
+            # from the mouth's own bearing says nothing about where the
+            # road actually goes (Banani 27 put its name straight onto the
+            # west approach that way).  Each candidate is therefore tested
+            # against the *drawn* road: the label point and the reach of
+            # the text to either side must land on no segment quad and no
+            # junction patch.  The first direction that does wins; if none
+            # does, the widest gap is the least bad.  The answer depends
+            # only on the network, so it is cached per node.
             bearings.sort()
+            candidates = []
             for k in range(len(bearings)):
                 a = bearings[k]
                 b = bearings[(k + 1) % len(bearings)]
                 gap = (b - a) % (2 * math.pi)
-                if gap > best_gap:
-                    best_gap, best = gap, (a + gap / 2.0) % (2 * math.pi)
+                candidates.append((gap, (a + gap / 2.0) % (2 * math.pi)))
+            candidates.sort(reverse=True)
+            best = self._label_dirs.get(node.get_id())
+            if best is None:
+                best = candidates[0][1]
+                half_text = (len(name) * 26.0
+                             / Parameters.pixel_per_meter)   # ~half the name
+                for _gap, mid in candidates:
+                    px = x_m + math.sin(mid) * clearance
+                    py = y_m - math.cos(mid) * clearance
+                    if all(self._point_clear_of_roads(px + off, py)
+                           for off in (-half_text, 0.0, half_text)):
+                        best = mid
+                        break
+                self._label_dirs[node.get_id()] = best
             dx, dy = math.sin(best), -math.cos(best)
 
         lx = (x_m + dx * clearance) * Parameters.pixel_per_meter
@@ -591,39 +662,52 @@ class DhakaSimPanel:
         else:
             anchor = "s"
 
-        # Halo: the same text in white just behind the label, so names stay
-        # legible over the carriageway and over each other on tight networks.
-        halo = max(1.0, 1.2 / max(self.scale, 0.0001))
+        # Halo: the same text in white behind the label -- eight copies, the
+        # diagonals included, so the shadow closes into a solid outline
+        # instead of the pinholes four offsets leave at the corners.  This
+        # is what keeps a name legible over the carriageway, the imagery and
+        # other names on tight networks.
+        halo = max(1.0, 1.6 / max(self.scale, 0.0001))
         g2d.set_color(Color.WHITE)
-        for ox, oy in ((-halo, 0), (halo, 0), (0, -halo), (0, halo)):
-            g2d.draw_string(name, jint(lx + ox), jint(ly + oy), anchor)
+        for ox, oy in _HALO_OFFSETS:
+            g2d.draw_string(name, jint(lx + ox * halo), jint(ly + oy * halo),
+                            anchor)
         g2d.set_color(Color.BLACK)
         g2d.draw_string(name, jint(lx), jint(ly), anchor)
 
     def draw_link_name(self, g2d, link) -> None:
-        """Draw a link's street name along the middle of its carriageway.
+        """Draw a link's street name just off its carriageway.
 
         Falls back to the numeric id, which is what the per-link CSV columns
         are indexed by, so a link can always be matched between the picture and
-        the statistics.
+        the statistics.  The label used to sit on the road midpoint, where it
+        was buried under the traffic; ``road_geometry.link_label_offset``
+        probes it off the kerb instead, and the answer is cached per link
+        because it depends only on the drawn geometry.
         """
         name = Parameters.LINK_NAMES.get(link.get_id(), str(link.get_id()))
         count = link.get_number_of_segments()
         if count <= 0:
             return
-        # Midpoint of the middle segment, which sits away from the junction
-        # patches at either end where the label would collide with node names.
-        seg = link.get_segment(count // 2)
-        x_m = (seg.get_start_x() + seg.get_end_x()) / 2.0
-        y_m = (seg.get_start_y() + seg.get_end_y()) / 2.0
+        pt = self._link_label_pts.get(link.get_id())
+        if pt is None:
+            # ~half the name's reach at font 78, and its cap height, in
+            # metres.
+            ppm = Parameters.pixel_per_meter
+            pt = road_geometry.link_label_offset(
+                link, self._road_geometry, ppm,
+                len(name) * 20.0 / ppm, text_up_m=62.0 / ppm)
+            self._link_label_pts[link.get_id()] = pt
+        x_m, y_m = pt
         lx = x_m * Parameters.pixel_per_meter
         ly = y_m * Parameters.pixel_per_meter
 
         g2d.set_font("Serif", 78)
-        halo = max(1.0, 1.2 / max(self.scale, 0.0001))
+        halo = max(1.0, 1.6 / max(self.scale, 0.0001))
         g2d.set_color(Color.WHITE)
-        for ox, oy in ((-halo, 0), (halo, 0), (0, -halo), (0, halo)):
-            g2d.draw_string(name, jint(lx + ox), jint(ly + oy), "s")
+        for ox, oy in _HALO_OFFSETS:
+            g2d.draw_string(name, jint(lx + ox * halo), jint(ly + oy * halo),
+                            "s")
         g2d.set_color(Color(40, 40, 40))
         g2d.draw_string(name, jint(lx), jint(ly), "s")
 
@@ -683,6 +767,9 @@ class DhakaSimPanel:
                 self.link_list, self.node_list, Parameters.pixel_per_meter,
                 widen=widen)
             self._road_geometry_widen = widen
+            # The label placements were probed against the old shapes.
+            self._label_dirs = {}
+            self._link_label_pts = {}
         # Over imagery the carriageway is washed rather than painted: same
         # shapes, but a pale fill at part opacity, so the road still reads as
         # a surface without hiding the very thing the imagery is there for.
@@ -691,13 +778,16 @@ class DhakaSimPanel:
                             fill=not self.basemap_active())
 
         # Street names first, so a junction name drawn afterwards wins the
-        # overlap where a short link's label reaches its node.
-        for link in self.link_list:
-            self.draw_link_name(g2d, link)
+        # overlap where a short link's label reaches its node.  A network
+        # whose imagery already carries its own street names turns the whole
+        # set off with ShowLabels in defaults.txt.
+        if Parameters.SHOW_LABELS:
+            for link in self.link_list:
+                self.draw_link_name(g2d, link)
 
-        for node in self.node_list:
-            g2d.set_color(Color.BLACK)
-            self.draw_node_id(g2d, node)
+            for node in self.node_list:
+                g2d.set_color(Color.BLACK)
+                self.draw_node_id(g2d, node)
 
     # ---- timer / events --------------------------------------------------
 
@@ -796,16 +886,49 @@ class DhakaSimPanel:
         self.scene3d.camera.reset()
         self.repaint()
 
+    def fit_scale(self, width: int, height: int) -> float:
+        """The 2D scale that frames the whole network in a canvas this size.
+
+        Multiplicative headroom rather than a fixed margin, because the
+        networks span two orders of magnitude: a surveyed junction is a few
+        hundred metres across and the BUET-DU-DMC demo is three kilometres.
+        Starting every run from this fit is what makes a single junction open
+        at a readable ~100 m framing instead of a wall of carriageway.
+        """
+        bounds = basemap_module.network_bounds(self.link_list, margin=30.0)
+        if not bounds or width <= 1 or height <= 1:
+            return self.scale
+        x0, y0, x1, y1 = bounds
+        ppm = Parameters.pixel_per_meter
+        w, h = (x1 - x0) * ppm, (y1 - y0) * ppm
+        if w <= 0 or h <= 0:
+            return self.scale
+        return min(self.ZOOM_MAX, max(self.ZOOM_MIN, min(width / w, height / h)))
+
+    def reset_view(self) -> None:
+        """Back to the whole-network framing: home pan, home scale."""
+        self.translate_x, self.translate_y = self._home_translate
+        if self.view_3d:
+            self.scene3d.camera.reset()
+        self.set_scale(self.home_scale)
+
     def mouse_wheel_moved(self, event) -> None:
         notches = -1 if event.delta > 0 else 1
         if self.view_3d:
             self.scene3d.camera.zoom(notches)
             self.repaint()
             return
-        new_scale_value = self.scale - notches * 0.004
+        # Multiplicative, not additive: a fixed 0.004 step was a whole zoom
+        # level near the bottom of the range and imperceptible near the top --
+        # and with imagery on, a step smaller than the ladder's next rung
+        # snapped straight back to where it started, which read as the zoom
+        # being broken.  15% a notch clears a rung from anywhere.
+        factor = 1.15 if notches < 0 else 1.0 / 1.15
         # Through set_scale rather than straight onto self.scale, so a wheel
         # zoom lands on the imagery's ladder like every other zoom does.
-        self.set_scale(min(1.0, max(0.001, new_scale_value)))
+        self.set_scale(min(self.ZOOM_MAX,
+                           max(self.ZOOM_MIN, self.scale * factor)))
+        self.frame.sync_zoom_slider(self.scale)
 
 
 #: The start screen's palette.  Warm charcoal rather than the usual near-black:
@@ -1140,12 +1263,16 @@ class _Segmented(tk.Frame):
 #: to a hint line in the footer, which costs one row's height for all
 #: seventeen of them instead of two lines each.
 _DENSITIES = (
+    # row_pad was 6 and pad (18, 22): the signal-timing line under the
+    # Signal control strip costs one entry's height, and roomy sat exactly
+    # at the 1080p budget, so the slack came out of the padding rather than
+    # out of a rung.
     dict(name="roomy",
-         header=102, title=30, tagline=12,
+         header=96, title=30, tagline=12,
          band=11, note=11, label=13, caption=11, group=10,
-         cell=(12, 11), cell_pad=((16, 9), (13, 6)),
+         cell=(12, 11), cell_pad=((16, 8), (13, 6)),
          value=12, unit=11, button=13, button_pad=(28, 12),
-         field=330, wrap=300, row_pad=6, band_gap=8, pad=(18, 22),
+         field=330, wrap=300, row_pad=4, band_gap=6, pad=(18, 12),
          foot_pad=12, tail=10, tiles=None),
     dict(name="compact",
          header=94, title=26, tagline=11,
@@ -1663,8 +1790,20 @@ class OptionPanel:
                         if mode == Parameters.SIGNAL_MODE), "Fixed time"))
         self.geometry_var = tk.StringVar(
             value="On" if Parameters.GEOMETRY_MODE else "Off")
+        # VISSIM-style manual timing for the fixed controller: the operator
+        # states the green each approach gets; the red follows from the other
+        # approaches' greens.  Follows the network's defaults.txt when the
+        # junction changes (see _on_network_change), and an edit here beats
+        # both, matching the settings order pinned by test_network_defaults.
+        self.fields["signal_green"] = tk.StringVar(
+            value=str(Parameters.SIGNAL_CHANGE_DURATION))
         self.pedestrian_var = tk.StringVar(
             value="On" if Parameters.across_pedestrian_mode else "Off")
+        # Side friction: parked cars/rickshaws/CNGs and standing pedestrians
+        # blocking the kerbside strips.  Mirrors ObjectMode the same way the
+        # pedestrian switch mirrors its parameter.
+        self.friction_var = tk.StringVar(
+            value="On" if Parameters.OBJECT_MODE else "Off")
         self.fields["strip"] = tk.StringVar(value=jstr(Parameters.strip_width))
         self.fields["footpath"] = tk.StringVar(
             value=jstr(Parameters.footpath_strip_width))
@@ -1723,8 +1862,8 @@ class OptionPanel:
                       keep_unknown=False).pack(
                 anchor="w", pady=(0, level["row_pad"] + 2))
 
-        show_time, show_pedestrians = self._trimmed_rows()
-        self._shown_rows = (show_time, show_pedestrians)
+        show_time, show_pedestrians, show_friction = self._trimmed_rows()
+        self._shown_rows = (show_time, show_pedestrians, show_friction)
         if show_time:
             # Only a surveyed network carries an hourly demand profile; for
             # the OSM-derived ones the hour would change nothing, so the row
@@ -1771,21 +1910,43 @@ class OptionPanel:
         self._use(1)
         self._band("Control", "  what the signals do")
         holder = self._row("Signal control",
-                           "Fixed time shares green equally; the "
-                           "multi-objective modes re-plan each cycle.")
+                           "Fixed time holds each leg green for the seconds "
+                           "set below, VISSIM-style; a leg's red is the other "
+                           "legs' greens. The multi-objective modes re-plan "
+                           "each cycle and set their own timing.")
+        # The timer shares this row rather than taking a captioned row of its
+        # own (34 px the 1080p roomy budget did not have); packing it beside
+        # the strip was tried instead and widened the column enough to stack
+        # the form at 1280 px.  Below the strip costs one entry line, paid
+        # for by the slimmer roomy row padding in _DENSITIES.
         self._seg(holder, list(self.SIGNAL_CHOICES), self.signal_var,
                   columns=2).pack(anchor="w")
+        timing = tk.Frame(holder, background=_UI["panel"])
+        timing.pack(anchor="w", pady=(3, 0))
+        self._entry(timing, self.fields["signal_green"])
+        self._unit(timing, "s green per approach")
 
         holder = self._row("Real geometry",
                            "The surveyed layout: solid medians and real "
                            "roundabouts. Off is Java parity.")
         self._seg(holder, ["Off", "On"], self.geometry_var).pack(anchor="w")
 
-        if show_pedestrians:
-            holder = self._row("Pedestrians",
-                               "On puts pedestrians crossing the carriageway.")
-            self._seg(holder, ["Off", "On"],
-                      self.pedestrian_var).pack(anchor="w")
+        if show_pedestrians or show_friction:
+            # One captioned row for both street-level nuisances, the strips
+            # side by side: a second captioned row here would cost the ~60 px
+            # the roomy density does not have at 1080p, while extra width is
+            # free -- the junction tiles already hold this column at 440 px.
+            holder = self._row(
+                "Side friction",
+                "Crossing pedestrians, and parked vehicles on the kerbside.")
+            if show_pedestrians:
+                self._seg(holder, ["Off", "On"],
+                          self.pedestrian_var).pack(side="left")
+                self._unit(holder, "peds")
+            if show_friction:
+                self._seg(holder, ["Off", "On"], self.friction_var).pack(
+                    side="left", padx=((10, 0) if show_pedestrians else 0))
+                self._unit(holder, "parked")
 
         self._band("Road model", "  the strips a vehicle slides between")
         holder = self._row("Strip width",
@@ -1868,11 +2029,18 @@ class OptionPanel:
         if "SignalChangeDuration" not in applied:
             Parameters.SIGNAL_CHANGE_DURATION = (
                 Parameters.BASE_SIGNAL_CHANGE_DURATION)
+        # The timing field mirrors the parameter the same way the speed
+        # limit does: the place's own green appears when the junction
+        # changes, and an edit made after that beats it.
+        self.fields["signal_green"].set(str(Parameters.SIGNAL_CHANGE_DURATION))
+        if "ShowLabels" not in applied:
+            Parameters.SHOW_LABELS = Parameters.BASE_SHOW_LABELS
         # The Pedestrians switch mirrors the parameter, so it has to follow
         # -- start_simulation() writes the var back into Parameters, and a
         # stale "On" would undo the network's own Off.
         self.pedestrian_var.set(
             "On" if Parameters.across_pedestrian_mode else "Off")
+        self.friction_var.set("On" if Parameters.OBJECT_MODE else "Off")
         self._pinned = frozenset(applied)
         # Settings the selected place cannot use leave the form: an hourly
         # demand profile it does not have, a pedestrians switch its
@@ -1883,11 +2051,12 @@ class OptionPanel:
             self.frame.after_idle(self._refit_trimmed)
 
     def _trimmed_rows(self):
-        """(time-of-day shown, pedestrians shown) for the selected network."""
+        """(time-of-day, pedestrians, side friction) shown for the network."""
         network = self.network_var.get().strip()
         hourly = os.path.exists(
             os.path.join("input", network, "demand_by_hour.txt"))
-        return (hourly, "AcrossPedestrianMode" not in self._pinned)
+        return (hourly, "AcrossPedestrianMode" not in self._pinned,
+                "ObjectMode" not in self._pinned)
 
     def _refit_trimmed(self) -> None:
         if self._trimmed_rows() == self._shown_rows:
@@ -1915,6 +2084,11 @@ class OptionPanel:
         Parameters.SIGNAL_MODE = self.SIGNAL_CHOICES.get(
             self.signal_var.get(), "fixed")
         print("Signal control: " + Parameters.SIGNAL_MODE)
+        try:
+            green = int(float(self.fields["signal_green"].get()))
+        except ValueError:
+            green = Parameters.SIGNAL_CHANGE_DURATION
+        Parameters.SIGNAL_CHANGE_DURATION = max(1, green)
         Parameters.GEOMETRY_MODE = self.geometry_var.get() == "On"
         print("Real geometry: " + ("On" if Parameters.GEOMETRY_MODE else "Off"))
         Parameters.RENDER_3D, Parameters.RENDER_3D_STYLE = (
@@ -1931,6 +2105,7 @@ class OptionPanel:
         Parameters.maximum_speed = float(self.fields["max_speed"].get()) * 1000 / 3600  # m/s
         Parameters.maximum_speed = Utilities.precision2(Parameters.maximum_speed)
         Parameters.across_pedestrian_mode = self.pedestrian_var.get() == "On"
+        Parameters.OBJECT_MODE = self.friction_var.get() == "On"
         Parameters.pixel_per_footpath_strip = (Parameters.pixel_per_meter
                                               * Parameters.footpath_strip_width)
         Parameters.pixel_per_strip = Parameters.pixel_per_meter * Parameters.strip_width
@@ -2050,6 +2225,7 @@ class DhakaSimFrame:
             ("Footpath strip", f"{Parameters.footpath_strip_width:g}", "m"),
             ("Pixels per metre", f"{Parameters.pixel_per_meter:g}", ""),
             ("Pedestrians", on_off(Parameters.across_pedestrian_mode), ""),
+            ("Side friction", on_off(Parameters.OBJECT_MODE), ""),
             ("Real geometry", on_off(Parameters.GEOMETRY_MODE), ""),
             ("Trace replay", on_off(Parameters.TRACE_MODE), ""),
         ]
@@ -2091,24 +2267,30 @@ class DhakaSimFrame:
         tk.Label(zoom_row, text="Zoom", font=("Segoe UI", 9), bg=bg,
                  fg=_UI["muted"]).pack(side="left", padx=(0, 6))
 
-        def zoom_by(step):
-            """Nudge the zoom slider, which repaints through its own callback.
-
-            Wheel and buttons therefore share one path; the wheel's own
-            handler still moves the view directly, so this stays additive.
-            """
-            slider = getattr(self, "_scale_slider", None)
-            if slider is None:
-                return
-            slider.set(min(100.0, max(0.0, slider.get() + step)))
-
-        for label, step, tip in (("−", -6.0, "Zoom out"),
-                                 ("+", 6.0, "Zoom in")):
-            dark_button(zoom_row, label, lambda s=step: zoom_by(s),
-                        width=2).pack(side="left", padx=1)
-        dark_button(zoom_row, "Reset",
-                    lambda: zoom_by(30.0 - self._scale_slider.get()),
-                    size=8).pack(side="left", padx=(6, 0))
+        # A slider, not +/- buttons: with imagery on, the zoom snaps to the
+        # ladder of scales the picture can be drawn at exactly, and a fixed
+        # button step smaller than the next rung snapped straight back --
+        # the buttons read as broken.  A drag states the destination
+        # absolutely, so it always lands somewhere new.  The mapping is
+        # logarithmic (see _slider_to_scale): zoom is a ratio, and a linear
+        # slider crams every whole-network framing into its bottom few pixels.
+        self._scale_slider = tk.Scale(
+            zoom_row, from_=0, to=100, orient="horizontal", showvalue=False,
+            borderwidth=0, highlightthickness=0, sliderrelief="flat",
+            sliderlength=18, width=10, length=110, background=_UI["seg_off"],
+            troughcolor=_UI["band"], activebackground=_UI["accent"],
+            command=self._on_zoom_slider)
+        self._scale_slider.pack(side="left", padx=(0, 6))
+        # With imagery on, set_scale snaps to the picture's ladder and stops
+        # at its top rung; settle the handle on what the view actually did,
+        # so a drag past the ceiling ends with the handle at the ceiling
+        # rather than promising a zoom that never happened.
+        self._scale_slider.bind(
+            "<ButtonRelease-1>",
+            lambda _e: self.panel is not None
+            and self.sync_zoom_slider(self.panel.scale))
+        dark_button(zoom_row, "Reset", self.reset_zoom,
+                    size=8).pack(side="left")
 
         # Only offered where imagery was actually fetched, so the control
         # never promises something the network cannot show.
@@ -2145,7 +2327,10 @@ class DhakaSimFrame:
         def toggle():
             state["open"] = not state["open"]
             if state["open"]:
-                body.pack(anchor="w", fill="x", pady=(6, 0))
+                # after=: re-packing lands the body straight under its own
+                # header; without it Tk appends it below whatever sections
+                # were built later.
+                body.pack(anchor="w", fill="x", pady=(6, 0), after=header)
                 toggle_btn.configure(text="−")
             else:
                 body.forget()
@@ -2184,21 +2369,52 @@ class DhakaSimFrame:
                  fg=_UI["accent_text"], width=5, anchor="e",
                  font=("Consolas", 9, "bold")).pack(side="left")
 
+        body.pack(anchor="w", fill="x", pady=(6, 0))
+
         # Side friction is drawn on the same canvas but never appears in the
         # counts above, because these are obstructions rather than trips.
         # Without a key of its own a parked rickshaw is just an unexplained
-        # blob, which is how it came to be mistaken for a moving one.
-        tk.Label(body, text="Side friction", font=("Segoe UI Semibold", 10),
-                 bg=bg, fg=_UI["accent_text"]).pack(anchor="w", pady=(12, 2))
-        for name, colour in self.FRICTION_CATEGORIES:
-            row = tk.Frame(body, bg=bg)
-            row.pack(anchor="w", fill="x", pady=1)
-            tk.Label(row, text="  ", bg=colour.to_hex(), width=2,
-                     relief="solid", borderwidth=1).pack(side="left")
-            tk.Label(row, text="  " + name, bg=bg, fg=_UI["muted"], width=20,
-                     anchor="w", font=("Segoe UI", 9)).pack(side="left")
+        # blob, which is how it came to be mistaken for a moving one.  Its
+        # own section with its own minimise button, and built only when the
+        # run actually generates the objects -- a key describing things that
+        # are not in the picture would be a lie on Miami and Riyadh, whose
+        # defaults pin ObjectMode Off.
+        if Parameters.OBJECT_MODE:
+            friction_header = tk.Frame(legend, bg=bg)
+            friction_header.pack(anchor="w", fill="x", pady=(12, 0))
+            friction_body = tk.Frame(legend, bg=bg)
+            friction_state = {"open": True}
 
-        body.pack(anchor="w", fill="x", pady=(6, 0))
+            def toggle_friction():
+                friction_state["open"] = not friction_state["open"]
+                if friction_state["open"]:
+                    friction_body.pack(anchor="w", fill="x", pady=(4, 0),
+                                       after=friction_header)
+                    friction_btn.configure(text="−")
+                else:
+                    friction_body.forget()
+                    friction_btn.configure(text="+")
+
+            tk.Label(friction_header, text="Side friction",
+                     font=("Segoe UI Semibold", 10), bg=bg,
+                     fg=_UI["accent_text"]).pack(side="left")
+            friction_btn = tk.Button(friction_header, text="−", width=2,
+                                     relief="flat", bg=bg, fg=_UI["muted"],
+                                     activebackground=bg,
+                                     activeforeground=_UI["text"],
+                                     font=("Segoe UI", 10, "bold"), bd=0,
+                                     command=toggle_friction, cursor="hand2")
+            friction_btn.pack(side="right")
+
+            for name, colour in self.FRICTION_CATEGORIES:
+                row = tk.Frame(friction_body, bg=bg)
+                row.pack(anchor="w", fill="x", pady=1)
+                tk.Label(row, text="  ", bg=colour.to_hex(), width=2,
+                         relief="solid", borderwidth=1).pack(side="left")
+                tk.Label(row, text="  " + name, bg=bg, fg=_UI["muted"],
+                         width=20, anchor="w",
+                         font=("Segoe UI", 9)).pack(side="left")
+            friction_body.pack(anchor="w", fill="x", pady=(4, 0))
 
         # What the run was set up with, kept in view for the whole run.  The
         # setup form is gone by now, and every one of these changes what the
@@ -2212,7 +2428,8 @@ class DhakaSimFrame:
         def toggle_settings():
             settings_state["open"] = not settings_state["open"]
             if settings_state["open"]:
-                settings_body.pack(anchor="w", fill="x", pady=(4, 0))
+                settings_body.pack(anchor="w", fill="x", pady=(4, 0),
+                                   after=settings_header)
                 settings_btn.configure(text="\u2212")
             else:
                 settings_body.forget()
@@ -2358,6 +2575,7 @@ class DhakaSimFrame:
         self._basemap_var = None
         self._delay_var = None
         self._commit_delay = None
+        self._scale_slider = None
         Parameters.show_progress_slider = None
         for child in self.container.winfo_children():
             child.destroy()
@@ -2401,31 +2619,11 @@ class DhakaSimFrame:
         top_bar.pack(side="top", fill="x")
         _glass(top_bar)
 
-        scale_slider = tk.Scale(self.container, from_=100, to=0,
-                                orient="vertical", showvalue=False,
-                                borderwidth=0, highlightthickness=0,
-                                sliderrelief="flat", sliderlength=26, width=9,
-                                background=_UI["seg_off"],
-                                troughcolor=_UI["band"],
-                                activebackground=_UI["accent"])
-        # The buttons in the legend drive this same slider rather than
-        # calling set_scale directly, so the handle never disagrees with
-        # the view after a click.
-        self._scale_slider = scale_slider
-        scale_slider.set(30)
         show_progress_slider = ProgressSlider(self.container, 1,
                                              Parameters.simulation_end_time, 1)
         change_trace_slider = ProgressSlider(self.container, 1,
                                             Parameters.simulation_end_time, 1)
         Parameters.show_progress_slider = show_progress_slider
-
-        def on_scale(_value):
-            scale_value = max(0.00001, scale_slider.get() / 100.0)
-            panel.set_scale(scale_value)
-            if Parameters.DEBUG_MODE:
-                print("Scale Value: " + str(scale_value))
-
-        scale_slider.configure(command=on_scale)
 
         def on_change_trace(_value):
             if Parameters.TRACE_MODE:
@@ -2444,14 +2642,21 @@ class DhakaSimFrame:
 
         change_trace_slider.widget.configure(command=on_change_trace)
 
-        scale_slider.pack(side="right", fill="y")
+        # The zoom slider lives in the legend panel (built here).
         self._build_legend(self.container).pack(side="right", fill="y")
         show_progress_slider.widget.pack(side="bottom", fill="x")
         if Parameters.TRACE_MODE:
             change_trace_slider.widget.pack(side="top", fill="x")
         panel.canvas.pack(side="left", fill="both", expand=True)
         self.root.update_idletasks()
-        panel.set_scale(max(0.00001, scale_slider.get() / 100.0))
+        # Open on the whole network.  A surveyed junction lands around a
+        # 100 m scale bar; the BUET-DU-DMC demo lands on its full extent.
+        # Starting from a fixed close zoom made every first act of a run a
+        # hunt for where the traffic was.
+        panel.home_scale = panel.fit_scale(panel.canvas.winfo_width(),
+                                           panel.canvas.winfo_height())
+        self.sync_zoom_slider(panel.home_scale)
+        panel.set_scale(panel.home_scale)
         panel.start()
 
     def toggle_pause(self) -> None:
@@ -2470,6 +2675,48 @@ class DhakaSimFrame:
                                      else "\u23f8  Pause")
         if self._status is not None:
             self._status.configure(text="Paused." if paused else "")
+
+    # Guards the slider's command while the handle is being moved to match a
+    # zoom made elsewhere, so a wheel zoom does not re-enter set_scale.
+    _zoom_syncing = False
+
+    def _slider_to_scale(self, value) -> float:
+        """Slider position (0-100) -> view scale, logarithmically.
+
+        Zoom is a ratio, so equal slider movements should multiply the scale
+        by equal factors; mapped linearly, every whole-network framing sat in
+        the slider's bottom few pixels.
+        """
+        lo, hi = DhakaSimPanel.ZOOM_MIN, DhakaSimPanel.ZOOM_MAX
+        return lo * (hi / lo) ** (float(value) / 100.0)
+
+    def _scale_to_slider(self, scale: float) -> float:
+        lo, hi = DhakaSimPanel.ZOOM_MIN, DhakaSimPanel.ZOOM_MAX
+        scale = min(hi, max(lo, scale))
+        return 100.0 * math.log(scale / lo) / math.log(hi / lo)
+
+    def _on_zoom_slider(self, value) -> None:
+        if self.panel is None or self._zoom_syncing:
+            return
+        self.panel.set_scale(self._slider_to_scale(value))
+
+    def sync_zoom_slider(self, scale: float) -> None:
+        """Move the handle to match a zoom made elsewhere (wheel, fit)."""
+        slider = getattr(self, "_scale_slider", None)
+        if slider is None:
+            return
+        self._zoom_syncing = True
+        try:
+            slider.set(self._scale_to_slider(scale))
+        finally:
+            self._zoom_syncing = False
+
+    def reset_zoom(self) -> None:
+        """Whole network back in frame: home pan, home scale, handle synced."""
+        if self.panel is None:
+            return
+        self.panel.reset_view()
+        self.sync_zoom_slider(self.panel.scale)
 
     def toggle_basemap(self) -> None:
         """Show or hide the map imagery, keeping the legend's box in step."""

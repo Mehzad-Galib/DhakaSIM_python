@@ -143,13 +143,15 @@ class Constants:
     road_along_ped_poisson = None
 
     # --- side friction ----------------------------------------------------
-    # Parked vehicles and standing pedestrians are obstructions, not traffic,
-    # so they share a hazard-yellow family that no moving vehicle uses.  They
-    # were all one amber before, which sat close enough to the rickshaw's
-    # orange that a parked object and a moving one read the same at a glance.
-    # Within the family they differ by lightness rather than hue, so the group
-    # still reads as one thing while its members stay tellable apart.
-    STANDING_PEDESTRIAN_COLOR = Color(252, 220, 88)   # bright yellow
+    # Parked vehicles and standing pedestrians are obstructions, not traffic.
+    # They used to share one hazard-yellow family, differing by lightness
+    # only, and the owner could not tell the four apart in the legend or on
+    # the road (28 Aug).  Each type now gets its own hue, chosen pale and
+    # unsaturated so the group still reads as "not traffic" beside the
+    # saturated moving palette, while no two members share a hue.  None of
+    # these may drift near a VEHICLE_TYPE_COLORS entry: the nearest
+    # neighbours are noted per line.
+    STANDING_PEDESTRIAN_COLOR = Color(255, 213, 20)   # vivid yellow -- nothing moving is yellow
     STANDING_PEDESTRIAN_LENGTH = PEDESTRIAN_SIZE  # Unit: meter
     STANDING_PEDESTRIAN_WIDTH = PEDESTRIAN_SIZE  # Unit: meter
     STANDING_PEDESTRIAN_TIME_LIMIT_FACTOR = 50
@@ -165,7 +167,7 @@ class Constants:
     AVG_NUMBER_OF_STANDING_PEDESTRIANS = jint(math.ceil(
         STANDING_PEDESTRIANS_PER_KM * TOTAL_NETWORK_ROAD_LENGTH))
 
-    PARKED_CAR_COLOR = Color(226, 190, 48)            # gold
+    PARKED_CAR_COLOR = Color(105, 185, 235)           # sky blue -- far lighter than the motorbike's (40,110,220)
     PARKED_CAR_LENGTH = 4.5  # Unit: meter
     PARKED_CAR_WIDTH = 1.7  # Unit: meter
     PARKED_CAR_TIME_LIMIT_FACTOR = STANDING_PEDESTRIAN_TIME_LIMIT_FACTOR * 10
@@ -182,7 +184,7 @@ class Constants:
     AVG_NUMBER_OF_PARKED_CARS = jint(math.ceil(
         PARKED_CARS_PER_KM * TOTAL_NETWORK_ROAD_LENGTH))
 
-    PARKED_RICKSHAW_COLOR = Color(255, 240, 165)      # pale straw
+    PARKED_RICKSHAW_COLOR = Color(198, 150, 228)      # lavender -- far lighter than the bus's (140,60,190)
     PARKED_RICKSHAW_LENGTH = 3.0  # Unit: meter
     PARKED_RICKSHAW_WIDTH = 1.0  # Unit: meter
     PARKED_RICKSHAW_TIME_LIMIT_FACTOR = PARKED_CAR_TIME_LIMIT_FACTOR // 5
@@ -198,7 +200,7 @@ class Constants:
     AVG_NUMBER_OF_PARKED_RICKSHAWS = jint(math.ceil(
         PARKED_RICKSHAWS_PER_KM * TOTAL_NETWORK_ROAD_LENGTH))
 
-    PARKED_CNG_COLOR = Color(196, 158, 24)            # dark gold
+    PARKED_CNG_COLOR = Color(150, 214, 150)           # pale green -- its moving hue washed out, far lighter than the CNG's (30,160,70)
     PARKED_CNG_LENGTH = 2.6  # Unit: meter
     PARKED_CNG_WIDTH = 1.3  # Unit: meter
     PARKED_CNG_TIME_LIMIT_FACTOR = PARKED_CAR_TIME_LIMIT_FACTOR // 5

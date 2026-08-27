@@ -397,6 +397,16 @@ class Node:
     def _is_node_clear(self) -> bool:
         return not self._vehicle_list
 
+    def is_signalised(self) -> bool:
+        """Whether this node runs signal phases at all.
+
+        Bundles exist once the processor has called :meth:`create_bundles` on
+        a node with more than one link; a boundary node, or a light
+        drawing-only node from ``network_files.read_network``, has none and
+        must not be drawn with signal heads.
+        """
+        return bool(self._intersection_strip_bundles)
+
     def get_signal_on_link(self, link_index: int) -> SIGNAL:
         for isb in self._intersection_strip_bundles:
             if isb.get_intersection_bundle_index() == link_index:
