@@ -331,7 +331,7 @@ class DualCarriagewayTest(unittest.TestCase):
         # dual carriageways just like Kakrail Rd and Minto Road).
         self.assertEqual(fit.read_medians("kakrail_corridor"), {0, 1, 2, 3, 4})
         self.assertEqual(fit.read_medians("bijoy_sarani"), {0, 1, 2, 3})
-        self.assertEqual(fit.read_medians("demo_backup"), set())
+        self.assertEqual(fit.read_medians("buet_du_dmc"), set())
 
     def test_a_network_can_ask_for_the_chord(self):
         """``straight`` is read by the fit and ignored by the simulator, so

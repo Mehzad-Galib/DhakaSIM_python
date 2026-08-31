@@ -264,7 +264,7 @@ def summarise(rows, out_dir):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--out", default=os.path.join("experiments", "results"))
-    parser.add_argument("--networks", nargs="+", default=["demo_backup"])
+    parser.add_argument("--networks", nargs="+", default=["buet_du_dmc"])
     parser.add_argument("--seeds", type=int, default=10,
                         help="seeds 1..N (default 10)")
     parser.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2))

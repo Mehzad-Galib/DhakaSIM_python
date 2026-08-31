@@ -41,7 +41,21 @@ except Exception:                       # not Windows, or already set
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dhakasim import gui  # noqa: E402
+from dhakasim import map_import  # noqa: E402
 from dhakasim import utilities as Utilities  # noqa: E402
+
+# The density rungs below were measured against the shipped networks alone.
+# A user's imported maps legitimately grow the Intersection block and step
+# the form down a rung -- that is the ladder doing its job, not a
+# regression -- so the measurements here exclude them.
+_REAL_NETWORKS = gui.Processor.available_networks
+
+
+def _shipped_only():
+    return [n for n in _REAL_NETWORKS() if not map_import.is_imported(n)]
+
+
+gui.Processor.available_networks = staticmethod(_shipped_only)
 
 #: Pixels per point at 96 DPI.  Pinned before any widget exists, because the
 #: first layout is measured at whatever is in force when it is built.

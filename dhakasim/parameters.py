@@ -132,7 +132,7 @@ class Parameters:
     # is otherwise only reachable by rewriting demand.txt between runs.
     DEMAND_OVERRIDE = -1.0
     # Added to every demand row. The Java original hardcodes 30, which is
-    # nothing on an 8-row junction and +13,380 veh/h across demo_backup's 446
+    # nothing on an 8-row junction and +13,380 veh/h across buet_du_dmc's 446
     # rows, so a demand sweep usually wants this at 0.
     DEMAND_OFFSET = 30
     simulation_step = 1

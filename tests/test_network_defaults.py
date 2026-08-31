@@ -47,7 +47,7 @@ def test_wide_road_networks_raise_it():
 
 
 def test_dhaka_networks_keep_the_base_limit():
-    for network in ("demo_backup", "kakrail_corridor", "banani_23",
+    for network in ("buet_du_dmc", "kakrail_corridor", "banani_23",
                     "bijoy_sarani"):
         fresh()
         applied = Utilities.apply_network_defaults(network)
@@ -61,8 +61,8 @@ def test_the_demo_turns_its_labels_off_and_nothing_else_does():
     # network must get them back.
     fresh()
     assert Parameters.SHOW_LABELS is True
-    applied = Utilities.apply_network_defaults("demo_backup")
-    assert applied.get("ShowLabels"), "demo_backup no longer pins ShowLabels"
+    applied = Utilities.apply_network_defaults("buet_du_dmc")
+    assert applied.get("ShowLabels"), "buet_du_dmc no longer pins ShowLabels"
     assert Parameters.SHOW_LABELS is False
     fresh()
     assert Parameters.SHOW_LABELS is True, "initialize() must reset ShowLabels"

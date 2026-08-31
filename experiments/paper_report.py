@@ -874,7 +874,8 @@ reproduces <strong>{supported}</strong>.</p>
 
 <h2>What was run</h2>
 {scenario_table(rows)}
-<p class="sub">Network <code>demo_backup</code> (Dhaka topology, 23 links),
+<p class="sub">Network <code>buet_du_dmc</code> (Dhaka topology; named
+<code>demo_backup</code> when the shipped comparison was recorded),
 1800&nbsp;s per run, hybrid car-following, GHR lane change, seeds
 {_esc(', '.join(str(s) for s in seeds))}. Generation rates are per OD pair:
 {_esc(rate_note)}.</p>

@@ -57,11 +57,19 @@ END_TIME = 90
 
 
 def networks() -> list[str]:
-    """Every folder under ``input/`` that is a network."""
+    """Every folder under ``input/`` that is a shipped network.
+
+    Networks made by the GUI's map-import dialog are excluded -- they carry
+    an ``osm_extract.geojson`` -- because they are user artifacts, not part
+    of the parity contract: the OSM data behind them changes with every
+    fetch, so no baseline for one could ever be stable.
+    """
     root = os.path.join(REPO, "input")
     return sorted(
         name for name in os.listdir(root)
-        if os.path.isfile(os.path.join(root, name, "link.txt")))
+        if os.path.isfile(os.path.join(root, name, "link.txt"))
+        and not os.path.isfile(
+            os.path.join(root, name, "osm_extract.geojson")))
 
 
 def _run(network: str) -> tuple[dict[str, str], str]:
