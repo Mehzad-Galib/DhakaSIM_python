@@ -32,6 +32,10 @@ input/.tilecache/
 # link.txt plus link.straight.txt are what actually matter.
 input/*/osm_roads.json
 
+# The raw extract a GUI map import was built from -- provenance, kept beside
+# the network it produced, but re-downloadable and megabytes at city scale.
+input/*/osm_extract.geojson
+
 # Knowledge graph: ~5 MB of generated artefacts, rebuilt from source by
 # `graphify update .`, so there is nothing in it worth versioning.
 graphify-out/

@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import threading
 import webbrowser
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -22,6 +23,7 @@ from .javacompat import Color, JavaRandom, jbool, jbool_str, jint, jround, jstr
 from .parameters import Parameters
 from .processor import Processor
 from . import basemap as basemap_module
+from . import map_import
 from . import render3d
 from . import road_geometry
 from . import utilities as Utilities
@@ -1843,15 +1845,48 @@ class OptionPanel:
         holder = self._row("Intersection",
                            "Each is a surveyed junction with its own demand, "
                            "vehicle mix and road widths.")
-        single = [n for n in networks if n in self.SINGLE_JUNCTIONS]
-        multi = [n for n in networks if n not in self.SINGLE_JUNCTIONS]
-        for caption, group in (("Single intersection", single),
-                               ("Multi intersection", multi)):
+        # Imported maps sit in groups of their own, under the shipped ones,
+        # split by what the importer said they were.  Only imported groups
+        # carry the remove affordance -- map_import.remove refuses anything
+        # else, but the control should not even be offered for survey data.
+        imported = [n for n in networks if map_import.is_imported(n)]
+        single = [n for n in networks
+                  if n in self.SINGLE_JUNCTIONS and n not in imported]
+        multi = [n for n in networks
+                 if n not in self.SINGLE_JUNCTIONS and n not in imported]
+        groups = (
+            ("Single intersection", single, False),
+            ("Multi intersection", multi, False),
+            ("Imported (single intersection)",
+             [n for n in imported
+              if map_import.imported_kind(n) == "single"], True),
+            ("Imported (multi intersection)",
+             [n for n in imported
+              if map_import.imported_kind(n) != "single"], True),
+        )
+        for caption, group, removable in groups:
             if not group:
                 continue
-            tk.Label(holder, text=caption, font=("Segoe UI", level["group"]),
-                     background=_UI["panel"], foreground=_UI["faint"]).pack(
-                anchor="w", pady=(0, 2))
+            head = tk.Frame(holder, background=_UI["panel"])
+            head.pack(anchor="w", fill="x", pady=(0, 2))
+            tk.Label(head, text=caption, font=("Segoe UI", level["group"]),
+                     background=_UI["panel"],
+                     foreground=_UI["faint"]).pack(side="left")
+            if removable:
+                # Inline with the caption rather than a row of its own,
+                # which would cost height the density ladder does not have.
+                remover = tk.Label(
+                    head, text="remove selected…",
+                    font=("Segoe UI", level["group"], "underline"),
+                    background=_UI["panel"], foreground=_UI["faint"],
+                    cursor="hand2")
+                remover.pack(side="left", padx=(12, 0))
+                remover.bind("<Button-1>",
+                             lambda _e: self._remove_import())
+                remover.bind("<Enter>", lambda _e, w=remover:
+                             w.configure(foreground=_UI["muted"]))
+                remover.bind("<Leave>", lambda _e, w=remover:
+                             w.configure(foreground=_UI["faint"]))
             # Four tiles abreast is 440 pixels, which two columns of them
             # cannot afford on a 1280-wide screen; the densest layout wraps
             # them instead.
@@ -1993,6 +2028,10 @@ class OptionPanel:
         inner.pack(fill="x", padx=level["pad"][0] * 2, pady=level["foot_pad"])
         self._button(inner, "Reset to defaults",
                      self.dhaka_sim_frame.show_options).pack(side="left")
+        # In the footer, not the form: a footer button costs no height, and
+        # the density ladder has none to give (see CLAUDE.md).
+        self._button(inner, "Import map…", self._open_import).pack(
+            side="left", padx=(10, 0))
         start = self._button(inner, "Start simulation", self.start_simulation,
                              primary=True)
         start.pack(side="right")
@@ -2004,6 +2043,41 @@ class OptionPanel:
                 inner, text="", font=("Segoe UI", level["group"] + 1),
                 background=_UI["band"], foreground=_UI["muted"], anchor="w")
             self._hint.pack(side="left", fill="x", expand=True, padx=16)
+
+    def _open_import(self):
+        """Open the map-import dialog; a second click fronts the first one."""
+        dialog = getattr(self, "_import_dialog", None)
+        if dialog is not None and dialog.top.winfo_exists():
+            dialog.top.lift()
+            dialog.top.focus_set()
+            return
+        self._import_dialog = _ImportDialog(self)
+
+    def _remove_import(self):
+        """Delete the selected imported network, after asking.
+
+        Only imports are removable: the affordance sits on the imported
+        groups alone, and ``map_import.remove`` refuses anything without
+        the import marker, so a shipped network is safe from both ends.
+        """
+        network = self.network_var.get().strip()
+        if not map_import.is_imported(network):
+            messagebox.showinfo(
+                "Remove imported map",
+                "Select an imported map's tile first. The shipped survey "
+                "networks cannot be removed.")
+            return
+        if not messagebox.askyesno(
+                "Remove imported map",
+                f"Delete input/{network}?\n\nThis removes the imported "
+                "network, its imagery and its demand from disk. It can be "
+                "re-imported later."):
+            return
+        map_import.remove(network)
+        self.network_var.set(self.SINGLE_JUNCTIONS[0])
+        self._build_form()
+        self._viewport = None
+        self._fit_to_window(force=True)
 
     def _on_network_change(self):
         applied = Utilities.apply_network_defaults(self.network_var.get())
@@ -2113,6 +2187,604 @@ class OptionPanel:
         self.dhaka_sim_frame.show_simulation()
 
 
+class _ImportDialog:
+    """The start screen's "Import map" window.
+
+    A thin shell over :mod:`dhakasim.map_import`, which is itself a shell
+    over the command-line chain -- everything this window does, the scripts
+    can do.  The fetching and building run in a worker thread; tkinter is
+    only ever touched from the Tk thread, so the worker talks through a
+    queue the dialog polls with ``after``.
+    """
+
+    RADIUS_CHOICES = ("200", "300", "500", "750", "1000", "1500", "2000",
+                      "3000")
+    PREVIEW_W = 380
+    PREVIEW_H = 380
+
+    def __init__(self, option):
+        import queue as queue_module
+        self.option = option
+        self._queue = queue_module.Queue()
+        self._job = None
+        self._worker = None
+        self._cancelled = False
+        self._done = False
+
+        top = self.top = tk.Toplevel(option.frame)
+        top.title("Import a map")
+        top.configure(background=_UI["ground"])
+        top.transient(option.frame.winfo_toplevel())
+        top.protocol("WM_DELETE_WINDOW", self._close)
+        top.resizable(False, False)
+
+        panel = self.panel = tk.Frame(
+            top, background=_UI["panel"], padx=18, pady=14,
+            highlightthickness=1, highlightbackground=_UI["edge"])
+        panel.pack(fill="both", expand=True, padx=14, pady=14)
+
+        tk.Label(panel, text="Import a map from OpenStreetMap",
+                 font=("Segoe UI Semibold", 13), background=_UI["panel"],
+                 foreground=_UI["accent_text"]).pack(anchor="w")
+        tk.Label(panel,
+                 text="Fetches the real roads, builds a runnable network, "
+                      "downloads the background map and bends the links "
+                      "onto the streets. The demand is synthetic -- routes "
+                      "at a uniform rate, not surveyed counts -- so the "
+                      "result is for demonstration until real demand is "
+                      "supplied.",
+                 font=("Segoe UI", 9), background=_UI["panel"],
+                 foreground=_UI["faint"], wraplength=500,
+                 justify="left").pack(anchor="w", pady=(2, 10))
+
+        self.where_var = tk.StringVar()
+        self.name_var = tk.StringVar()
+        self.radius_var = tk.StringVar(value="1000")
+        self.roads_var = tk.StringVar(value=map_import.CLASS_PRESETS[0][0])
+        self.dual_var = tk.StringVar(value="Fuse into one road")
+        self.kind_var = tk.StringVar(value="Multi intersection")
+
+        # Form on the left, preview map on the right -- side by side rather
+        # than stacked, or the dialog with the log under it would outgrow a
+        # 768-high screen.
+        content = tk.Frame(panel, background=_UI["panel"])
+        content.pack(anchor="w", fill="x")
+        self.form = tk.Frame(content, background=_UI["panel"])
+        self.form.pack(side="left", anchor="n")
+
+        self._caption("Where",
+                      "A place name, \"lat, lon\", or a pasted Google Maps "
+                      "or OpenStreetMap link.")
+        where_box = self._entry(self.where_var, 52)
+        where_box.bind("<Return>", lambda _e: self._preview_clicked())
+        self._caption("Call it",
+                      "The name the start screen will show. Left blank, the "
+                      "place's own name is used.")
+        self._entry(self.name_var, 36)
+        self._caption("Radius", "Metres of city around the point to import.")
+        _Segmented(self._line(), self.RADIUS_CHOICES, self.radius_var,
+                   font=("Segoe UI Semibold", 10),
+                   pad=(10, 4)).pack(anchor="w")
+        self._caption("Roads",
+                      "Main roads keeps the network light; every extra "
+                      "class multiplies the links.")
+        _Segmented(self._line(),
+                   [label for label, _ in map_import.CLASS_PRESETS],
+                   self.roads_var, font=("Segoe UI Semibold", 10),
+                   pad=(10, 4)).pack(anchor="w")
+        self._caption("Divided roads",
+                      "Fusing a dual carriageway into one two-way link "
+                      "matches the surveyed networks.")
+        _Segmented(self._line(), ["Fuse into one road", "Keep separate"],
+                   self.dual_var, font=("Segoe UI Semibold", 10),
+                   pad=(10, 4)).pack(anchor="w")
+        self._caption("Kind",
+                      "Single adds a step: pick the junction and its legs "
+                      "after the fetch.")
+        _Segmented(self._line(),
+                   ["Single intersection", "Multi intersection"],
+                   self.kind_var, font=("Segoe UI Semibold", 10),
+                   pad=(10, 4)).pack(anchor="w")
+
+        preview_box = tk.Frame(content, background=_UI["panel"])
+        preview_box.pack(side="left", anchor="n", padx=(18, 0))
+        self.preview = tk.Canvas(
+            preview_box, width=self.PREVIEW_W, height=self.PREVIEW_H,
+            background=_UI["ground"], highlightthickness=1,
+            highlightbackground=_UI["edge"])
+        self.preview.pack()
+        self.preview.create_text(
+            self.PREVIEW_W / 2, self.PREVIEW_H / 2,
+            text="Press Preview to see the spot\nand the import circle",
+            justify="center", font=("Segoe UI", 9), fill=_UI["faint"])
+        self.preview_label = tk.Label(
+            preview_box, text="", font=("Segoe UI", 8),
+            background=_UI["panel"], foreground=_UI["faint"],
+            wraplength=self.PREVIEW_W, justify="left")
+        self.preview_label.pack(anchor="w", pady=(3, 0))
+
+        buttons = tk.Frame(panel, background=_UI["panel"])
+        buttons.pack(fill="x", pady=(12, 8))
+        self._import_btn = option._button(buttons, "Import", self._start,
+                                          primary=True)
+        self._import_btn.pack(side="left")
+        option._button(buttons, "Preview", self._preview_clicked).pack(
+            side="left", padx=(10, 0))
+        option._button(buttons, "Close", self._close).pack(
+            side="left", padx=(10, 0))
+        self.status = tk.Label(buttons, text="", font=("Segoe UI", 9),
+                               background=_UI["panel"],
+                               foreground=_UI["muted"], anchor="w")
+        self.status.pack(side="left", padx=(14, 0))
+
+        self.log = tk.Text(panel, height=10, relief="flat",
+                           background=_UI["ground"], foreground=_UI["muted"],
+                           insertbackground=_UI["text"], font=("Consolas", 8),
+                           state="disabled", wrap="word",
+                           highlightthickness=1,
+                           highlightbackground=_UI["edge"])
+        self.log.pack(fill="both", expand=True)
+
+        # The preview's moving parts.  The circle follows the radius strip
+        # live once a spot has been located; a generation counter lets a
+        # slow tile fetch that has been superseded fall on the floor.
+        self._located = None
+        self._preview_gen = 0
+        self._preview_photos = []
+        # The junction picker's state: None until a single-intersection
+        # import reaches the pick stage.
+        self._pick = None
+        self._picking = False
+        self.preview.bind("<Button-1>", self._preview_click)
+        self.radius_var.trace_add("write", self._radius_changed)
+        # A single intersection wants a couple of hundred metres, not a
+        # neighbourhood; the radius follows the kind so the default is
+        # never a 200 m-scale junction drawn from a kilometre of city.
+        self.kind_var.trace_add(
+            "write", lambda *_a: self.radius_var.set(
+                "300" if self.kind_var.get().startswith("Single")
+                else "1000"))
+
+        # One polling loop for the dialog's whole life: the import and the
+        # preview both answer through the same queue.
+        self._poll()
+
+    # -- small builders ----------------------------------------------------
+
+    def _caption(self, title, text):
+        row = tk.Frame(self.form, background=_UI["panel"])
+        row.pack(anchor="w", fill="x", pady=(6, 0))
+        tk.Label(row, text=title, font=("Segoe UI Semibold", 10),
+                 background=_UI["panel"], foreground=_UI["text"]).pack(
+            side="left")
+        tk.Label(row, text="  " + text, font=("Segoe UI", 8),
+                 background=_UI["panel"], foreground=_UI["faint"]).pack(
+            side="left")
+
+    def _line(self):
+        line = tk.Frame(self.form, background=_UI["panel"])
+        line.pack(anchor="w", fill="x", pady=(2, 0))
+        return line
+
+    def _entry(self, variable, width):
+        box = tk.Entry(self._line(), textvariable=variable, width=width,
+                       font=("Consolas", 10), relief="flat",
+                       background=_UI["seg_off"], foreground=_UI["text"],
+                       insertbackground=_UI["accent"], highlightthickness=2,
+                       highlightbackground=_UI["edge"],
+                       highlightcolor=_UI["accent"])
+        box.pack(side="left", ipady=3, ipadx=6)
+        return box
+
+    def _append(self, line):
+        self.log.configure(state="normal")
+        self.log.insert("end", line + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _set_status(self, text, error=False):
+        self.status.configure(
+            text=text,
+            foreground="#E86A6A" if error else _UI["accent_text"])
+
+    # -- the work ----------------------------------------------------------
+
+    def _start(self):
+        if self._done:
+            return
+        if self._picking:
+            # The button reads "Finish import" at this stage.
+            pick = self._pick
+            if pick is None or pick["junction"] is None:
+                self._set_status("click the junction on the map first",
+                                 error=True)
+                return
+            if len(pick["legs"]) < 2:
+                self._set_status("keep at least two legs", error=True)
+                return
+            self._picking = False
+            self._import_btn.configure(text="Cancel")
+            self._set_status("finishing the import...")
+            self._worker = threading.Thread(
+                target=self._finish_work, args=(tuple(pick["legs"]),),
+                daemon=True)
+            self._worker.start()
+            return
+        if self._worker is not None:
+            # The button reads Cancel while a run is up.
+            self._cancelled = True
+            if self._job is not None:
+                self._job.cancel()
+            self._set_status("cancelling...")
+            return
+        where = self.where_var.get().strip()
+        if not where:
+            self._set_status("say where -- a name, a link, or lat, lon",
+                             error=True)
+            return
+        # Everything the worker needs is read here, on the Tk thread;
+        # tkinter variables are not safe to read from another thread.
+        name = self.name_var.get().strip()
+        radius = float(self.radius_var.get())
+        classes = dict(map_import.CLASS_PRESETS)[self.roads_var.get()]
+        merge = self.dual_var.get() == "Fuse into one road"
+        kind = ("single" if self.kind_var.get().startswith("Single")
+                else "multi")
+        self._cancelled = False
+        self._import_btn.configure(text="Cancel")
+        self._set_status("working -- this takes a minute or two")
+        self._worker = threading.Thread(
+            target=self._work,
+            args=(where, name, radius, classes, merge, kind), daemon=True)
+        self._worker.start()
+
+    def _work(self, where, name, radius, classes, merge, kind):
+        post = self._queue.put
+
+        def log(line):
+            post(("log", line))
+
+        try:
+            point = map_import.parse_location(where)
+            if point is None:
+                log(f'looking up "{where}"...')
+                hit = map_import.geocode(where)
+                if hit is None:
+                    raise RuntimeError(f'nowhere called "{where}" was found')
+                lat, lon, display = hit
+                log(f"found {display}")
+                if not name:
+                    # The user's own words, not the geocoder's display name:
+                    # for Dhaka that comes back in Bengali, which the ASCII
+                    # folder slug reduces to nothing.
+                    name = where
+            else:
+                lat, lon = point
+                if not name:
+                    name = f"Imported {lat:.4f}, {lon:.4f}"
+            folder = map_import.slugify(name)
+            self._job = map_import.ImportJob(
+                name, folder, lat, lon, radius, classes, merge, kind)
+            if kind == "single":
+                # Stop after the build and hand the network to the
+                # junction picker; the rest runs from _finish_work once
+                # the user has chosen the junction and its legs.
+                out_dir = self._job.fetch_and_build(
+                    log, lambda: self._cancelled)
+                try:
+                    shape = map_import.read_network_shape(out_dir)
+                    if not any(n["junction"] for n in shape[1].values()):
+                        raise RuntimeError(
+                            "no junction with three or more legs in the "
+                            "extract -- try a slightly larger radius")
+                    tiles = map_import.preview_tiles(
+                        lat, lon, radius, self.PREVIEW_W, self.PREVIEW_H)
+                except BaseException:
+                    self._job.discard()
+                    raise
+                post(("pick", radius, tiles, shape))
+            else:
+                self._job.run(log, lambda: self._cancelled)
+                post(("done", folder, tuple(self._job.warnings)))
+        except Exception as exc:
+            post(("error", str(exc)))
+
+    def _finish_work(self, keep):
+        post = self._queue.put
+
+        def log(line):
+            post(("log", line))
+
+        job = self._job
+        try:
+            log(f"keeping {len(keep)} legs of the chosen junction...")
+            map_import.prune_to_junction(job.out_dir, keep)
+            folder = job.finish(log, lambda: self._cancelled)
+            post(("done", folder, tuple(job.warnings)))
+        except Exception as exc:
+            job.discard()
+            post(("error", str(exc)))
+
+    def _poll(self):
+        """The dialog's one message pump, running for its whole life."""
+        if not self.top.winfo_exists():
+            return
+        while not self._queue.empty():
+            message = self._queue.get_nowait()
+            kind = message[0]
+            if kind == "log":
+                self._append(message[1])
+            elif kind == "error":
+                self._worker = None
+                self._job = None
+                self._import_btn.configure(text="Import")
+                self._set_status(message[1], error=True)
+                self._append("FAILED: " + message[1])
+            elif kind == "done":
+                self._worker = None
+                self._job = None
+                self._done = True
+                self._finish(message[1], message[2])
+            elif kind == "preview":
+                _kind, gen, lat, lon, display, radius, mpp, placed = message
+                if gen == self._preview_gen:
+                    self._located = (lat, lon, display)
+                    self._render_preview(radius, mpp, placed, display)
+            elif kind == "preview_error":
+                if message[1] == self._preview_gen:
+                    self._set_status(message[2], error=True)
+            elif kind == "pick":
+                self._worker = None
+                self._picking = True
+                self._import_btn.configure(text="Finish import")
+                self._render_picker(*message[1:])
+        self.top.after(120, self._poll)
+
+    # -- the preview map ---------------------------------------------------
+
+    def _preview_clicked(self):
+        if self._worker is not None or self._done:
+            return
+        where = self.where_var.get().strip()
+        if not where:
+            self._set_status("say where first -- then Preview", error=True)
+            return
+        self._preview_gen += 1
+        self._set_status("fetching the preview...")
+        threading.Thread(
+            target=self._preview_work,
+            args=(self._preview_gen, where, float(self.radius_var.get())),
+            daemon=True).start()
+
+    def _radius_changed(self, *_args):
+        """Once a spot is located, the circle follows the radius strip."""
+        if self._located is None or self._worker is not None or self._done:
+            return
+        try:
+            radius = float(self.radius_var.get())
+        except ValueError:
+            return
+        lat, lon, display = self._located
+        self._preview_gen += 1
+        threading.Thread(
+            target=self._tiles_work,
+            args=(self._preview_gen, lat, lon, display, radius),
+            daemon=True).start()
+
+    def _preview_work(self, gen, where, radius):
+        try:
+            point = map_import.parse_location(where)
+            if point is None:
+                hit = map_import.geocode(where)
+                if hit is None:
+                    raise RuntimeError(f'nowhere called "{where}" was found')
+                lat, lon, display = hit
+            else:
+                lat, lon = point
+                display = f"{lat:.5f}, {lon:.5f}"
+        except Exception as exc:
+            self._queue.put(("preview_error", gen, str(exc)))
+            return
+        self._tiles_work(gen, lat, lon, display, radius)
+
+    def _tiles_work(self, gen, lat, lon, display, radius):
+        try:
+            mpp, placed, _view = map_import.preview_tiles(
+                lat, lon, radius, self.PREVIEW_W, self.PREVIEW_H)
+        except Exception as exc:
+            self._queue.put(("preview_error", gen,
+                             f"no preview -- check the connection ({exc})"))
+            return
+        self._queue.put(("preview", gen, lat, lon, display, radius,
+                         mpp, placed))
+
+    def _render_preview(self, radius, mpp, placed, display):
+        canvas = self.preview
+        canvas.delete("all")
+        # PhotoImages are dropped by Tk the moment Python stops referencing
+        # them; the list keeps this frame's tiles alive.
+        self._preview_photos = []
+        for cx, cy, path in placed:
+            try:
+                photo = tk.PhotoImage(file=path)
+            except tk.TclError:
+                continue                      # one bad tile is not fatal
+            self._preview_photos.append(photo)
+            canvas.create_image(cx, cy, image=photo, anchor="nw")
+        cx, cy = self.PREVIEW_W / 2.0, self.PREVIEW_H / 2.0
+        r = radius / mpp
+        # A dark underline ring keeps the accent ring visible over the
+        # map's pale ground.
+        canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                           outline="#0A130D", width=4)
+        canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                           outline=_UI["accent"], width=2)
+        canvas.create_oval(cx - 3, cy - 3, cx + 3, cy + 3,
+                           fill=_UI["accent"], outline="#0A130D")
+        canvas.create_text(self.PREVIEW_W - 5, self.PREVIEW_H - 4,
+                           text="(c) OpenStreetMap", anchor="se",
+                           font=("Segoe UI", 7), fill="#5A5A5A")
+        self.preview_label.configure(
+            text=f"{display} -- circle is the {radius:.0f} m import radius")
+        self._set_status("previewed -- adjust the radius, or Import")
+
+    # -- the junction picker -----------------------------------------------
+
+    def _render_picker(self, radius, tiles, shape):
+        """The staged network over its tiles, ready to be clicked on."""
+        mpp, placed, (zoom, gx0, gy0) = tiles
+        links, nodes, to_latlon = shape
+        canvas = self.preview
+        canvas.delete("all")
+        self._preview_photos = []
+        for cx, cy, path in placed:
+            try:
+                photo = tk.PhotoImage(file=path)
+            except tk.TclError:
+                continue
+            self._preview_photos.append(photo)
+            canvas.create_image(cx, cy, image=photo, anchor="nw",
+                                tags=("tile",))
+
+        def to_canvas(x_m, y_m):
+            plat, plon = to_latlon(x_m, y_m)
+            tx, ty = map_import.deg_to_tile(plat, plon, zoom)
+            return (tx * map_import.TILE_PIXELS - gx0,
+                    ty * map_import.TILE_PIXELS - gy0)
+
+        self._pick = {
+            "links": {lid: [to_canvas(x, y) for x, y in link["points"]]
+                      for lid, link in links.items()},
+            "width": {lid: link["width"] for lid, link in links.items()},
+            "nodes": {nid: to_canvas(node["x"], node["y"])
+                      for nid, node in nodes.items() if node["junction"]},
+            "incident": {nid: list(node["links"])
+                         for nid, node in nodes.items()
+                         if node["junction"]},
+            "mpp": mpp, "junction": None, "legs": set(),
+        }
+        self._redraw_pick()
+        self.preview_label.configure(
+            text="Click the junction you want. Its legs turn green; click "
+                 "a leg to drop or restore it (at least two stay), then "
+                 "Finish import.")
+        self._set_status("click the junction on the map")
+
+    def _redraw_pick(self):
+        canvas = self.preview
+        canvas.delete("ov")
+        pick = self._pick
+        chosen = pick["junction"]
+        arms = pick["incident"].get(chosen, ()) if chosen is not None else ()
+        # Casing under every link, colour on top -- a bare line blends
+        # into the map's own road colours (this junction sits among red
+        # hospital icons that read as markers, so the network has to be
+        # unmistakably drawn, not hinted).
+        styled = []
+        for lid, pts in pick["links"].items():
+            width = max(4.0, pick["width"][lid] / pick["mpp"])
+            if lid in arms:
+                kept = lid in pick["legs"]
+                colour = _UI["accent"] if kept else "#E05B5B"
+                dash = () if kept else (7, 5)
+                width = max(5.0, width)
+            else:
+                colour, dash = "#6E7B88", ()
+            flat = [value for point in pts for value in point]
+            canvas.create_line(*flat, fill="#14100E", width=width + 4,
+                               capstyle="round", joinstyle="round",
+                               tags=("ov",))
+            styled.append((flat, colour, width, dash))
+        for flat, colour, width, dash in styled:
+            canvas.create_line(*flat, fill=colour, width=width, dash=dash,
+                               capstyle="round", joinstyle="round",
+                               tags=("ov",))
+        for nid, (cx, cy) in pick["nodes"].items():
+            r = 9 if nid == chosen else 7
+            fill = _UI["accent"] if nid == chosen else "#FFB02E"
+            canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=fill,
+                               outline="#14100E", width=2, tags=("ov",))
+        canvas.create_text(self.PREVIEW_W - 5, self.PREVIEW_H - 4,
+                           text="(c) OpenStreetMap", anchor="se",
+                           font=("Segoe UI", 7), fill="#5A5A5A",
+                           tags=("ov",))
+
+    def _preview_click(self, event):
+        if not self._picking or self._pick is None:
+            return
+        pick = self._pick
+        # A junction dot first -- clicking one (re)selects the junction
+        # and starts with every leg kept.
+        best, best_d = None, 16.0
+        for nid, (cx, cy) in pick["nodes"].items():
+            d = math.hypot(event.x - cx, event.y - cy)
+            if d < best_d:
+                best, best_d = nid, d
+        if best is not None:
+            pick["junction"] = best
+            pick["legs"] = set(pick["incident"][best])
+            self._redraw_pick()
+            self._set_status(f"{len(pick['legs'])} legs kept -- click a "
+                             "leg to toggle, then Finish import")
+            return
+        if pick["junction"] is None:
+            return
+        # Otherwise the nearest of the chosen junction's legs toggles.
+        target, target_d = None, 9.0
+        for lid in pick["incident"][pick["junction"]]:
+            pts = pick["links"][lid]
+            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                d = _point_segment_px(event.x, event.y, ax, ay, bx, by)
+                if d < target_d:
+                    target, target_d = lid, d
+        if target is None:
+            return
+        if target in pick["legs"]:
+            if len(pick["legs"]) <= 2:
+                self._set_status("keep at least two legs", error=True)
+                return
+            pick["legs"].discard(target)
+        else:
+            pick["legs"].add(target)
+        self._redraw_pick()
+        self._set_status(f"{len(pick['legs'])} legs kept")
+
+    def _finish(self, folder, warnings):
+        for warning in warnings:
+            self._append("WARNING: " + warning)
+        # Select the new network and rebuild the form so its tile exists --
+        # the same sequence _refit_trimmed uses.
+        option = self.option
+        option.network_var.set(folder)
+        option._build_form()
+        option._viewport = None
+        option._fit_to_window(force=True)
+        self._append(f"input/{folder} is ready and selected on the start "
+                     "screen.")
+        self._set_status("imported -- close this window and press Start")
+        self._import_btn.configure(text="Imported")
+
+    def _close(self):
+        self._cancelled = True
+        if self._job is not None:
+            self._job.cancel()
+            if self._picking:
+                # An abandoned pick leaves a staged folder that has a
+                # node.txt and no demand -- a broken start-screen tile.
+                self._job.discard()
+        self.top.destroy()
+
+
+def _point_segment_px(px, py, ax, ay, bx, by):
+    """Distance from a point to a segment, in canvas pixels."""
+    dx, dy = bx - ax, by - ay
+    span = dx * dx + dy * dy
+    if span <= 1e-9:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / span))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
 def _place_name(network: str) -> str:
     """What to call a network on screen.
 
@@ -2122,8 +2794,12 @@ def _place_name(network: str) -> str:
     parenthetical, which is a note rather than a name.
 
     A place name that says less than the folder does is not a name: the
-    synthetic network's file says "Dhaka", which is true of four of the
-    others too, so it falls back to "Demo Backup".
+    old synthetic demo's file said "Dhaka", which was true of four of the
+    others too, so it fell back to the folder.  Said-ness is counted in
+    alphanumeric tokens rather than space-separated words, because a
+    hyphenated name is not saying less -- "BUET-DU-DMC Area" is four
+    tokens against the folder ``buet_du_dmc``'s three, and splitting on
+    spaces alone read it as two and threw the real name away.
     """
     folder = network.replace("_", " ").title()
     try:
@@ -2133,7 +2809,8 @@ def _place_name(network: str) -> str:
     except OSError:
         return folder
     place = re.sub(r"\s*\([^)]*\)", "", place).split(",")[0].strip()
-    if not place or (len(place.split()) < len(folder.split())):
+    if not place or (len(re.findall(r"[A-Za-z0-9]+", place))
+                     < len(re.findall(r"[A-Za-z0-9]+", folder))):
         return folder
     return place
 

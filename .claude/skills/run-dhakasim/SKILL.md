@@ -94,7 +94,9 @@ needed); all 12 pass, ~1 min total.
   `python fetch_basemap.py --all --provider osm` (~1 min; use
   `--provider osm`, the street rendering — the script's esri default
   is photography, which the project deliberately moved away from).
-  `demo_backup` records no centre and stays imageless.
+  `buet_du_dmc` (the BUET-DU-DMC demo, formerly `demo_backup`) carries an
+  owner-supplied screenshot as its basemap, which the fetch cannot
+  rebuild — restore its `basemap.png`/`basemap.txt` from a backup copy.
 - **`root.lift()` does not put the window above the focused app**, and
   `ImageGrab` photographs the screen — so a covered window screenshots
   as whatever covers it (verified: got a picture of the chat client).

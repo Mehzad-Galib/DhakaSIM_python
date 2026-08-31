@@ -44,7 +44,10 @@ Kakrail Mor hazing into the distance](docs/images/view3d_kakrail_corridor.png)
   each network's `geometry.txt`; `GeometryMode Off` is the Java-parity mode.
 - Build your own network from OpenStreetMap with `make_network.py`, fetch map
   imagery for it with `fetch_basemap.py`, and bend its links onto the real
-  roads with `fit_roads.py` — see the sections below.
+  roads with `fit_roads.py` — see the sections below. Or do all of it from
+  the GUI: **Import map…** on the start screen takes a place name or a
+  pasted Google Maps / OpenStreetMap link and produces a runnable network,
+  imagery and all.
 
 **Seeing a run**
 
@@ -388,7 +391,7 @@ input/kakrail_corridor/      Kakrail Church + Kakrail Mosque (2 junctions)
 input/bijoy_sarani/          Bijoy Sarani
 input/banani_23/             Banani 23 Super Market
 input/banani_27/             Banani 27 Kacha Bazar
-input/demo_backup/           BUET-DU-DMC Area (multi-intersection demo)
+input/buet_du_dmc/           BUET-DU-DMC Area (multi-intersection demo)
 ```
 
 Pick one under **Junction** on the GUI's start screen, or set
@@ -439,7 +442,7 @@ matching route. `run_sim.py` regenerates both from `link.txt` + `node.txt`,
 writing into the selected network's folder:
 
 ```bash
-python run_sim.py --network demo_backup
+python run_sim.py --network buet_du_dmc
 ```
 
 The survey networks derive `demand.txt` from measured traffic counts, so it is
@@ -867,7 +870,7 @@ otherwise.
   `KeepClearMode Off --set SignalChangeDuration=1` restores the original
   behaviour byte-for-byte.
 - **Every demand row gets `+30` vehicles/hour.** Negligible on an 8-row
-  junction, but `demo_backup` has 446 OD pairs, so it adds 13,380 veh/h.
+  junction, but `buet_du_dmc` has 446 OD pairs, so it adds 13,380 veh/h.
   `DemandOffset 0` removes it.
 - **`DLC_model 1` used to crash with `ObjectMode On`.** The GHR branch of
   `is_object_in_proximity` evaluated the GHR acceleration against the cached
@@ -916,6 +919,52 @@ otherwise.
   experiments, or each CSV grows a row per run. (HTML reports at the
   `statistics/` root are per-run, time-stamped files and are not overwritten.)
 - **The GUI writes `trace.txt` every frame**, which grows quickly.
+
+## Importing a map from the GUI
+
+**Import map…** in the start screen's footer does the whole of the next
+section's pipeline from one small dialog. Say where — a place name
+("Mirpur 10, Dhaka"), a `lat, lon` pair, or a link pasted straight from
+Google Maps or OpenStreetMap (a dropped pin's coordinates are read out of
+the URL) — pick a radius and which road classes to keep, and Import. The
+dialog geocodes the name if one was given; **Preview** then shows the spot
+on an OpenStreetMap panel with a circle marking exactly what the radius
+will take, and the circle follows the radius strip live (the map re-zooms
+so the circle always fits). Import fetches the roads from Overpass
+(three mirrors, because the main one is often busy), builds the network,
+generates routes and demand, downloads the OpenStreetMap background
+imagery, bends the links onto the real roads, and lands you back on the
+start screen with the new network's tile selected. A failed import cleans
+up after itself; a failed basemap fetch or road fit only warns, since the
+network is runnable without them.
+
+The dialog's **Kind** choice — single intersection or a multi-intersection
+network — changes what the import does. **Single intersection adds a
+picking step**: after the roads are fetched and built (the radius defaults
+down to 300 m, and 200 m is offered), the staged network is drawn over the
+map panel with its junctions marked, and you click the junction you want.
+Its legs turn green; clicking a leg drops it (dashed red) or restores it,
+at least two must stay, and **Finish import** then cuts the network down
+to that junction and those legs before the routes, demand, imagery and
+road fitting are generated — so a single-intersection import really is one
+junction at a sensible scale, not a neighbourhood that happens to contain
+one. Closing the dialog mid-pick discards the staged folder. The Kind also
+decides which start-screen group the new tile joins: imported
+maps get groups of their own, **Imported (single intersection)** and
+**Imported (multi intersection)**, under the shipped networks. Each
+imported group's caption carries a **remove selected…** link: select the
+imported tile, click it, confirm, and the network is deleted from disk and
+the form falls back to a shipped junction. Only imports are removable —
+the affordance never appears on the survey networks, and the underlying
+`map_import.remove` refuses any folder without the import marker.
+
+Two things to know about what comes out. The **demand is synthetic** —
+routes between boundary nodes at a uniform rate, not surveyed counts — so
+an imported network demonstrates the simulator rather than measuring a
+city; supply real counts in `demand.txt` for that. And imported networks
+are **not part of the parity baseline**: `hash_run.py` skips any folder
+carrying an `osm_extract.geojson` (the import's provenance file), because
+the OSM data behind it changes with every fetch.
 
 ## Building a network from OpenStreetMap
 
@@ -1056,7 +1105,7 @@ two networks with a roundabout and on no others. It now re-reads the survey
 files for the anchor, and a test moves a network under it to check that the
 imagery stays put.
 
-All seven shipped networks record a centre and carry imagery; `demo_backup`
+All seven shipped networks record a centre and carry imagery; `buet_du_dmc`
 (BUET-DU-DMC Area) carries an owner-supplied Google Maps hybrid screenshot
 rather than fetched tiles — georeferenced by registering the network's own
 centrelines against the image's yellow-road mask — because the network exists
@@ -1335,7 +1384,7 @@ mean, in **vehicles per hour per OD pair**. The harness's defaults are
 100 / 400 / 800, which are *not* the rates `run_sim.py` builds a network's
 `demand.txt` from. Those come from `DemandType` and divide a total across the
 boundary nodes — `LOW_RATE // acceptable_node` and so on — which for
-`demo_backup` (BUET-DU-DMC Area: 38 boundary nodes, 446 OD pairs) works out to:
+`buet_du_dmc` (BUET-DU-DMC Area: 38 boundary nodes, 446 OD pairs) works out to:
 
 | DemandType | per OD pair |
 | --- | --- |
@@ -1343,7 +1392,7 @@ boundary nodes — `LOW_RATE // acceptable_node` and so on — which for
 | 1 medium | 24 |
 | 2 high | 27 |
 
-The shipped `input/demo_backup/demand.txt` is a uniform 27, i.e. the high one.
+The shipped `input/buet_du_dmc/demand.txt` is a uniform 27, i.e. the high one.
 So the harness's default "low" already sits nearly four times beyond the
 simulator's *high*, and its medium and high are further out still. That is a
 legitimate stress test, but it is a different demand range from the one the

@@ -874,8 +874,9 @@ sitting in the buffer while a junction patch is filled comes back out on top
 of it.
 
 **Measured again 26 Aug 2026**, after the static layer, the speck tier and
-the part cull went in (see Scene3D above). One frame of demo_backup (then the
-Mohakhali network, before Shahbag replaced it) at
+the part cull went in (see Scene3D above). One frame of the demo network
+(the folder now named buet_du_dmc, then demo_backup, and at measurement
+time still holding the Mohakhali network, before Shahbag replaced it) at
 1920x991, 191 vehicles plus ~500 side-friction props, `paint_component` +
 `update_idletasks`, median of 24: solid was 99 ms at 2371 items; a full frame
 is now 56-58 ms at ~960 items and a reused-static frame — the steady state
@@ -911,6 +912,82 @@ use.
 - `statistics/csv/` is appended to, never truncated. Delete the folder between
   experiments or every CSV grows a row per run.
 - Commit only when asked.
+
+## The map-import dialog
+
+`dhakasim/map_import.py` is the logic — location parsing, Nominatim
+geocoding, the Overpass fetch with its mirror list, and `ImportJob`, which
+drives the chain — and `_ImportDialog` in `gui.py` is the window over it,
+opened by **Import map…** in the start screen's *footer* (a footer button
+costs no height, and the density ladder has none to give). Five facts:
+
+- **The scripts are run as subprocesses, not imported.** The chain is the
+  canonical one — `make_network.py`, `run_sim.py`, `fetch_basemap.py`,
+  `fit_roads.py` — and the package must not import a top-level script (the
+  `basemap.Projector` rule). `PYTHONIOENCODING=utf-8` is forced on every
+  child, or the first Bengali street name kills it on a cp1252 console.
+- **The worker thread never touches Tk.** Inputs are read from the
+  `StringVar`s on the Tk thread before the thread starts; everything back
+  travels through a queue the dialog polls with `after`.
+- **An imported network is not part of the parity contract.**
+  `hash_run.py` skips any `input/` folder containing `osm_extract.geojson`
+  — the import's provenance file — because a fresh fetch of the same place
+  returns different OSM data. Do not record baselines for imports.
+- **A failed import removes its half-built folder** (a folder with a
+  `node.txt` becomes a start-screen tile, and a broken tile crashes the
+  run), but a failed basemap fetch or road fit only warns — the network is
+  runnable without them.
+- **The default name is the user's typed text, not the geocoder's display
+  name** — Nominatim answers in the local language, and a Bengali display
+  name slugifies to an empty folder name (found the hard way: the first
+  Mirpur import landed in `input/imported`).
+- **Imported maps are their own start-screen groups, and only they are
+  removable.** The dialog's Kind choice is written to `imported.txt`
+  (`kind single|multi`; missing file reads multi, which is what the
+  pre-question imports were grouped as) and decides which "Imported
+  (…)" group the tile joins. The "remove selected…" link sits inline
+  with those groups' captions — a row of its own would cost height —
+  and deletion is double-gated: the affordance only exists on imported
+  groups, and `map_import.remove` refuses any folder without the
+  `osm_extract.geojson` marker, so survey data cannot be deleted from
+  the GUI at all. `test_start_screen.py` measures its density rungs
+  with imports filtered out — a user's imports legitimately grow the
+  form and step it down a rung, which is the ladder working, not a
+  regression.
+- **A single-intersection import pauses for the junction picker.**
+  `ImportJob` is two stages — `fetch_and_build` (Overpass + make_network)
+  and `finish` (run_sim, metadata, basemap, fit) — with `run` calling
+  both for the multi path. Between them the dialog draws the staged
+  network over the preview tiles (`map_import.read_network_shape`
+  inverts the `# Centre lat,lon at x,y` anchor to lay network metres on
+  web-mercator tiles; a junction's drawable position is the mean of its
+  arms' endpoints, since the file stores junctions at (0,0)) and the
+  user clicks a junction, then toggles legs.
+  `map_import.prune_to_junction` does the file surgery through
+  `network_files`: dense renumbering of both id spaces (the simulator
+  indexes arrays by id), a trimmed junction end becomes a boundary node
+  stored at its arm endpoint (that stored-coordinate test is how the
+  format tells the two apart), geometry directives are remapped or
+  dropped, and comments — the georeference anchor — pass through
+  verbatim. Pruning must run *before* `finish`, which regenerates
+  routes and demand from the final link set. Abandoning the pick
+  (Close) discards the staged folder — it has a `node.txt` and no
+  demand, i.e. a broken start-screen tile. Links are drawn with a dark
+  casing and junctions as amber dots because Farmgate proved a bare
+  line blends into the map and OSM's red hospital icons read as
+  markers. The kind strip also drives the radius default (300 m single
+  / 1000 m multi) — the owner's complaint was a "single intersection"
+  drawn from a kilometre of city at 200 m scale.
+- **The preview is plain OSM tiles on a `tk.Canvas`** —
+  `map_import.preview_tiles` picks the deepest zoom whose radius circle
+  still fits two thirds of the panel, caches tiles under
+  `input/.tilecache/preview_osm/` (its own drawer, not fetch_basemap.py's —
+  their cache keys differ and sharing would couple the package to a
+  script), and the dialog holds the `PhotoImage`s in a list or Tk drops
+  them mid-frame. A generation counter discards a slow fetch that a radius
+  click has superseded, and the radius strip re-renders the preview live
+  through the same queue the import uses — the dialog runs one `after`
+  pump for its whole life.
 
 ## graphify
 
