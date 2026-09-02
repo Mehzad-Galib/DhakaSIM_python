@@ -261,7 +261,8 @@ def read_network_shape(folder: str):
     return links, nodes, to_latlon
 
 
-def prune_to_junction(folder: str, keep_link_ids) -> None:
+def prune_to_junction(folder: str, keep_link_ids,
+                      roundabout=None) -> None:
     """Cut a staged network down to one junction and its chosen legs.
 
     Rewrites ``link.txt``, ``node.txt``, ``geometry.txt`` and
@@ -272,6 +273,13 @@ def prune_to_junction(folder: str, keep_link_ids) -> None:
     is exactly how the file format tells the two apart.  Comment lines in
     ``geometry.txt`` travel verbatim, the recorded centre anchor with
     them, so the imagery georeference does not move.
+
+    ``roundabout``, when given as ``(island_m, ring_m)``, declares the
+    kept junction a roundabout in ``geometry.txt`` -- OSM's fused
+    main-roads graph states every junction as arms converging on a point,
+    which is exactly the form the survey networks use, and
+    ``Processor._open_the_circle`` builds the ring from the directive.
+    The junction is then unsignalised, as a roundabout should be.
 
     Routes and demand are NOT touched here -- the caller regenerates them
     (``run_sim.py``), which is why this must run before that step.
@@ -354,6 +362,18 @@ def prune_to_junction(folder: str, keep_link_ids) -> None:
                         f"roundabout {new_node_id[node_id]} {rest}{tail}\n")
             else:
                 kept_lines.append(raw)   # unknown directives pass through
+    if roundabout is not None:
+        # The kept junction is the node most of the legs meet at.
+        counts = {}
+        for _new_id, up, down, _rows in links_out:
+            counts[up] = counts.get(up, 0) + 1
+            counts[down] = counts.get(down, 0) + 1
+        junction = max(counts, key=counts.get)
+        island_m, ring_m = roundabout
+        kept_lines.append(
+            f"roundabout {junction} {island_m:g} {ring_m:g}"
+            "   # declared a roundabout in the import dialog; edit these "
+            "measured island/ring metres if known\n")
     with open(geometry_path, "w", encoding="utf-8") as handle:
         handle.writelines(kept_lines)
 
@@ -388,7 +408,11 @@ def bbox_around(lat: float, lon: float, radius_m: float):
 # --------------------------------------------------------------------------
 
 TILE_PIXELS = 256
-TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+#: Tried in order per tile; the main host throttles heavy use (measured:
+#: connection timeouts after a day of previews), and the German instance
+#: serves the same scheme from separate infrastructure.
+TILE_URLS = ("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+             "https://tile.openstreetmap.de/{z}/{x}/{y}.png")
 #: Beside fetch_basemap.py's cache, in its own drawer -- the two derive
 #: their cache keys differently and sharing a layout would couple a package
 #: module to a top-level script's internals.
@@ -402,6 +426,20 @@ def deg_to_tile(lat: float, lon: float, zoom: int):
     phi = math.radians(lat)
     y = (1.0 - math.asinh(math.tan(phi)) / math.pi) / 2.0 * n
     return x, y
+
+
+def tile_to_latlon(px: float, py: float, zoom: int):
+    """Global web-mercator pixels at *zoom* -> (lat, lon).
+
+    The inverse of ``deg_to_tile(...) * TILE_PIXELS`` -- what turns "the
+    point now under the preview's centre" back into a place on Earth when
+    the map has been dragged.
+    """
+    n = 2.0 ** zoom
+    xt, yt = px / TILE_PIXELS, py / TILE_PIXELS
+    lon = xt / n * 360.0 - 180.0
+    lat = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * yt / n))))
+    return lat, lon
 
 
 def metres_per_pixel(lat: float, zoom: int) -> float:
@@ -426,15 +464,38 @@ def _fetch_tile(zoom: int, x: int, y: int) -> str:
     path = os.path.join(PREVIEW_CACHE, str(zoom), str(x), f"{y}.png")
     if os.path.exists(path):
         return path
-    request = urllib.request.Request(
-        TILE_URL.format(z=zoom, x=x, y=y),
-        headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        data = response.read()
+    error = None
+    for template in TILE_URLS:
+        request = urllib.request.Request(
+            template.format(z=zoom, x=x, y=y),
+            headers={"User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                data = response.read()
+            break
+        except (urllib.error.URLError, OSError) as exc:
+            error = exc
+    else:
+        raise error
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as handle:
         handle.write(data)
     return path
+
+
+def preview_view(lat: float, lon: float, radius_m: float,
+                 width: int, height: int):
+    """The preview's projection alone: ``(mpp, (zoom, gx0, gy0))``.
+
+    Pure arithmetic -- what the pan and the junction picker need even
+    when no tile can be fetched, so a tile-server outage degrades the
+    preview to a dark canvas instead of taking the import down.
+    """
+    zoom = preview_zoom(lat, radius_m, min(width, height))
+    xt, yt = deg_to_tile(lat, lon, zoom)
+    return metres_per_pixel(lat, zoom), (
+        zoom, xt * TILE_PIXELS - width / 2.0,
+        yt * TILE_PIXELS - height / 2.0)
 
 
 def preview_tiles(lat: float, lon: float, radius_m: float,
@@ -450,11 +511,9 @@ def preview_tiles(lat: float, lon: float, radius_m: float,
     cache when they can, so moving the radius around a place already
     looked at costs no traffic.
     """
-    zoom = preview_zoom(lat, radius_m, min(width, height))
+    mpp, (zoom, gx0, gy0) = preview_view(lat, lon, radius_m, width,
+                                         height)
     n = 2 ** zoom
-    xt, yt = deg_to_tile(lat, lon, zoom)
-    gx0 = xt * TILE_PIXELS - width / 2.0
-    gy0 = yt * TILE_PIXELS - height / 2.0
     placed = []
     for tx in range(math.floor(gx0 / TILE_PIXELS),
                     math.floor((gx0 + width) / TILE_PIXELS) + 1):
@@ -462,10 +521,14 @@ def preview_tiles(lat: float, lon: float, radius_m: float,
                         math.floor((gy0 + height) / TILE_PIXELS) + 1):
             if not (0 <= ty < n):
                 continue
-            path = _fetch_tile(zoom, tx % n, ty)
+            try:
+                path = _fetch_tile(zoom, tx % n, ty)
+            except (urllib.error.URLError, OSError):
+                # A missing tile is a dark square, not a failed preview.
+                continue
             placed.append((round(tx * TILE_PIXELS - gx0),
                            round(ty * TILE_PIXELS - gy0), path))
-    return metres_per_pixel(lat, zoom), placed, (zoom, gx0, gy0)
+    return mpp, placed, (zoom, gx0, gy0)
 
 
 # --------------------------------------------------------------------------

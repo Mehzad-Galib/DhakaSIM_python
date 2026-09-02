@@ -942,13 +942,26 @@ The dialog's **Kind** choice — single intersection or a multi-intersection
 network — changes what the import does. **Single intersection adds a
 picking step**: after the roads are fetched and built (the radius defaults
 down to 300 m, and 200 m is offered), the staged network is drawn over the
-map panel with its junctions marked, and you click the junction you want.
-Its legs turn green; clicking a leg drops it (dashed red) or restores it,
-at least two must stay, and **Finish import** then cuts the network down
-to that junction and those legs before the routes, demand, imagery and
-road fitting are generated — so a single-intersection import really is one
-junction at a sensible scale, not a neighbourhood that happens to contain
-one. Closing the dialog mid-pick discards the staged folder. The Kind also
+map panel with its junctions marked as amber dots, the one nearest the
+import point already selected with every leg kept. Click another dot to
+move the selection; click a leg to drop it (dashed red) or restore it —
+the leg under the pointer thickens so a click is never a guess — and at
+least two must stay. A strip under the panel asks what the junction **is**:
+a signalised crossing, or a **roundabout** — OSM maps many Dhaka
+roundabouts (Palashi, say) as plain crossings, and the choice writes a
+`roundabout` directive into `geometry.txt` so the model builds the ring
+and leaves the junction unsignalled; the default 8 m island + 7 m ring can
+be edited there if measured values are known. **Finish import** then cuts
+the network down to that junction and those legs before the routes,
+demand, imagery and road fitting are generated — so a single-intersection
+import really is one junction at a sensible scale, not a neighbourhood
+that happens to contain one. Closing the dialog mid-pick discards the
+staged folder.
+
+The preview itself can be **dragged**: pan the map and, on release, the
+point under the centre crosshair becomes the import point — the Where box
+follows with the exact coordinates — so you can search a rough name and
+then walk the map to the precise junction before importing. The Kind also
 decides which start-screen group the new tile joins: imported
 maps get groups of their own, **Imported (single intersection)** and
 **Imported (multi intersection)**, under the shipped networks. Each
