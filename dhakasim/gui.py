@@ -2302,6 +2302,17 @@ class _ImportDialog:
             background=_UI["panel"], foreground=_UI["faint"],
             wraplength=self.PREVIEW_W, justify="left")
         self.preview_label.pack(anchor="w", pady=(3, 0))
+        # Shown only while the junction picker is up: Palashi's "junction"
+        # is a roundabout, and the model needs to be told which it is --
+        # a roundabout gets a ring and no signals.
+        self.jtype_var = tk.StringVar(value="Signalised crossing")
+        self._jtype_row = tk.Frame(preview_box, background=_UI["panel"])
+        tk.Label(self._jtype_row, text="This junction is",
+                 font=("Segoe UI", 9), background=_UI["panel"],
+                 foreground=_UI["muted"]).pack(side="left", padx=(0, 8))
+        _Segmented(self._jtype_row, ["Signalised crossing", "Roundabout"],
+                   self.jtype_var, font=("Segoe UI Semibold", 9),
+                   pad=(8, 3)).pack(side="left")
 
         buttons = tk.Frame(panel, background=_UI["panel"])
         buttons.pack(fill="x", pady=(12, 8))
@@ -2335,7 +2346,19 @@ class _ImportDialog:
         # import reaches the pick stage.
         self._pick = None
         self._picking = False
-        self.preview.bind("<Button-1>", self._preview_click)
+        self._leg_items = {}
+        self._hover_leg = None
+        # Dragging the preview pans it: the map moves live, and on release
+        # the point under the crosshair becomes the import point.  The
+        # click that picks a junction is therefore taken on *release*,
+        # only when the pointer has not moved.
+        self._view = None
+        self._press = None
+        self._drag_last = None
+        self.preview.bind("<ButtonPress-1>", self._preview_press)
+        self.preview.bind("<B1-Motion>", self._preview_drag)
+        self.preview.bind("<ButtonRelease-1>", self._preview_release)
+        self.preview.bind("<Motion>", self._preview_hover)
         self.radius_var.trace_add("write", self._radius_changed)
         # A single intersection wants a couple of hundred metres, not a
         # neighbourhood; the radius follows the kind so the default is
@@ -2403,11 +2426,16 @@ class _ImportDialog:
                 self._set_status("keep at least two legs", error=True)
                 return
             self._picking = False
+            self._jtype_row.pack_forget()
             self._import_btn.configure(text="Cancel")
             self._set_status("finishing the import...")
+            # Default ring sizes for a declared roundabout; measured
+            # values can be edited into geometry.txt afterwards.
+            roundabout = ((8.0, 7.0)
+                          if self.jtype_var.get() == "Roundabout" else None)
             self._worker = threading.Thread(
-                target=self._finish_work, args=(tuple(pick["legs"]),),
-                daemon=True)
+                target=self._finish_work,
+                args=(tuple(pick["legs"]), roundabout), daemon=True)
             self._worker.start()
             return
         if self._worker is not None:
@@ -2489,7 +2517,7 @@ class _ImportDialog:
         except Exception as exc:
             post(("error", str(exc)))
 
-    def _finish_work(self, keep):
+    def _finish_work(self, keep, roundabout=None):
         post = self._queue.put
 
         def log(line):
@@ -2497,8 +2525,10 @@ class _ImportDialog:
 
         job = self._job
         try:
-            log(f"keeping {len(keep)} legs of the chosen junction...")
-            map_import.prune_to_junction(job.out_dir, keep)
+            log(f"keeping {len(keep)} legs of the chosen junction..."
+                + (" (as a roundabout)" if roundabout else ""))
+            map_import.prune_to_junction(job.out_dir, keep,
+                                         roundabout=roundabout)
             folder = job.finish(log, lambda: self._cancelled)
             post(("done", folder, tuple(job.warnings)))
         except Exception as exc:
@@ -2526,9 +2556,11 @@ class _ImportDialog:
                 self._done = True
                 self._finish(message[1], message[2])
             elif kind == "preview":
-                _kind, gen, lat, lon, display, radius, mpp, placed = message
+                (_kind, gen, lat, lon, display, radius, mpp, placed,
+                 view) = message
                 if gen == self._preview_gen:
                     self._located = (lat, lon, display)
+                    self._view = view
                     self._render_preview(radius, mpp, placed, display)
             elif kind == "preview_error":
                 if message[1] == self._preview_gen:
@@ -2536,14 +2568,20 @@ class _ImportDialog:
             elif kind == "pick":
                 self._worker = None
                 self._picking = True
+                # Invalidate any slow preview still in flight: its render
+                # arriving now would wipe the picker off the canvas.
+                self._preview_gen += 1
                 self._import_btn.configure(text="Finish import")
+                self._jtype_row.pack(anchor="w", pady=(4, 0))
                 self._render_picker(*message[1:])
         self.top.after(120, self._poll)
 
     # -- the preview map ---------------------------------------------------
 
     def _preview_clicked(self):
-        if self._worker is not None or self._done:
+        # Not while the junction picker is up: a preview render would wipe
+        # the picker's overlay off the canvas mid-selection.
+        if self._worker is not None or self._done or self._picking:
             return
         where = self.where_var.get().strip()
         if not where:
@@ -2558,7 +2596,8 @@ class _ImportDialog:
 
     def _radius_changed(self, *_args):
         """Once a spot is located, the circle follows the radius strip."""
-        if self._located is None or self._worker is not None or self._done:
+        if (self._located is None or self._worker is not None
+                or self._done or self._picking):
             return
         try:
             radius = float(self.radius_var.get())
@@ -2589,14 +2628,14 @@ class _ImportDialog:
 
     def _tiles_work(self, gen, lat, lon, display, radius):
         try:
-            mpp, placed, _view = map_import.preview_tiles(
+            mpp, placed, view = map_import.preview_tiles(
                 lat, lon, radius, self.PREVIEW_W, self.PREVIEW_H)
         except Exception as exc:
             self._queue.put(("preview_error", gen,
                              f"no preview -- check the connection ({exc})"))
             return
         self._queue.put(("preview", gen, lat, lon, display, radius,
-                         mpp, placed))
+                         mpp, placed, view))
 
     def _render_preview(self, radius, mpp, placed, display):
         canvas = self.preview
@@ -2611,6 +2650,10 @@ class _ImportDialog:
                 continue                      # one bad tile is not fatal
             self._preview_photos.append(photo)
             canvas.create_image(cx, cy, image=photo, anchor="nw")
+        if not placed:
+            canvas.create_text(self.PREVIEW_W / 2.0, 40,
+                               text="map tiles unavailable right now",
+                               font=("Segoe UI", 9), fill=_UI["faint"])
         cx, cy = self.PREVIEW_W / 2.0, self.PREVIEW_H / 2.0
         r = radius / mpp
         # A dark underline ring keeps the accent ring visible over the
@@ -2663,12 +2706,25 @@ class _ImportDialog:
                          if node["junction"]},
             "mpp": mpp, "junction": None, "legs": set(),
         }
+        # Pre-select the junction nearest the import point: the legs come
+        # up already highlighted, and clicking another amber dot moves the
+        # selection.  Waiting for a first click here just felt broken.
+        if self._pick["nodes"]:
+            centre = (self.PREVIEW_W / 2.0, self.PREVIEW_H / 2.0)
+            nearest = min(
+                self._pick["nodes"],
+                key=lambda n: (self._pick["nodes"][n][0] - centre[0]) ** 2
+                + (self._pick["nodes"][n][1] - centre[1]) ** 2)
+            self._pick["junction"] = nearest
+            self._pick["legs"] = set(self._pick["incident"][nearest])
         self._redraw_pick()
         self.preview_label.configure(
-            text="Click the junction you want. Its legs turn green; click "
-                 "a leg to drop or restore it (at least two stay), then "
-                 "Finish import.")
-        self._set_status("click the junction on the map")
+            text="The nearest junction is selected with every leg kept "
+                 "(green). Click another amber dot to move the selection, "
+                 "click a leg to drop or restore it (at least two stay), "
+                 "say what the junction is below, then Finish import.")
+        self._set_status(f"{len(self._pick['legs'])} legs kept -- adjust, "
+                         "then Finish import")
 
     def _redraw_pick(self):
         canvas = self.preview
@@ -2694,11 +2750,18 @@ class _ImportDialog:
             canvas.create_line(*flat, fill="#14100E", width=width + 4,
                                capstyle="round", joinstyle="round",
                                tags=("ov",))
-            styled.append((flat, colour, width, dash))
-        for flat, colour, width, dash in styled:
-            canvas.create_line(*flat, fill=colour, width=width, dash=dash,
-                               capstyle="round", joinstyle="round",
-                               tags=("ov",))
+            styled.append((flat, colour, width, dash, lid, lid in arms))
+        # The colour pass is kept apart from the casing pass so no leg's
+        # casing sits on a neighbour's colour; leg items are remembered so
+        # hovering can thicken exactly one of them.
+        self._leg_items = {}
+        self._hover_leg = None
+        for flat, colour, width, dash, lid, is_arm in styled:
+            item = canvas.create_line(*flat, fill=colour, width=width,
+                                      dash=dash, capstyle="round",
+                                      joinstyle="round", tags=("ov",))
+            if is_arm:
+                self._leg_items[lid] = (item, width)
         for nid, (cx, cy) in pick["nodes"].items():
             r = 9 if nid == chosen else 7
             fill = _UI["accent"] if nid == chosen else "#FFB02E"
@@ -2709,15 +2772,97 @@ class _ImportDialog:
                            font=("Segoe UI", 7), fill="#5A5A5A",
                            tags=("ov",))
 
-    def _preview_click(self, event):
+    def _preview_press(self, event):
+        self._press = (event.x, event.y)
+        self._drag_last = (event.x, event.y)
+
+    def _preview_drag(self, event):
+        # Dragging pans the preview.  Not while picking: the picker's
+        # overlay coordinates are tied to the tiles it was drawn on.
+        if (self._picking or self._view is None or self._press is None
+                or self._worker is not None):
+            return
+        last_x, last_y = self._drag_last
+        self.preview.move("all", event.x - last_x, event.y - last_y)
+        self._drag_last = (event.x, event.y)
+
+    def _preview_release(self, event):
+        press, self._press = self._press, None
+        if press is None:
+            return
+        moved = math.hypot(event.x - press[0], event.y - press[1])
+        if self._picking:
+            # Selection happens on release so a slip of the hand while
+            # clicking never counts as a pan.
+            if moved < 4.0:
+                self._pick_click(event.x, event.y)
+            return
+        if moved < 4.0 or self._view is None or self._worker is not None:
+            return
+        # The point now under the crosshair becomes the import point --
+        # the Where box follows, so what Import uses is always visible.
+        zoom, gx0, gy0 = self._view
+        lat, lon = map_import.tile_to_latlon(
+            gx0 + self.PREVIEW_W / 2.0 + (press[0] - event.x),
+            gy0 + self.PREVIEW_H / 2.0 + (press[1] - event.y), zoom)
+        coords = f"{lat:.6f}, {lon:.6f}"
+        self._located = (lat, lon, coords)
+        self.where_var.set(coords)
+        try:
+            radius = float(self.radius_var.get())
+        except ValueError:
+            return
+        self._preview_gen += 1
+        self._set_status("re-aimed -- the centre follows your drag")
+        threading.Thread(
+            target=self._tiles_work,
+            args=(self._preview_gen, lat, lon, coords, radius),
+            daemon=True).start()
+
+    def _preview_hover(self, event):
         if not self._picking or self._pick is None:
             return
         pick = self._pick
+        near_node = any(math.hypot(event.x - cx, event.y - cy) < 13.0
+                        for cx, cy in pick["nodes"].values())
+        leg = None
+        if not near_node and pick["junction"] is not None:
+            leg = self._leg_at(event.x, event.y)
+        self.preview.configure(
+            cursor="hand2" if near_node or leg is not None else "")
+        if leg != self._hover_leg:
+            # Thicken the leg under the pointer, so what a click would
+            # toggle is never a guess.
+            previous = self._leg_items.get(self._hover_leg)
+            if previous is not None:
+                self.preview.itemconfigure(previous[0], width=previous[1])
+            current = self._leg_items.get(leg)
+            if current is not None:
+                self.preview.itemconfigure(current[0],
+                                           width=current[1] + 3)
+            self._hover_leg = leg
+
+    def _leg_at(self, x, y):
+        """The chosen junction's leg under the pointer, or ``None``."""
+        pick = self._pick
+        target, target_d = None, 12.0
+        for lid in pick["incident"][pick["junction"]]:
+            pts = pick["links"][lid]
+            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                d = _point_segment_px(x, y, ax, ay, bx, by)
+                if d < target_d:
+                    target, target_d = lid, d
+        return target
+
+    def _pick_click(self, x, y):
+        pick = self._pick
+        if pick is None:
+            return
         # A junction dot first -- clicking one (re)selects the junction
         # and starts with every leg kept.
-        best, best_d = None, 16.0
+        best, best_d = None, 13.0
         for nid, (cx, cy) in pick["nodes"].items():
-            d = math.hypot(event.x - cx, event.y - cy)
+            d = math.hypot(x - cx, y - cy)
             if d < best_d:
                 best, best_d = nid, d
         if best is not None:
@@ -2729,14 +2874,7 @@ class _ImportDialog:
             return
         if pick["junction"] is None:
             return
-        # Otherwise the nearest of the chosen junction's legs toggles.
-        target, target_d = None, 9.0
-        for lid in pick["incident"][pick["junction"]]:
-            pts = pick["links"][lid]
-            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
-                d = _point_segment_px(event.x, event.y, ax, ay, bx, by)
-                if d < target_d:
-                    target, target_d = lid, d
+        target = self._leg_at(x, y)
         if target is None:
             return
         if target in pick["legs"]:

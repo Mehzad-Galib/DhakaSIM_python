@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 from .constants import Constants
@@ -23,6 +24,17 @@ def _apply_overrides(argv) -> None:
         i = argv.index("--network")
         if i + 1 < len(argv):
             Parameters.NETWORK_DIR = argv[i + 1]
+    # A name that matches no folder must stop here.  Without this check the
+    # per-file fallback to the flat ``input/`` root quietly assembles half a
+    # network (root carries no demand.txt) and the run limps on until the
+    # statistics crash with an IndexError -- found by running a network the
+    # GUI's remove link had already deleted.
+    if Parameters.NETWORK_DIR and not os.path.isdir(
+            os.path.join("input", Parameters.NETWORK_DIR)):
+        known = ", ".join(Processor.available_networks()) or "none"
+        raise SystemExit(
+            f"no such network: input/{Parameters.NETWORK_DIR} does not "
+            f"exist (available: {known})")
     # --hour <0-23> overrides TimeOfDay in parameter.txt (-1 = peak hour)
     if "--hour" in argv:
         i = argv.index("--hour")

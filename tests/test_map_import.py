@@ -106,6 +106,14 @@ class HelperTest(unittest.TestCase):
             map_import.preview_zoom(23.7, 500.0, span),
             map_import.preview_zoom(23.7, 3000.0, span))
 
+    def test_tile_projection_round_trips(self):
+        lat, lon, zoom = 23.7266, 90.3854, 16
+        xt, yt = map_import.deg_to_tile(lat, lon, zoom)
+        back = map_import.tile_to_latlon(xt * map_import.TILE_PIXELS,
+                                         yt * map_import.TILE_PIXELS, zoom)
+        self.assertAlmostEqual(back[0], lat, places=9)
+        self.assertAlmostEqual(back[1], lon, places=9)
+
     def test_the_overpass_query_carries_the_box_and_classes(self):
         query = map_import._overpass_query(
             (23.69, 90.39, 23.71, 90.41), ("trunk", "primary"))
@@ -249,6 +257,22 @@ class PruneTest(unittest.TestCase):
     def test_pruning_refuses_a_single_leg(self):
         with self.assertRaises(RuntimeError):
             map_import.prune_to_junction(self.FOLDER, {0})
+
+    def test_a_declared_roundabout_lands_on_the_junction(self):
+        from dhakasim import network_files
+        map_import.prune_to_junction(self.FOLDER, {0, 1, 3},
+                                     roundabout=(8.0, 7.0))
+        facts = network_files.read_geometry(
+            os.path.join(self.FOLDER, "geometry.txt"))
+        # One roundabout, on the node the kept legs meet at (the junction
+        # keeps stored (0,0), remapped id), with island and ring radii.
+        self.assertEqual(len(facts.roundabouts), 1)
+        (node_id, island), = facts.roundabouts.items()
+        self.assertEqual(island, 8.0)
+        self.assertEqual(facts.circulatory[node_id], 7.0)
+        nodes = {row.node_id: row for row in network_files.read_node_rows(
+            os.path.join(self.FOLDER, "node.txt"))}
+        self.assertEqual(len(nodes[node_id].link_ids), 3)
 
 
 if __name__ == "__main__":

@@ -118,6 +118,15 @@ class Sim:
 
     def _set_demand(self) -> int:
         i = len(self.out_node) - 1
+        # Fewer than two usable boundary nodes leaves nothing to route
+        # between -- a one-way boundary road can only be an origin or only
+        # a destination, so a small extract of one-way legs can end up
+        # here.  Say so instead of dividing by the zero.
+        if i < 1:
+            raise SystemExit(
+                "no origin/destination pairs: fewer than two usable "
+                "boundary nodes (a one-way boundary road serves only one "
+                "direction). Keep another leg, or a two-way one.")
         if len(self.out_node) * i > 100:
             if Sim.demand_type == 0:
                 # low demand

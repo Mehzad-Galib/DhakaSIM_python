@@ -977,7 +977,25 @@ costs no height, and the density ladder has none to give). Five facts:
   line blends into the map and OSM's red hospital icons read as
   markers. The kind strip also drives the radius default (300 m single
   / 1000 m multi) — the owner's complaint was a "single intersection"
-  drawn from a kilometre of city at 200 m scale.
+  drawn from a kilometre of city at 200 m scale. The picker pre-selects
+  the junction nearest the import point (waiting for a first click read
+  as broken), takes its clicks on *release* so a slipped click never
+  reads as a pan, and thickens the leg under the pointer. A "This
+  junction is" strip (signalised / roundabout) appears only while
+  picking: OSM maps Palashi as a plain crossing, and Roundabout makes
+  `prune_to_junction` append a `roundabout <node> 8 7` directive — the
+  same converging-arms-plus-directive form the surveyed kakrail uses,
+  so `_open_the_circle` builds the ring. Dragging the preview pans it
+  (tiles move live; on release the centre point becomes the import
+  point and the Where box is set to its coordinates — the box is the
+  single source of truth for what Import uses). `run_sim.py` exits with
+  a sentence instead of a ZeroDivisionError when one-way legs leave
+  fewer than two usable boundary nodes — found by keeping three one-way
+  legs at the BUET fork. Tile fetches try tile.openstreetmap.de after
+  .org (the main host throttled a day's worth of previews into connect
+  timeouts), each tile failure degrades to a dark square, and
+  `preview_view` computes the projection without any tiles at all, so
+  an outage never blocks the pan or the picker.
 - **The preview is plain OSM tiles on a `tk.Canvas`** —
   `map_import.preview_tiles` picks the deepest zoom whose radius circle
   still fits two thirds of the panel, caches tiles under
