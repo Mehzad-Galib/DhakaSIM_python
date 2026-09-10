@@ -464,7 +464,10 @@ smoothing and the simplification still happen exactly once.
 
 ## The report
 
-`statistics/report_*.html` is one self-contained file per run, carrying **two
+`statistics/report_*.html` is one self-contained file per run — stamped to
+the **second** with a `_2` counter on collision, because a minute-resolution
+name let a 60-step run overwrite the report of the run before it (found by
+the 11 Sep QA sweep: seven runs, one file) — carrying **two
 animations of the same captured frames** — plan view and 3D — and no static
 snapshot. Both are CSS flip-books; `RunRecorder._film` gives each a distinct
 class prefix so two on one page do not collide.
@@ -954,23 +957,76 @@ costs no height, and the density ladder has none to give). Five facts:
   with imports filtered out — a user's imports legitimately grow the
   form and step it down a rung, which is the ladder working, not a
   regression.
-- **A single-intersection import pauses for the junction picker.**
+- **Every import pauses for the junction picker.**
   `ImportJob` is two stages — `fetch_and_build` (Overpass + make_network)
   and `finish` (run_sim, metadata, basemap, fit) — with `run` calling
-  both for the multi path. Between them the dialog draws the staged
+  both for a headless caller; the GUI never uses `run` any more, both
+  kinds pick. Between them the dialog draws the staged
   network over the preview tiles (`map_import.read_network_shape`
   inverts the `# Centre lat,lon at x,y` anchor to lay network metres on
   web-mercator tiles; a junction's drawable position is the mean of its
   arms' endpoints, since the file stores junctions at (0,0)) and the
   user clicks a junction, then toggles legs.
-  `map_import.prune_to_junction` does the file surgery through
-  `network_files`: dense renumbering of both id spaces (the simulator
-  indexes arrays by id), a trimmed junction end becomes a boundary node
-  stored at its arm endpoint (that stored-coordinate test is how the
-  format tells the two apart), geometry directives are remapped or
-  dropped, and comments — the georeference anchor — pass through
-  verbatim. Pruning must run *before* `finish`, which regenerates
-  routes and demand from the final link set. Abandoning the pick
+  **A leg is a walked road, not a link.** The staged network is OSM's
+  graph cut at every crossing, so the links touching the chosen node
+  are its first fragments — at Palashi, 6 m and 18 m, because a
+  dual-carriageway crossing is a square of OSM nodes and fusing leaves
+  stubs between them. The first picker kept those fragments as the
+  legs, and the import came out as one 330 m arm plus two stubs with a
+  sliver of basemap under it. `map_import.junction_legs` now merges
+  every crossing-node within `JUNCTION_CLUSTER_M` of the chosen one
+  into the junction, starts a leg on every link leaving that cluster,
+  and walks it outward through side-street junctions along the
+  continuation that turns least (under `LEG_MAX_TURN_DEG`), stopping
+  at a boundary node, a sharper turn, a revisited node or a link
+  another leg claimed; legs come back clockwise by leaving bearing.
+  **A multi import is the same picker with a set of junctions.**
+  `network_legs(links, nodes, junctions)` clusters each chosen node in
+  turn (a node already inside an earlier cluster *is* that junction and
+  gets no entry), and a walk that reaches another chosen cluster stops
+  there with `end_junction` set — the leg joins the two, and the walk
+  back from the other side finds its links claimed, so a corridor is
+  the junctions along it clicked in turn. `check_legs` is the gate:
+  every junction two legs, and the junctions one connected piece via
+  kept joining legs — `run_sim` routes between boundary nodes and an
+  island nothing reaches is a route it cannot build. The dialog calls
+  it *before* spawning the finish thread, because a refusal from the
+  worker discards the staged folder and the user's pick with it;
+  `prune_to_junctions` calls it again as its own defence. The
+  roundabout strip shows for a single junction only.
+  `prune_to_junctions(folder, legs, centres, roundabouts)` then writes
+  **one link per leg**, junction nodes `0..J-1` at (0,0) in the order
+  chosen, boundary nodes after, a joining leg running centre to centre,
+  each leg's points starting at the cluster centroid (vertices inside `MOUTH_CLEAR_M`
+  dropped, so the arms converge on a point the way the survey
+  networks state a junction — `_open_the_circle` and the junction
+  patch both rely on that), width length-weighted and median the max
+  over the walked links (make_network's own chain rules), one-way
+  only if every walked link is and all run the same way, written in
+  the direction of travel. `geometry.txt` keeps its leading comment
+  block — the georeference anchor — and regenerates the directives.
+  Pruning must run *before* `finish`, which regenerates routes and
+  demand from the final link set. A single-kind import also fetches
+  its basemap with `--margin 200`, because the arms end at the circle
+  and a 60 m margin left half the window bare.
+  Three more things the single path does, each found at Shahbag.
+  **Slip roads are dropped** (`fetch_and_build` strips every `*_link`
+  class for a single junction): the model has nothing to do with a
+  slip road, and at Shahbag they fused into a hairpin and a loop, left
+  the west arm dangling 10 m short of the crossing, and the junction
+  came out with two legs — the same extract without them is four
+  crossing-nodes and four arms. **Boundary nodes within the cluster
+  radius join the cluster**, because a dangling arm end that close is
+  a reconnection the build missed, not a road that ends there. And
+  **choosing Single sets the roads preset to "+ local streets"** along
+  with the 300 m radius: a junction's legs are often tertiary (Shahbag's
+  north arm), a 300 m extract stays small whatever it includes, and
+  with only the main roads the crossing offers two or three legs. The
+  picker pre-selects, among the dots within 80 m of the crosshair, the
+  one whose walk yields the most legs (nearest on a tie) — the nearest
+  dot alone can be a fork a few metres from the crossing that was aimed
+  at — and the status line turns red with a nudge when a chosen
+  junction has fewer than three. Abandoning the pick
   (Close) discards the staged folder — it has a `node.txt` and no
   demand, i.e. a broken start-screen tile. Links are drawn with a dark
   casing and junctions as amber dots because Farmgate proved a bare

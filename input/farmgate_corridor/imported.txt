@@ -1,0 +1,2 @@
+# Written by the GUI map-import dialog.
+kind multi

@@ -2363,10 +2363,11 @@ class _ImportDialog:
         # A single intersection wants a couple of hundred metres, not a
         # neighbourhood; the radius follows the kind so the default is
         # never a 200 m-scale junction drawn from a kilometre of city.
-        self.kind_var.trace_add(
-            "write", lambda *_a: self.radius_var.set(
-                "300" if self.kind_var.get().startswith("Single")
-                else "1000"))
+        # It wants the local streets too: a junction's legs are often
+        # tertiary (Shahbag's north arm; Palashi's), and with only the
+        # main roads the crossing comes out with two or three of them,
+        # while a 300 m extract stays small whatever it includes.
+        self.kind_var.trace_add("write", self._kind_changed)
 
         # One polling loop for the dialog's whole life: the import and the
         # preview both answer through the same queue.
@@ -2418,24 +2419,32 @@ class _ImportDialog:
         if self._picking:
             # The button reads "Finish import" at this stage.
             pick = self._pick
-            if pick is None or pick["junction"] is None:
-                self._set_status("click the junction on the map first",
+            if pick is None or not pick["junctions"]:
+                self._set_status("click a junction on the map first",
                                  error=True)
                 return
-            if len(pick["legs"]) < 2:
-                self._set_status("keep at least two legs", error=True)
+            kept = [pick["arms"][i]["leg"] for i in sorted(pick["legs"])]
+            # Checked here, with the pick still on screen: a refusal from
+            # the worker would have thrown the staged folder away.
+            problem = map_import.check_legs(kept, pick["centres"])
+            if problem:
+                self._set_status(problem, error=True)
                 return
             self._picking = False
             self._jtype_row.pack_forget()
             self._import_btn.configure(text="Cancel")
             self._set_status("finishing the import...")
             # Default ring sizes for a declared roundabout; measured
-            # values can be edited into geometry.txt afterwards.
-            roundabout = ((8.0, 7.0)
-                          if self.jtype_var.get() == "Roundabout" else None)
+            # values can be edited into geometry.txt afterwards.  The
+            # strip only shows for a single junction; a multi import's
+            # junctions are all crossings until geometry.txt says else.
+            roundabouts = None
+            if (pick["kind"] == "single"
+                    and self.jtype_var.get() == "Roundabout"):
+                roundabouts = {pick["junctions"][0]: (8.0, 7.0)}
             self._worker = threading.Thread(
                 target=self._finish_work,
-                args=(tuple(pick["legs"]), roundabout), daemon=True)
+                args=(kept, pick["centres"], roundabouts), daemon=True)
             self._worker.start()
             return
         if self._worker is not None:
@@ -2493,31 +2502,29 @@ class _ImportDialog:
             folder = map_import.slugify(name)
             self._job = map_import.ImportJob(
                 name, folder, lat, lon, radius, classes, merge, kind)
-            if kind == "single":
-                # Stop after the build and hand the network to the
-                # junction picker; the rest runs from _finish_work once
-                # the user has chosen the junction and its legs.
-                out_dir = self._job.fetch_and_build(
-                    log, lambda: self._cancelled)
-                try:
-                    shape = map_import.read_network_shape(out_dir)
-                    if not any(n["junction"] for n in shape[1].values()):
-                        raise RuntimeError(
-                            "no junction with three or more legs in the "
-                            "extract -- try a slightly larger radius")
-                    tiles = map_import.preview_tiles(
-                        lat, lon, radius, self.PREVIEW_W, self.PREVIEW_H)
-                except BaseException:
-                    self._job.discard()
-                    raise
-                post(("pick", radius, tiles, shape))
-            else:
-                self._job.run(log, lambda: self._cancelled)
-                post(("done", folder, tuple(self._job.warnings)))
+            # Stop after the build and hand the network to the junction
+            # picker; the rest runs from _finish_work once the user has
+            # chosen the junction(s) and their legs.  Both kinds pick:
+            # a multi import is several junctions chosen from the same
+            # staged network, each with its legs, joined where the same
+            # road runs between them.
+            out_dir = self._job.fetch_and_build(log, lambda: self._cancelled)
+            try:
+                shape = map_import.read_network_shape(out_dir)
+                if not any(n["junction"] for n in shape[1].values()):
+                    raise RuntimeError(
+                        "no junction with three or more legs in the "
+                        "extract -- try a slightly larger radius")
+                tiles = map_import.preview_tiles(
+                    lat, lon, radius, self.PREVIEW_W, self.PREVIEW_H)
+            except BaseException:
+                self._job.discard()
+                raise
+            post(("pick", radius, tiles, shape, kind))
         except Exception as exc:
             post(("error", str(exc)))
 
-    def _finish_work(self, keep, roundabout=None):
+    def _finish_work(self, keep, centres, roundabouts=None):
         post = self._queue.put
 
         def log(line):
@@ -2525,10 +2532,10 @@ class _ImportDialog:
 
         job = self._job
         try:
-            log(f"keeping {len(keep)} legs of the chosen junction..."
-                + (" (as a roundabout)" if roundabout else ""))
-            map_import.prune_to_junction(job.out_dir, keep,
-                                         roundabout=roundabout)
+            log(f"keeping {len(centres)} junction(s) with {len(keep)} "
+                "legs..." + (" (as a roundabout)" if roundabouts else ""))
+            map_import.prune_to_junctions(job.out_dir, keep, centres,
+                                          roundabouts=roundabouts)
             folder = job.finish(log, lambda: self._cancelled)
             post(("done", folder, tuple(job.warnings)))
         except Exception as exc:
@@ -2572,7 +2579,8 @@ class _ImportDialog:
                 # arriving now would wipe the picker off the canvas.
                 self._preview_gen += 1
                 self._import_btn.configure(text="Finish import")
-                self._jtype_row.pack(anchor="w", pady=(4, 0))
+                if message[4] == "single":
+                    self._jtype_row.pack(anchor="w", pady=(4, 0))
                 self._render_picker(*message[1:])
         self.top.after(120, self._poll)
 
@@ -2593,6 +2601,11 @@ class _ImportDialog:
             target=self._preview_work,
             args=(self._preview_gen, where, float(self.radius_var.get())),
             daemon=True).start()
+
+    def _kind_changed(self, *_args):
+        single = self.kind_var.get().startswith("Single")
+        self.radius_var.set("300" if single else "1000")
+        self.roads_var.set(map_import.CLASS_PRESETS[1 if single else 0][0])
 
     def _radius_changed(self, *_args):
         """Once a spot is located, the circle follows the radius strip."""
@@ -2673,7 +2686,7 @@ class _ImportDialog:
 
     # -- the junction picker -----------------------------------------------
 
-    def _render_picker(self, radius, tiles, shape):
+    def _render_picker(self, radius, tiles, shape, kind):
         """The staged network over its tiles, ready to be clicked on."""
         mpp, placed, (zoom, gx0, gy0) = tiles
         links, nodes, to_latlon = shape
@@ -2696,75 +2709,157 @@ class _ImportDialog:
                     ty * map_import.TILE_PIXELS - gy0)
 
         self._pick = {
+            "shape": (links, nodes), "to_canvas": to_canvas,
             "links": {lid: [to_canvas(x, y) for x, y in link["points"]]
                       for lid, link in links.items()},
             "width": {lid: link["width"] for lid, link in links.items()},
             "nodes": {nid: to_canvas(node["x"], node["y"])
                       for nid, node in nodes.items() if node["junction"]},
-            "incident": {nid: list(node["links"])
-                         for nid, node in nodes.items()
-                         if node["junction"]},
-            "mpp": mpp, "junction": None, "legs": set(),
+            "mpp": mpp, "kind": kind, "junctions": [], "arms": [],
+            "legs": set(), "centres": {},
         }
-        # Pre-select the junction nearest the import point: the legs come
-        # up already highlighted, and clicking another amber dot moves the
-        # selection.  Waiting for a first click here just felt broken.
+        # Pre-select a junction near the import point: the legs come up
+        # already highlighted, and clicking another amber dot moves the
+        # selection (single) or adds it (multi).  Waiting for a first
+        # click here just felt broken.  Among the dots within reach of
+        # the crosshair the one offering the most legs wins -- the
+        # nearest can be a slip road's fork a few metres from the
+        # crossing that was actually aimed at.
         if self._pick["nodes"]:
             centre = (self.PREVIEW_W / 2.0, self.PREVIEW_H / 2.0)
-            nearest = min(
-                self._pick["nodes"],
-                key=lambda n: (self._pick["nodes"][n][0] - centre[0]) ** 2
-                + (self._pick["nodes"][n][1] - centre[1]) ** 2)
-            self._pick["junction"] = nearest
-            self._pick["legs"] = set(self._pick["incident"][nearest])
+            reach = 80.0 / mpp
+
+            def distance(n):
+                return math.hypot(self._pick["nodes"][n][0] - centre[0],
+                                  self._pick["nodes"][n][1] - centre[1])
+
+            near = [n for n in self._pick["nodes"] if distance(n) <= reach]
+            if near:
+                chosen = max(
+                    near, key=lambda n: (len(map_import.junction_legs(
+                        links, nodes, n)[0]), -distance(n)))
+            else:
+                chosen = min(self._pick["nodes"], key=distance)
+            self._select_junction(chosen)
         self._redraw_pick()
-        self.preview_label.configure(
-            text="The nearest junction is selected with every leg kept "
-                 "(green). Click another amber dot to move the selection, "
-                 "click a leg to drop or restore it (at least two stay), "
-                 "say what the junction is below, then Finish import.")
-        self._set_status(f"{len(self._pick['legs'])} legs kept -- adjust, "
-                         "then Finish import")
+        if kind == "single":
+            text = ("The nearest junction is selected with every leg kept "
+                    "(green) -- each leg is the whole road out to the edge "
+                    "of the circle. Click another amber dot to move the "
+                    "selection, click a leg to drop or restore it (at "
+                    "least two stay), say what the junction is below, then "
+                    "Finish import.")
+        else:
+            text = ("The nearest junction is selected with every leg kept "
+                    "(green) -- each leg is the whole road out to the edge "
+                    "of the circle or to the next chosen junction. Click "
+                    "amber dots to add junctions (click again to remove), "
+                    "click a leg to drop or restore it, then Finish "
+                    "import. The chosen junctions must be joined by road.")
+        self.preview_label.configure(text=text)
+        self._legs_status("adjust, then Finish import")
+
+    def _legs_status(self, tail):
+        """The kept counts in the status line, with a nudge when a single
+        chosen junction has fewer legs than a crossing's worth."""
+        pick = self._pick
+        count = len(pick["legs"])
+        if pick["kind"] == "single":
+            if len(pick["arms"]) < 3:
+                self._set_status(
+                    f"only {len(pick['arms'])} legs here -- click "
+                    "another dot, or re-import with local streets "
+                    "included", error=True)
+            else:
+                self._set_status(f"{count} legs kept -- {tail}")
+        else:
+            self._set_status(
+                f"{len(pick['junctions'])} junction"
+                f"{'s' if len(pick['junctions']) != 1 else ''}, "
+                f"{count} legs kept -- {tail}")
+
+    def _select_junction(self, nid):
+        """Choose ``nid``: the one junction (single) or toggle it in the
+        set (multi), every leg of the chosen set kept.
+
+        A leg is the road walked outward from the crossing to where it
+        ends (``map_import.network_legs``), not the first OSM fragment
+        touching the node -- at a dual-carriageway crossing that fragment
+        is a few metres long, and an import made of those was a junction
+        with stubs for arms.  Returns False when the click would have
+        emptied the selection.
+        """
+        pick = self._pick
+        if pick["kind"] == "single":
+            pick["junctions"] = [nid]
+        elif nid in pick["junctions"]:
+            if len(pick["junctions"]) == 1:
+                return False
+            pick["junctions"].remove(nid)
+        else:
+            pick["junctions"].append(nid)
+        links, nodes = pick["shape"]
+        legs, centres = map_import.network_legs(links, nodes,
+                                                pick["junctions"])
+        # A chosen node inside an earlier junction's cluster is that
+        # junction; it drops out of the list so a second click on it
+        # cannot leave a phantom entry.
+        pick["junctions"] = [j for j in pick["junctions"] if j in centres]
+        pick["centres"] = centres
+        pick["arms"] = [{"leg": leg,
+                         "points": [pick["to_canvas"](x, y)
+                                    for x, y in leg["points"]],
+                         "width": max(links[lid]["width"]
+                                      for lid in leg["links"])}
+                        for leg in legs]
+        pick["legs"] = set(range(len(legs)))
+        return True
 
     def _redraw_pick(self):
         canvas = self.preview
         canvas.delete("ov")
         pick = self._pick
-        chosen = pick["junction"]
-        arms = pick["incident"].get(chosen, ()) if chosen is not None else ()
+        chosen = set(pick["junctions"])
+        in_arms = {lid for arm in pick["arms"] for lid in arm["leg"]["links"]}
         # Casing under every link, colour on top -- a bare line blends
         # into the map's own road colours (this junction sits among red
         # hospital icons that read as markers, so the network has to be
-        # unmistakably drawn, not hinted).
+        # unmistakably drawn, not hinted).  The links a leg walked are
+        # drawn once, as the leg, so the leg's colour is never striped by
+        # the grey of its own fragments.
         styled = []
         for lid, pts in pick["links"].items():
+            if lid in in_arms:
+                continue
             width = max(4.0, pick["width"][lid] / pick["mpp"])
-            if lid in arms:
-                kept = lid in pick["legs"]
-                colour = _UI["accent"] if kept else "#E05B5B"
-                dash = () if kept else (7, 5)
-                width = max(5.0, width)
-            else:
-                colour, dash = "#6E7B88", ()
+            styled.append((pts, "#6E7B88", width, (), None))
+        for index, arm in enumerate(pick["arms"]):
+            kept = index in pick["legs"]
+            colour = _UI["accent"] if kept else "#E05B5B"
+            dash = () if kept else (7, 5)
+            width = max(5.0, arm["width"] / pick["mpp"])
+            styled.append((arm["points"], colour, width, dash, index))
+        flats = []
+        for pts, colour, width, dash, index in styled:
             flat = [value for point in pts for value in point]
             canvas.create_line(*flat, fill="#14100E", width=width + 4,
                                capstyle="round", joinstyle="round",
                                tags=("ov",))
-            styled.append((flat, colour, width, dash, lid, lid in arms))
+            flats.append((flat, colour, width, dash, index))
         # The colour pass is kept apart from the casing pass so no leg's
         # casing sits on a neighbour's colour; leg items are remembered so
         # hovering can thicken exactly one of them.
         self._leg_items = {}
         self._hover_leg = None
-        for flat, colour, width, dash, lid, is_arm in styled:
+        for flat, colour, width, dash, index in flats:
             item = canvas.create_line(*flat, fill=colour, width=width,
                                       dash=dash, capstyle="round",
                                       joinstyle="round", tags=("ov",))
-            if is_arm:
-                self._leg_items[lid] = (item, width)
+            if index is not None:
+                self._leg_items[index] = (item, width)
         for nid, (cx, cy) in pick["nodes"].items():
-            r = 9 if nid == chosen else 7
-            fill = _UI["accent"] if nid == chosen else "#FFB02E"
+            r = 9 if nid in chosen else 7
+            fill = _UI["accent"] if nid in chosen else "#FFB02E"
             canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=fill,
                                outline="#14100E", width=2, tags=("ov",))
         canvas.create_text(self.PREVIEW_W - 5, self.PREVIEW_H - 4,
@@ -2826,7 +2921,7 @@ class _ImportDialog:
         near_node = any(math.hypot(event.x - cx, event.y - cy) < 13.0
                         for cx, cy in pick["nodes"].values())
         leg = None
-        if not near_node and pick["junction"] is not None:
+        if not near_node and pick["junctions"]:
             leg = self._leg_at(event.x, event.y)
         self.preview.configure(
             cursor="hand2" if near_node or leg is not None else "")
@@ -2846,12 +2941,12 @@ class _ImportDialog:
         """The chosen junction's leg under the pointer, or ``None``."""
         pick = self._pick
         target, target_d = None, 12.0
-        for lid in pick["incident"][pick["junction"]]:
-            pts = pick["links"][lid]
+        for index, arm in enumerate(pick["arms"]):
+            pts = arm["points"]
             for (ax, ay), (bx, by) in zip(pts, pts[1:]):
                 d = _point_segment_px(x, y, ax, ay, bx, by)
                 if d < target_d:
-                    target, target_d = lid, d
+                    target, target_d = index, d
         return target
 
     def _pick_click(self, x, y):
@@ -2866,13 +2961,13 @@ class _ImportDialog:
             if d < best_d:
                 best, best_d = nid, d
         if best is not None:
-            pick["junction"] = best
-            pick["legs"] = set(pick["incident"][best])
+            if not self._select_junction(best):
+                self._set_status("keep at least one junction", error=True)
+                return
             self._redraw_pick()
-            self._set_status(f"{len(pick['legs'])} legs kept -- click a "
-                             "leg to toggle, then Finish import")
+            self._legs_status("click a leg to toggle, then Finish import")
             return
-        if pick["junction"] is None:
+        if not pick["junctions"]:
             return
         target = self._leg_at(x, y)
         if target is None:
@@ -2885,7 +2980,7 @@ class _ImportDialog:
         else:
             pick["legs"].add(target)
         self._redraw_pick()
-        self._set_status(f"{len(pick['legs'])} legs kept")
+        self._legs_status("Finish import when ready")
 
     def _finish(self, folder, warnings):
         for warning in warnings:
