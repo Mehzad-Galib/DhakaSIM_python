@@ -719,7 +719,9 @@ be added to every allocated green in a real deployment.
 ## Output files
 
 Each run writes a self-contained HTML report to `statistics/`, named
-`report_<YYYYMMDD_HHMMSS>.html`. It opens on a **network dashboard**: KPI
+`report_<day><Month>_<year>_<h>.<mm>.<ss><AM|PM>_BDT.html` (Dhaka time to the
+second; a name already taken gets a `_2` suffix, so two quick runs never
+overwrite each other). It opens on a **network dashboard**: KPI
 tiles (throughput, completion, speeds, time stopped, flow, trip time, fuel)
 over a grid of charts -- per-minute network flow, time stopped and trip time
 by type, the busiest links by sensor flow with their speeds, and a
@@ -939,24 +941,51 @@ up after itself; a failed basemap fetch or road fit only warns, since the
 network is runnable without them.
 
 The dialog's **Kind** choice — single intersection or a multi-intersection
-network — changes what the import does. **Single intersection adds a
-picking step**: after the roads are fetched and built (the radius defaults
-down to 300 m, and 200 m is offered), the staged network is drawn over the
-map panel with its junctions marked as amber dots, the one nearest the
-import point already selected with every leg kept. Click another dot to
-move the selection; click a leg to drop it (dashed red) or restore it —
-the leg under the pointer thickens so a click is never a guess — and at
-least two must stay. A strip under the panel asks what the junction **is**:
+network — changes what the import does, and both kinds go through a
+**picking step**: after the roads are fetched and built (a single
+intersection defaults the radius down to 300 m, and 200 m is offered), the
+staged network is drawn over the map panel with its junctions marked as
+amber dots, the one nearest the import point already selected with every
+leg kept. A **leg is the whole
+approach road**, walked outward from the junction to the edge of the
+import circle — not the first OSM fragment touching the node, which at a
+dual-carriageway crossing is a few metres long. The walk treats every
+crossing-node within 35 m of the chosen one as part of the same junction
+(OSM draws one divided-road crossing as a square of four), carries on
+through side-street junctions along whichever road turns least (under
+60°), and stops at the boundary, a sharper turn, or a road another leg
+already took. So a real four-way crossing offers its four approaches,
+each two or three hundred metres long like the surveyed networks' arms,
+and the import writes each as one link converging on the junction.
+Choosing Single also switches the roads preset to **+ local streets**
+(a junction's legs are often tertiary, and a 300 m extract stays small
+whatever it includes) and leaves the slip roads (`*_link`) out of the
+fetch — the model states a junction as arms meeting at a point and has
+no use for a slip road, while at a big junction like Shahbag the slip
+roads confuse the build badly enough to lose two of the four legs. Slip
+roads are left out of both kinds. For a single intersection, click
+another dot to move the selection; for a **multi-intersection** import,
+clicking a dot **adds** that junction with all its legs (click it again
+to remove it), and where a chosen junction's leg reaches another chosen
+junction the walk stops there, so the two share that stretch of road as
+one link between them — a corridor is picked by clicking the junctions
+along it. The chosen junctions must be joined by road (an island nothing
+connects to has no routes) and each needs two legs; Finish import says
+so if not. In either kind, click a leg to drop it (dashed red) or restore
+it — the leg under the pointer thickens so a click is never a guess — and
+at least two must stay. For a single intersection a strip under the panel
+asks what the junction **is**:
 a signalised crossing, or a **roundabout** — OSM maps many Dhaka
 roundabouts (Palashi, say) as plain crossings, and the choice writes a
 `roundabout` directive into `geometry.txt` so the model builds the ring
 and leaves the junction unsignalled; the default 8 m island + 7 m ring can
-be edited there if measured values are known. **Finish import** then cuts
-the network down to that junction and those legs before the routes,
-demand, imagery and road fitting are generated — so a single-intersection
-import really is one junction at a sensible scale, not a neighbourhood
-that happens to contain one. Closing the dialog mid-pick discards the
-staged folder.
+be edited there if measured values are known (a multi import's junctions
+are all crossings; add a `roundabout` line to `geometry.txt` by hand for
+one that is not). **Finish import** then cuts the network down to those
+junctions and legs before the routes, demand, imagery and road fitting
+are generated — so an import really is the junctions you chose at a
+sensible scale, not a neighbourhood that happens to contain them. Closing
+the dialog mid-pick discards the staged folder.
 
 The preview itself can be **dragged**: pan the map and, on release, the
 point under the centre crosshair becomes the import point — the Where box

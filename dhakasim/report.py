@@ -817,11 +817,19 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None,
 """
 
     os.makedirs(Parameters.STATS_DIR, exist_ok=True)
-    # e.g. report_29July_2026_11.30PM_BDT.html  (colon is illegal in Windows
-    # filenames, so the time uses a dot separator).
+    # e.g. report_29July_2026_11.30.07PM_BDT.html  (colon is illegal in
+    # Windows filenames, so the time uses dot separators).  The stamp
+    # carries seconds, and a name that is still taken gets a counter: the
+    # name used to stop at the minute, and a short run finishing in the
+    # same minute as the one before it silently overwrote that report.
     stamp = (f"{now_bd.day}{now_bd.strftime('%B')}_{now_bd.year}_"
-             f"{hour12}.{now_bd.strftime('%M%p')}_BDT")
+             f"{hour12}.{now_bd.strftime('%M.%S%p')}_BDT")
     path = os.path.join(Parameters.STATS_DIR, f"report_{stamp}.html")
+    counter = 2
+    while os.path.exists(path):
+        path = os.path.join(Parameters.STATS_DIR,
+                            f"report_{stamp}_{counter}.html")
+        counter += 1
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
     LAST_REPORT_PATH = os.path.abspath(path)

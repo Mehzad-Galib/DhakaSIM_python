@@ -261,139 +261,391 @@ def read_network_shape(folder: str):
     return links, nodes, to_latlon
 
 
-def prune_to_junction(folder: str, keep_link_ids,
-                      roundabout=None) -> None:
-    """Cut a staged network down to one junction and its chosen legs.
+#: Crossing-nodes this close to the chosen one are the same junction.  OSM
+#: maps a dual carriageway as two one-way ways, so one real crossing is a
+#: square of four OSM junctions a carriageway-gap apart; make_network's
+#: fusing catches most of that, but what it leaves is a stub of a few
+#: metres between two "junctions" (measured at Palashi: 6 m and 18 m), and
+#: a leg that stops at the stub's far end is a leg a few metres long.
+JUNCTION_CLUSTER_M = 35.0
+#: Walking outward, a leg carries on through a side-street junction only
+#: along the continuation that turns less than this.  A sharper turn is a
+#: different road, and the leg ends there.
+LEG_MAX_TURN_DEG = 60.0
+#: Vertices closer than this to the junction's convergence point are
+#: dropped when the legs are written: the arms then leave the point clean
+#: instead of doubling back through the crossing they came from.
+MOUTH_CLEAR_M = 12.0
 
-    Rewrites ``link.txt``, ``node.txt``, ``geometry.txt`` and
-    ``link_names.txt`` in place, keeping only the given links, renumbering
-    both id spaces densely (the simulator indexes arrays by id).  A former
-    junction left with one leg becomes a boundary node and is stored at
-    its arm's endpoint -- the stored-coordinate-equals-arm-endpoint test
-    is exactly how the file format tells the two apart.  Comment lines in
-    ``geometry.txt`` travel verbatim, the recorded centre anchor with
-    them, so the imagery georeference does not move.
 
-    ``roundabout``, when given as ``(island_m, ring_m)``, declares the
-    kept junction a roundabout in ``geometry.txt`` -- OSM's fused
-    main-roads graph states every junction as arms converging on a point,
-    which is exactly the form the survey networks use, and
-    ``Processor._open_the_circle`` builds the ring from the directive.
-    The junction is then unsignalised, as a roundabout should be.
+def _bearing(a, b) -> float:
+    return math.atan2(b[1] - a[1], b[0] - a[0])
+
+
+def _turn_degrees(incoming: float, outgoing: float) -> float:
+    turn = abs(outgoing - incoming) % (2.0 * math.pi)
+    return math.degrees(min(turn, 2.0 * math.pi - turn))
+
+
+def network_legs(links, nodes, junctions, cluster_m: float = JUNCTION_CLUSTER_M,
+                 max_turn_deg: float = LEG_MAX_TURN_DEG):
+    """The legs of the chosen junctions, each the whole road walked outward.
+
+    ``links`` and ``nodes`` are :func:`read_network_shape`'s; ``junctions``
+    the chosen node ids, in the order chosen.  The staged network is OSM's
+    graph, cut at every crossing -- so the links touching a chosen node
+    are only its first fragments, a few metres long where a side street
+    or the other half of a dual carriageway joins.  A leg the way a
+    surveyed network means it is the approach road all the way out to the
+    edge of the extract, or to the next chosen junction, and that is what
+    this walks:
+
+    * a *junction* is the chosen node together with every crossing-node
+      within ``cluster_m`` of it that a link joins it to -- one real
+      crossing, however many OSM nodes it is drawn as -- plus any
+      boundary node that close, a dangling arm end being a reconnection
+      the build missed rather than a road that ends at the crossing.  A
+      chosen node that already lies inside an earlier junction's cluster
+      is that junction, and gets no entry of its own;
+    * every link leaving a cluster starts a leg, which continues through
+      each further node along the outgoing link that turns least,
+      provided the turn is under ``max_turn_deg``, and stops at a boundary
+      node, a sharper turn, a node it has already passed, a link another
+      leg has claimed -- or on reaching another chosen junction's cluster,
+      in which case the leg joins the two junctions and the walk back
+      from the other side finds its links claimed.  A road that loops
+      back to its own crossing is not a leg.
+
+    Returns ``(legs, centres)``: ``centres`` maps each junction (in the
+    order chosen) to the mean of its cluster's node positions, and each
+    leg is ``{"junction": chosen id, "links": [ids, junction end first],
+    "forward": [bool per link -- True where the link's stated up->down
+    order runs outward], "points": [(x, y), ...] from the junction
+    outward, "end": node id, "end_junction": chosen id or None}``.  Legs
+    come grouped by junction, each group clockwise from north by the
+    bearing it leaves on, so they read round the junction like a clock
+    face.
+    """
+    def position(nid):
+        return nodes[nid]["x"], nodes[nid]["y"]
+
+    def other_end(lid, nid):
+        link = links[lid]
+        return link["down"] if link["up"] == nid else link["up"]
+
+    def outward(lid, from_nid):
+        """The link's points leaving ``from_nid``, and whether that is its
+        own stated direction."""
+        link = links[lid]
+        forward = link["up"] == from_nid
+        return (link["points"] if forward else link["points"][::-1]), forward
+
+    # Boundary nodes join a cluster too: an arm whose inner end stands
+    # alone a few metres from the crossing is one make_network failed to
+    # reconnect after fusing its carriageways (Shahbag's west arm ended
+    # 10 m short of the crossing), and the arm is still a leg.  A dead
+    # end that close would have been trimmed as a stub anyway.
+    owners = {}                       # node id -> the junction it belongs to
+    centres = {}
+    order = {}
+    for junction in junctions:
+        if junction in owners:
+            continue
+        jx, jy = position(junction)
+        cluster = {junction}
+        frontier = [junction]
+        while frontier:
+            nid = frontier.pop()
+            for lid in nodes[nid]["links"]:
+                far = other_end(lid, nid)
+                if far in cluster or far in owners:
+                    continue
+                fx, fy = position(far)
+                if math.hypot(fx - jx, fy - jy) <= cluster_m:
+                    cluster.add(far)
+                    frontier.append(far)
+        for nid, node in nodes.items():
+            if (nid not in cluster and nid not in owners
+                    and len(node["links"]) == 1):
+                fx, fy = position(nid)
+                if math.hypot(fx - jx, fy - jy) <= cluster_m:
+                    cluster.add(nid)
+        for nid in cluster:
+            owners[nid] = junction
+        centres[junction] = (
+            sum(position(n)[0] for n in cluster) / len(cluster),
+            sum(position(n)[1] for n in cluster) / len(cluster))
+        order[junction] = len(order)
+
+    claimed = set()
+    exits = []
+    for nid, owner in owners.items():
+        for lid in nodes[nid]["links"]:
+            if owners.get(other_end(lid, nid)) == owner:
+                claimed.add(lid)          # internal to the crossing
+            else:
+                exits.append((lid, nid, owner))
+
+    def leaving_bearing(item):
+        # Clockwise from north (y is down, so north is -pi/2), like a
+        # clock face: the legs list as N, E, S, W.
+        lid, nid, owner = item
+        pts, _forward = outward(lid, nid)
+        bearing = _bearing(centres[owner], pts[1] if len(pts) > 1 else pts[0])
+        return (order[owner], (bearing + math.pi / 2.0) % (2.0 * math.pi))
+
+    legs = []
+    for lid, nid, owner in sorted(exits, key=leaving_bearing):
+        if lid in claimed:
+            continue
+        pts, forward = outward(lid, nid)
+        chain, forwards, points = [lid], [forward], list(pts)
+        claimed.add(lid)
+        visited = {n for n, o in owners.items() if o == owner}
+        node = other_end(lid, nid)
+        while (node not in owners and node not in visited
+               and len(nodes[node]["links"]) >= 2):
+            visited.add(node)
+            incoming = _bearing(points[-2], points[-1])
+            best, best_turn = None, max_turn_deg
+            for cand in nodes[node]["links"]:
+                if cand in claimed or other_end(cand, node) in visited:
+                    continue
+                cpts, _f = outward(cand, node)
+                turn = _turn_degrees(incoming, _bearing(cpts[0], cpts[1]))
+                if turn < best_turn:
+                    best, best_turn = cand, turn
+            if best is None:
+                break
+            cpts, forward = outward(best, node)
+            chain.append(best)
+            forwards.append(forward)
+            points.extend(cpts[1:])
+            claimed.add(best)
+            node = other_end(best, node)
+        end_junction = owners.get(node)
+        if end_junction == owner:
+            continue                  # looped back to its own crossing
+        legs.append({"junction": owner, "links": chain, "forward": forwards,
+                     "points": points, "end": node,
+                     "end_junction": end_junction})
+    return legs, centres
+
+
+def junction_legs(links, nodes, junction, cluster_m: float = JUNCTION_CLUSTER_M,
+                  max_turn_deg: float = LEG_MAX_TURN_DEG):
+    """One junction's legs -- :func:`network_legs` for a single choice.
+
+    Returns ``(legs, centre)`` with ``centre`` that junction's own.
+    """
+    legs, centres = network_legs(links, nodes, [junction], cluster_m,
+                                 max_turn_deg)
+    return legs, centres[junction]
+
+
+def check_legs(legs, centres):
+    """Why this choice of junctions and legs cannot be written, or ``None``.
+
+    Every junction needs two legs (one makes it a dead end, not a
+    junction), and the junctions must be joined by kept legs into one
+    network -- ``run_sim`` routes between boundary nodes, and a piece
+    nothing connects to is a route it cannot build.  Called by the dialog
+    before Finish, so the answer reaches the user with the pick still on
+    screen, and again by :func:`prune_to_junctions` as its own defence.
+    """
+    counts = {jid: 0 for jid in centres}
+    parent = {jid: jid for jid in centres}
+
+    def root(jid):
+        while parent[jid] != jid:
+            jid = parent[jid]
+        return jid
+
+    for leg in legs:
+        counts[leg["junction"]] += 1
+        if leg["end_junction"] is not None:
+            counts[leg["end_junction"]] += 1
+            parent[root(leg["junction"])] = root(leg["end_junction"])
+    if len(legs) < 2:
+        return "keep at least two legs, or there is nothing to route between"
+    short = [jid for jid, n in counts.items() if n < 2]
+    if short:
+        return ("every junction needs at least two legs -- one of the "
+                "chosen junctions has fewer")
+    if len({root(jid) for jid in centres}) > 1:
+        return ("the chosen junctions are not joined by a road -- choose "
+                "junctions along the same streets, or import them "
+                "separately")
+    return None
+
+
+def prune_to_junction(folder: str, legs, centre, roundabout=None) -> None:
+    """:func:`prune_to_junctions` for one junction and its legs."""
+    junction = legs[0]["junction"] if legs else None
+    prune_to_junctions(folder, legs, {junction: centre},
+                       {junction: roundabout} if roundabout else None)
+
+
+def prune_to_junctions(folder: str, legs, centres, roundabouts=None) -> None:
+    """Cut a staged network down to the chosen junctions and their legs.
+
+    ``legs`` are :func:`network_legs` entries and ``centres`` its
+    convergence points, in the order the junctions were chosen.  Rewrites
+    ``link.txt``, ``node.txt``, ``geometry.txt`` and ``link_names.txt``
+    in place: each leg becomes **one link**, from its junction (nodes
+    ``0..J-1`` in that order, stored at (0, 0) by the format's
+    convention) to either a boundary node stored at the leg's far end or
+    the other junction it reached, ids dense in both spaces (the
+    simulator indexes arrays by id).  Every leg starts -- and a joining
+    leg ends -- at a junction's centre: the survey networks state a
+    junction as arms converging on a point, and
+    ``Processor._open_the_circle`` and the drawn junction patch both rely
+    on it; vertices inside ``MOUTH_CLEAR_M`` of a centre are dropped.
+
+    A leg takes its width length-weighted over the links it walked and its
+    median from the widest of them (``make_network``'s own chain rules);
+    it is one-way only if every link along it is, all running the same
+    way, in which case the link is written in the direction of travel.
+    ``geometry.txt`` keeps its leading comment block -- the recorded centre
+    anchor, so the imagery georeference does not move -- and the
+    directives are regenerated for the new links.
+
+    ``roundabouts`` maps a junction to ``(island_m, ring_m)`` to declare
+    it one: converging arms plus the directive is exactly the form the
+    surveyed kakrail uses, so the ring gets built and the junction goes
+    unsignalised, as a roundabout should.
 
     Routes and demand are NOT touched here -- the caller regenerates them
     (``run_sim.py``), which is why this must run before that step.
     """
-    keep = set(keep_link_ids)
-    link_rows = [row for row
-                 in network_files.read_link_rows(
-                     os.path.join(folder, "link.txt"))
-                 if row.link_id in keep]
-    if len(link_rows) < 2:
-        raise RuntimeError("keep at least two legs, or there is nothing "
-                           "to route between")
-    new_link_id = {row.link_id: i for i, row in enumerate(link_rows)}
+    legs = list(legs)
+    problem = check_legs(legs, centres)
+    if problem:
+        raise RuntimeError(problem)
+    junction_ids = {jid: i for i, jid in enumerate(centres)}
+    rows = {row.link_id: row for row in network_files.read_link_rows(
+        os.path.join(folder, "link.txt"))}
+    facts = network_files.read_geometry(os.path.join(folder, "geometry.txt"))
+    names = {}
+    names_path = os.path.join(folder, "link_names.txt")
+    if os.path.isfile(names_path):
+        with open(names_path, "r", encoding="utf-8") as handle:
+            for raw in handle:
+                tokens = raw.split(None, 1)
+                if len(tokens) == 2 and tokens[0].isdigit():
+                    names[int(tokens[0])] = tokens[1].strip()
 
-    node_rows = network_files.read_node_rows(os.path.join(folder,
-                                                          "node.txt"))
-    kept_nodes = [row for row in node_rows
-                  if any(i in keep for i in row.link_ids)]
-    new_node_id = {row.node_id: i for i, row in enumerate(kept_nodes)}
+    def length(lid):
+        return sum(math.hypot(s.ex - s.sx, s.ey - s.sy)
+                   for s in rows[lid].segments)
 
-    def arm_end(row, node_id):
-        seg = (row.segments[0] if row.up == node_id else row.segments[-1])
-        return ((seg.sx, seg.sy) if row.up == node_id
-                else (seg.ex, seg.ey))
+    def clear_of(point, centre):
+        return math.hypot(point[0] - centre[0],
+                          point[1] - centre[1]) >= MOUTH_CLEAR_M
 
-    links_out = []
-    for row in link_rows:
-        links_out.append((new_link_id[row.link_id],
-                          new_node_id[row.up], new_node_id[row.down],
-                          [(s.sx, s.sy, s.ex, s.ey, s.width)
-                           for s in row.segments]))
-    nodes_out = []
-    for row in kept_nodes:
-        incident = [i for i in row.link_ids if i in keep]
-        x, y = row.x, row.y
-        if len(incident) == 1:
-            x, y = arm_end(next(r for r in link_rows
-                                if r.link_id == incident[0]), row.node_id)
-        elif len(incident) >= 2:
-            x, y = 0.0, 0.0            # a junction, by the convention
-        nodes_out.append((new_node_id[row.node_id], x, y,
-                          sorted(new_link_id[i] for i in incident)))
+    links_out, boundary_nodes = [], []
+    incident = {i: [] for i in junction_ids.values()}
+    medians, oneways, leg_names = {}, set(), {}
+    for new_id, leg in enumerate(legs):
+        chain = list(leg["links"])
+        lengths = [max(length(lid), 1e-9) for lid in chain]
+        width = (sum(rows[lid].segments[0].width * n
+                     for lid, n in zip(chain, lengths)) / sum(lengths))
+        median = max((facts.medians.get(lid, 0.0) for lid in chain),
+                     default=0.0)
+        forwards = list(leg["forward"])
+        all_oneway = all(lid in facts.oneways for lid in chain)
+        outward_travel = all_oneway and all(forwards)
+        inward_travel = all_oneway and not any(forwards)
+
+        start = centres[leg["junction"]]
+        up = junction_ids[leg["junction"]]
+        if leg["end_junction"] is not None:
+            finish = centres[leg["end_junction"]]
+            down = junction_ids[leg["end_junction"]]
+            points = [start] + [p for p in leg["points"][1:-1]
+                                if clear_of(p, start) and clear_of(p, finish)
+                                ] + [finish]
+        else:
+            finish = leg["points"][-1]
+            down = len(junction_ids) + len(boundary_nodes)
+            boundary_nodes.append((down, finish[0], finish[1], [new_id]))
+            points = [start] + [p for p in leg["points"][1:]
+                                if clear_of(p, start)]
+            if len(points) < 2:
+                points = [start, finish]
+        if inward_travel:
+            points, up, down = points[::-1], down, up
+        links_out.append((new_id, up, down,
+                          [(a[0], a[1], b[0], b[1], width)
+                           for a, b in zip(points, points[1:])]))
+        for node_id in (up, down):
+            if node_id in incident:
+                incident[node_id].append(new_id)
+        if median > 0:
+            medians[new_id] = median
+        if outward_travel or inward_travel:
+            oneways.add(new_id)
+        named = [lid for lid in chain if names.get(lid)]
+        if named:
+            leg_names[new_id] = names[max(named, key=length)]
+    nodes_out = ([(i, 0.0, 0.0, sorted(incident[i]))
+                  for i in sorted(incident)] + boundary_nodes)
 
     network_files.write_link_rows(os.path.join(folder, "link.txt"),
                                   links_out)
     network_files.write_node_rows(os.path.join(folder, "node.txt"),
                                   nodes_out)
 
-    # geometry.txt: directives are filtered and remapped, comments (the
-    # centre anchor included) pass through untouched.
+    # geometry.txt: the provenance block on top (the centre anchor lives
+    # there) is kept verbatim; every directive is regenerated.
     geometry_path = os.path.join(folder, "geometry.txt")
     kept_lines = []
     with open(geometry_path, "r", encoding="utf-8") as handle:
         for raw in handle:
-            line, _, comment = raw.partition("#")
-            tokens = line.split()
-            if not tokens:
-                kept_lines.append(raw)
-                continue
-            keyword = tokens[0].lower()
-            tail = ("  #" + comment.rstrip("\n")) if comment else ""
-            if keyword in ("median", "oneway", "straight"):
-                link_id = int(tokens[1])
-                if link_id in keep:
-                    rest = " ".join(tokens[2:])
-                    rest = (" " + rest) if rest else ""
-                    kept_lines.append(
-                        f"{keyword} {new_link_id[link_id]}{rest}{tail}\n")
-            elif keyword == "turnlane":
-                a, b = int(tokens[1]), int(tokens[2])
-                if a in keep and b in keep:
-                    kept_lines.append(
-                        f"turnlane {new_link_id[a]} {new_link_id[b]} "
-                        f"{tokens[3]} {tokens[4]}{tail}\n")
-            elif keyword == "roundabout":
-                node_id = int(tokens[1])
-                if node_id in new_node_id:
-                    rest = " ".join(tokens[2:])
-                    kept_lines.append(
-                        f"roundabout {new_node_id[node_id]} {rest}{tail}\n")
-            else:
-                kept_lines.append(raw)   # unknown directives pass through
-    if roundabout is not None:
-        # The kept junction is the node most of the legs meet at.
-        counts = {}
-        for _new_id, up, down, _rows in links_out:
-            counts[up] = counts.get(up, 0) + 1
-            counts[down] = counts.get(down, 0) + 1
-        junction = max(counts, key=counts.get)
-        island_m, ring_m = roundabout
+            stripped = raw.strip()
+            if stripped and not stripped.startswith("#"):
+                break
+            if stripped.startswith(("# Medians", "# No divided",
+                                    "# One-way")):
+                break                 # make_network's section headers
+            kept_lines.append(raw)
+    kept_lines.append(f"# Cut down to {len(centres)} junction(s) and "
+                      f"{len(legs)} legs by the import dialog's junction "
+                      "picker.\n")
+    if medians:
+        kept_lines.append("# Medians, measured as the gap between the two "
+                          "one-way\n# carriageways OSM maps a divided road "
+                          "as.\n")
+        for lid, gap in medians.items():
+            name = leg_names.get(lid, "")
+            kept_lines.append(f"median {lid} {gap:.1f}"
+                              + (f"   # {name}" if name else "") + "\n")
+    if oneways:
         kept_lines.append(
-            f"roundabout {junction} {island_m:g} {ring_m:g}"
+            "# One-way carriageways.  Travel runs up -> down (the\n"
+            "# order the link's segments are written in); the\n"
+            "# simulator opens the full width to that direction and\n"
+            "# run_sim.py routes nothing against it.\n")
+        for lid in sorted(oneways):
+            name = leg_names.get(lid, "")
+            kept_lines.append(f"oneway {lid}"
+                              + (f"   # {name}" if name else "") + "\n")
+    for jid, ring in (roundabouts or {}).items():
+        if ring is None or jid not in junction_ids:
+            continue
+        island_m, ring_m = ring
+        kept_lines.append(
+            f"roundabout {junction_ids[jid]} {island_m:g} {ring_m:g}"
             "   # declared a roundabout in the import dialog; edit these "
             "measured island/ring metres if known\n")
     with open(geometry_path, "w", encoding="utf-8") as handle:
         handle.writelines(kept_lines)
 
-    names_path = os.path.join(folder, "link_names.txt")
     if os.path.isfile(names_path):
-        renamed = []
-        with open(names_path, "r", encoding="utf-8") as handle:
-            for raw in handle:
-                tokens = raw.split(None, 1)
-                if not tokens:
-                    continue
-                try:
-                    link_id = int(tokens[0])
-                except ValueError:
-                    continue
-                if link_id in keep:
-                    name = tokens[1].strip() if len(tokens) > 1 else ""
-                    renamed.append(f"{new_link_id[link_id]} {name}\n")
         with open(names_path, "w", encoding="utf-8") as handle:
-            handle.writelines(renamed)
+            for lid, name in sorted(leg_names.items()):
+                handle.write(f"{lid} {name}\n")
 
 
 def bbox_around(lat: float, lon: float, radius_m: float):
@@ -687,8 +939,17 @@ class ImportJob:
             raise RuntimeError(
                 f"input/{self.folder} already exists -- pick another name")
 
+        # No slip roads (``*_link``).  The model states a junction as arms
+        # converging on a point and has nothing to do with a slip road;
+        # what the slip roads do is wreck the staged graph -- at Shahbag
+        # they fused into a hairpin and a loop, left an arm dangling 10 m
+        # short of the crossing, and the junction came out with two legs.
+        # Without them the same extract is four crossing-nodes and four
+        # arms.  Both kinds go through the junction picker now, so both
+        # want the clean graph.
+        classes = tuple(c for c in self.classes if not c.endswith("_link"))
         bbox = bbox_around(self.lat, self.lon, self.radius_m)
-        geojson = fetch_roads(bbox, self.classes, log, cancelled)
+        geojson = fetch_roads(bbox, classes, log, cancelled)
         ways = len(geojson["features"])
         if ways == 0:
             raise RuntimeError(
@@ -708,7 +969,7 @@ class ImportJob:
                 "make_network.py", extract, "--out", out_dir,
                 "--centre", f"{self.lat},{self.lon}",
                 "--radius", str(float(self.radius_m)),
-                "--classes", *self.classes,
+                "--classes", *classes,
                 "--note", f"Imported via the GUI map-import dialog "
                           f"around {self.lat:.5f},{self.lon:.5f}",
             ]
@@ -780,9 +1041,15 @@ class ImportJob:
         # Zoom 18 over a wide extract busts fetch_basemap's tile budget;
         # one step down quarters the tile count and is still street-legible.
         zoom = "18" if self.radius_m <= 1500 else "17"
+        # The arms stop at the import circle; the imagery carries on well
+        # past them, or the window shows bare ground the moment the view
+        # is wider than the network (a 60 m margin round a 300 m junction
+        # left half the screen blank).  Less for a multi import, whose
+        # kilometre radius is already near fetch_basemap's tile budget.
+        margin = "200" if self.kind == "single" else "120"
         if self._run_script(
                 ["fetch_basemap.py", "--network", self.folder,
-                 "--provider", "osm", "--zoom", zoom],
+                 "--provider", "osm", "--zoom", zoom, "--margin", margin],
                 log, cancelled, "fetch_basemap") != 0:
             self.warnings.append(
                 "the background map could not be fetched -- run "

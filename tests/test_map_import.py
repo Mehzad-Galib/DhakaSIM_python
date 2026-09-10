@@ -169,13 +169,17 @@ class RemovalTest(unittest.TestCase):
 
 
 class PruneTest(unittest.TestCase):
-    """The junction picker's file surgery, on a synthetic staged network.
+    """The junction picker's legs and its file surgery, on a synthetic
+    staged network shaped like what make_network leaves at a real
+    crossing.
 
-    A 4-leg junction (node 0) with one link carrying on past a boundary
-    node; keeping three legs must renumber both id spaces densely, turn
-    the trimmed junction ends into boundary nodes stored at their arm
-    endpoints, remap the geometry directives, and leave the centre-anchor
-    comment (the imagery georeference) untouched.
+    Node 0 is the chosen junction.  Its east leg runs through a side
+    street's junction (node 4, where link 6 turns off at 90 degrees) and
+    on to the boundary; its south arm is a 10 m stub (link 3) to node 5, a
+    second crossing-node of the same junction, from which the real south
+    leg (link 4, one-way outward) and a south-west leg (link 5) leave.  So
+    the junction has four legs -- west, east, south, south-west -- though
+    node 0 itself touches three links and one of those is a stub.
     """
 
     FOLDER = os.path.join("input", "_test_import_tmp")
@@ -186,67 +190,210 @@ class PruneTest(unittest.TestCase):
         from dhakasim import network_files
         network_files.write_link_rows(
             os.path.join(self.FOLDER, "link.txt"),
-            [(0, 1, 0, [(100, 500, 500, 500, 10.0)]),
-             (1, 0, 2, [(500, 500, 900, 500, 10.0)]),
-             (2, 3, 0, [(500, 100, 500, 500, 8.0)]),
-             (3, 0, 4, [(500, 500, 500, 900, 8.0)]),
-             (4, 4, 5, [(500, 900, 500, 1200, 8.0)])])
+            [(0, 1, 0, [(100, 500, 500, 500, 10.0)]),          # west leg
+             (1, 0, 4, [(500, 500, 700, 500, 10.0)]),          # east, 1st
+             (2, 4, 2, [(700, 500, 900, 500, 12.0)]),          # east, 2nd
+             (3, 0, 5, [(500, 500, 500, 510, 33.0)]),          # the stub
+             (4, 5, 3, [(500, 510, 500, 900, 8.0)]),           # south
+             (5, 5, 6, [(500, 510, 200, 800, 8.0)]),           # south-west
+             (6, 4, 7, [(700, 500, 700, 200, 6.0)])])          # side street
         network_files.write_node_rows(
             os.path.join(self.FOLDER, "node.txt"),
-            [(0, 0, 0, [0, 1, 2, 3]), (1, 100, 500, [0]),
-             (2, 900, 500, [1]), (3, 500, 100, [2]),
-             (4, 0, 0, [3, 4]), (5, 500, 1200, [4])])
+            [(0, 0, 0, [0, 1, 3]), (1, 100, 500, [0]),
+             (2, 900, 500, [2]), (3, 500, 900, [4]),
+             (4, 0, 0, [1, 2, 6]), (5, 0, 0, [3, 4, 5]),
+             (6, 200, 800, [5]), (7, 700, 200, [6])])
         with open(os.path.join(self.FOLDER, "geometry.txt"), "w",
                   encoding="utf-8") as handle:
             handle.write("# Centre 23.700000,90.400000 at 500.0,500.0.\n"
-                         "median 1 2.0   # east leg\n"
-                         "median 4 3.0\n"
+                         "# a provenance line\n"
+                         "median 2 2.0   # east leg, far half\n"
+                         "median 3 5.0\n"
                          "oneway 4\n")
         with open(os.path.join(self.FOLDER, "link_names.txt"), "w",
                   encoding="utf-8") as handle:
-            for i in range(5):
+            for i in range(7):
                 handle.write(f"{i} road {i}\n")
+        self.shape = map_import.read_network_shape(self.FOLDER)
 
     def tearDown(self):
         shutil.rmtree(self.FOLDER, ignore_errors=True)
 
-    def test_pruning_keeps_the_chosen_legs_and_renumbers(self):
+    def legs(self):
+        links, nodes, _ = self.shape
+        return map_import.junction_legs(links, nodes, 0)
+
+    def test_the_legs_are_whole_roads_not_first_fragments(self):
+        legs, centre = self.legs()
+        # Four legs, clockwise from north (none here, so east, south,
+        # south-west, west), the stub absorbed into the junction and the
+        # side street left alone.
+        self.assertEqual([leg["end"] for leg in legs], [2, 3, 6, 1])
+        east = legs[0]
+        self.assertEqual(east["links"], [1, 2])          # walked through node 4
+        self.assertEqual(east["points"], [(500, 500), (700, 500), (900, 500)])
+        south = legs[1]
+        self.assertEqual(south["links"], [4])
+        self.assertEqual(south["forward"], [True])
+        self.assertEqual(south["points"][0], (500, 510))
+        # The convergence point is the mean of the two crossing-nodes.
+        self.assertEqual(centre, (500.0, 505.0))
+        # No leg walked the stub or the side street.
+        walked = {lid for leg in legs for lid in leg["links"]}
+        self.assertNotIn(3, walked)
+        self.assertNotIn(6, walked)
+
+    def test_a_sharp_turn_ends_the_leg(self):
+        links, nodes, _ = self.shape
+        # With the straight-on east half gone, the walk reaches node 4 and
+        # finds only the 90-degree side street: the leg stops there.
+        links = {lid: link for lid, link in links.items() if lid != 2}
+        nodes = dict(nodes)
+        nodes[4] = dict(nodes[4], links=[1, 6])
+        legs, _ = map_import.junction_legs(links, nodes, 0)
+        east = next(leg for leg in legs if leg["links"][0] == 1)
+        self.assertEqual(east["links"], [1])
+        self.assertEqual(east["end"], 4)
+
+    def test_pruning_writes_one_link_per_leg_converging_on_the_junction(self):
         from dhakasim import network_files
-        map_import.prune_to_junction(self.FOLDER, {0, 1, 3})
-        links = network_files.read_link_rows(
-            os.path.join(self.FOLDER, "link.txt"))
-        self.assertEqual([row.link_id for row in links], [0, 1, 2])
+        legs, centre = self.legs()
+        kept = [legs[0], legs[1], legs[3]]                # drop south-west
+        map_import.prune_to_junction(self.FOLDER, kept, centre)
+        links = {row.link_id: row for row in network_files.read_link_rows(
+            os.path.join(self.FOLDER, "link.txt"))}
+        self.assertEqual(sorted(links), [0, 1, 2])
         nodes = {row.node_id: row for row in network_files.read_node_rows(
             os.path.join(self.FOLDER, "node.txt"))}
         self.assertEqual(len(nodes), 4)
-        # The junction keeps the stored-at-(0,0) convention and its three
-        # remaining legs, remapped.
-        junction = next(row for row in nodes.values()
-                        if len(row.link_ids) == 3)
-        self.assertEqual((junction.x, junction.y), (0.0, 0.0))
-        self.assertEqual(sorted(junction.link_ids), [0, 1, 2])
-        # The end that used to carry on to link 4 is a boundary node now,
-        # stored at its arm's endpoint.
-        south = next(row for row in nodes.values()
-                     if row.link_ids == [2])
-        self.assertEqual((south.x, south.y), (500.0, 900.0))
+        # Node 0 is the junction, stored at (0,0), with every leg on it.
+        self.assertEqual((nodes[0].x, nodes[0].y), (0.0, 0.0))
+        self.assertEqual(nodes[0].link_ids, [0, 1, 2])
+        # The east leg is one link now, both fragments walked, its width
+        # length-weighted (200 m of 10 and 200 m of 12), starting at the
+        # convergence point and ending at the boundary node.
+        east = links[0]
+        self.assertEqual(len(east.segments), 2)
+        self.assertEqual((east.segments[0].sx, east.segments[0].sy),
+                         (500, 505))
+        self.assertEqual((east.segments[-1].ex, east.segments[-1].ey),
+                         (900, 500))
+        self.assertAlmostEqual(east.segments[0].width, 11.0)
+        self.assertEqual((nodes[1].x, nodes[1].y), (900.0, 500.0))
+        self.assertEqual(nodes[1].link_ids, [0])
+        # The one-way south leg runs outward, so it is written junction
+        # first, as travel direction demands.
+        south = links[1]
+        self.assertEqual((south.up, south.down), (0, 2))
         facts = network_files.read_geometry(
             os.path.join(self.FOLDER, "geometry.txt"))
-        self.assertEqual(facts.medians, {1: 2.0})     # remapped, 4's gone
-        self.assertEqual(facts.oneways, set())
+        self.assertEqual(facts.oneways, {1})
+        self.assertEqual(facts.medians, {0: 2.0})     # the far half's median
         self.assertEqual(facts.centre, (23.7, 90.4))  # anchor untouched
         self.assertEqual(facts.anchor, (500.0, 500.0))
+        with open(os.path.join(self.FOLDER, "geometry.txt"),
+                  encoding="utf-8") as handle:
+            self.assertIn("# a provenance line", handle.read())
         with open(os.path.join(self.FOLDER, "link_names.txt"),
                   encoding="utf-8") as handle:
             names = handle.read().splitlines()
-        self.assertEqual(names, ["0 road 0", "1 road 1", "2 road 3"])
+        # A leg is named after the longest named road it walked.
+        self.assertEqual(names, ["0 road 1", "1 road 4", "2 road 0"])
+
+    def test_an_inward_one_way_leg_is_written_towards_the_junction(self):
+        from dhakasim import network_files
+        with open(os.path.join(self.FOLDER, "geometry.txt"), "a",
+                  encoding="utf-8") as handle:
+            handle.write("oneway 1\noneway 2\n")
+        self.shape = map_import.read_network_shape(self.FOLDER)
+        legs, centre = self.legs()
+        links, nodes, _ = self.shape
+        # Reverse the east fragments so travel runs towards the junction.
+        for lid in (1, 2):
+            links[lid] = dict(links[lid], up=links[lid]["down"],
+                              down=links[lid]["up"],
+                              points=links[lid]["points"][::-1])
+        legs, centre = map_import.junction_legs(links, nodes, 0)
+        east = next(leg for leg in legs if leg["end"] == 2)
+        self.assertEqual(east["forward"], [False, False])
+        map_import.prune_to_junction(self.FOLDER, [east, legs[-1]], centre)
+        rows = {row.link_id: row for row in network_files.read_link_rows(
+            os.path.join(self.FOLDER, "link.txt"))}
+        self.assertEqual((rows[0].up, rows[0].down), (1, 0))
+        self.assertEqual((rows[0].segments[0].sx, rows[0].segments[0].sy),
+                         (900, 500))
+        facts = network_files.read_geometry(
+            os.path.join(self.FOLDER, "geometry.txt"))
+        self.assertEqual(facts.oneways, {0})
+
+    def test_two_junctions_share_the_road_between_them(self):
+        from dhakasim import network_files
+        links, nodes, _ = self.shape
+        # Node 0 and the side street's junction (node 4, 200 m east):
+        # the east leg from 0 now ends at 4 and joins the two, the walk
+        # back from 4 finds it claimed, and 4 offers its own remaining
+        # legs -- east to the boundary, and the side street north.
+        legs, centres = map_import.network_legs(links, nodes, [0, 4])
+        self.assertEqual(list(centres), [0, 4])
+        joining = [leg for leg in legs if leg["end_junction"] is not None]
+        self.assertEqual(len(joining), 1)
+        self.assertEqual((joining[0]["junction"], joining[0]["end_junction"]),
+                         (0, 4))
+        self.assertEqual(joining[0]["links"], [1])
+        from_4 = [leg for leg in legs if leg["junction"] == 4]
+        self.assertEqual(sorted(leg["links"][0] for leg in from_4), [2, 6])
+        self.assertEqual(len(legs), 6)
+        self.assertIsNone(map_import.check_legs(legs, centres))
+
+        map_import.prune_to_junctions(self.FOLDER, legs, centres)
+        rows = {row.link_id: row for row in network_files.read_link_rows(
+            os.path.join(self.FOLDER, "link.txt"))}
+        nodes_out = {row.node_id: row for row in
+                     network_files.read_node_rows(
+                         os.path.join(self.FOLDER, "node.txt"))}
+        # Junctions first, both stored at (0,0); node 1 is the side
+        # street's junction with three links on it.
+        self.assertEqual((nodes_out[0].x, nodes_out[0].y), (0.0, 0.0))
+        self.assertEqual((nodes_out[1].x, nodes_out[1].y), (0.0, 0.0))
+        self.assertEqual(len(nodes_out[1].link_ids), 3)
+        self.assertEqual(len(nodes_out), 2 + 5)        # five boundary ends
+        # The joining link runs centre to centre.
+        join = next(row for row in rows.values()
+                    if {row.up, row.down} == {0, 1})
+        self.assertEqual((join.segments[0].sx, join.segments[0].sy),
+                         (500, 505))
+        self.assertEqual((join.segments[-1].ex, join.segments[-1].ey),
+                         (700, 500))
+
+    def test_disconnected_or_dead_end_junctions_are_refused(self):
+        links, nodes, _ = self.shape
+        legs, centres = map_import.network_legs(links, nodes, [0, 4])
+        # Drop the joining leg: two islands.
+        apart = [leg for leg in legs if leg["end_junction"] is None]
+        self.assertIn("not joined", map_import.check_legs(apart, centres))
+        # Keep only one leg on junction 4: a dead end, not a junction.
+        thin = [leg for leg in legs
+                if leg["junction"] == 0 or leg["links"] == [6]]
+        thin = [leg for leg in thin if leg["end_junction"] is None]
+        self.assertIn("at least two legs",
+                      map_import.check_legs(thin, centres))
+        with self.assertRaises(RuntimeError):
+            map_import.prune_to_junctions(self.FOLDER, apart, centres)
+
+    def test_a_node_inside_another_junctions_cluster_is_that_junction(self):
+        links, nodes, _ = self.shape
+        # Node 5 is the stub's far end, 10 m from node 0: choosing both
+        # is one junction, and the legs are node 0's alone.
+        legs, centres = map_import.network_legs(links, nodes, [0, 5])
+        self.assertEqual(list(centres), [0])
+        self.assertEqual(len(legs), 4)
 
     def test_the_shape_reader_places_the_junction_at_its_arms(self):
-        links, nodes, to_latlon = map_import.read_network_shape(self.FOLDER)
-        self.assertEqual(len(links), 5)
+        links, nodes, to_latlon = self.shape
+        self.assertEqual(len(links), 7)
         junction = nodes[0]
         self.assertTrue(junction["junction"])
-        # Stored at (0,0); drawable position is the mean of the four arm
+        # Stored at (0,0); drawable position is the mean of the arm
         # endpoints, which all meet at (500, 500).
         self.assertEqual((junction["x"], junction["y"]), (500.0, 500.0))
         # The anchor maps its own point back to the recorded centre.
@@ -255,24 +402,22 @@ class PruneTest(unittest.TestCase):
         self.assertAlmostEqual(lon, 90.4, places=9)
 
     def test_pruning_refuses_a_single_leg(self):
+        legs, centre = self.legs()
         with self.assertRaises(RuntimeError):
-            map_import.prune_to_junction(self.FOLDER, {0})
+            map_import.prune_to_junction(self.FOLDER, legs[:1], centre)
 
     def test_a_declared_roundabout_lands_on_the_junction(self):
         from dhakasim import network_files
-        map_import.prune_to_junction(self.FOLDER, {0, 1, 3},
+        legs, centre = self.legs()
+        map_import.prune_to_junction(self.FOLDER, legs, centre,
                                      roundabout=(8.0, 7.0))
         facts = network_files.read_geometry(
             os.path.join(self.FOLDER, "geometry.txt"))
-        # One roundabout, on the node the kept legs meet at (the junction
-        # keeps stored (0,0), remapped id), with island and ring radii.
-        self.assertEqual(len(facts.roundabouts), 1)
-        (node_id, island), = facts.roundabouts.items()
-        self.assertEqual(island, 8.0)
-        self.assertEqual(facts.circulatory[node_id], 7.0)
+        self.assertEqual(facts.roundabouts, {0: 8.0})
+        self.assertEqual(facts.circulatory, {0: 7.0})
         nodes = {row.node_id: row for row in network_files.read_node_rows(
             os.path.join(self.FOLDER, "node.txt"))}
-        self.assertEqual(len(nodes[node_id].link_ids), 3)
+        self.assertEqual(len(nodes[0].link_ids), 4)
 
 
 if __name__ == "__main__":
