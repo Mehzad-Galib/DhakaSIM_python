@@ -17,8 +17,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from make_network import (  # noqa: E402
-    Projector, _closest_on_polyline, _median, _resample, merge_dual_carriageways,
-    polyline_length, simplify, way_width,
+    Projector, _closest_on_polyline, _median, _resample, collapse_roundabouts,
+    merge_dual_carriageways, polyline_length, simplify, way_width,
 )
 
 TOL = 1e-6
@@ -231,6 +231,33 @@ def test_diverging_roads_are_not_paired():
     b = _oneway([(300.0, 260.0), (0.0, 10.0)])
     edges, fused = merge_dual_carriageways([a, b], max_separation=45.0)
     assert fused == 0
+
+
+def test_a_roundabout_ring_collapses_to_its_centre():
+    """A junction=roundabout ring goes, and every road that touched it
+    ends at the ring's centre -- the survey form of a roundabout.  A way
+    running through (two ring vertices) keeps one centre point, an arc
+    of the same ring shares the centre, and roads elsewhere are untouched.
+    """
+    ring = [[0.0, 1.0], [1.0, 0.0], [0.0, -1.0], [-1.0, 0.0], [0.0, 1.0]]
+    ways = [
+        ({"highway": "primary", "junction": "roundabout"}, ring[:3]),
+        ({"highway": "primary", "junction": "roundabout"}, ring[2:]),
+        ({"highway": "primary"}, [[0.0, 5.0], [0.0, 1.0]]),        # ends on it
+        ({"highway": "primary"}, [[5.0, 0.0], [1.0, 0.0], [0.0, 0.2],
+                                  [-1.0, 0.0], [-5.0, 0.0]]),      # through it
+        ({"highway": "tertiary"}, [[9.0, 9.0], [9.0, 12.0]]),      # elsewhere
+    ]
+    out, count = collapse_roundabouts(ways)
+    assert count == 1, count
+    assert len(out) == 3, out
+    north, through, far = out
+    assert north[1] == [[0.0, 5.0], [0.0, 0.0]], north[1]
+    assert through[1] == [[5.0, 0.0], [0.0, 0.0], [-5.0, 0.0]], through[1]
+    assert far[1] == [[9.0, 9.0], [9.0, 12.0]]
+    # No ring at all: the ways come back as they were.
+    same, none = collapse_roundabouts(ways[2:])
+    assert none == 0 and same == ways[2:]
 
 
 if __name__ == "__main__":

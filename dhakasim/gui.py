@@ -2323,6 +2323,12 @@ class _ImportDialog:
             side="left", padx=(10, 0))
         option._button(buttons, "Close", self._close).pack(
             side="left", padx=(10, 0))
+        # Shown only while picking: the second try.  The legs a junction
+        # offers are whatever the extract holds, so when the one you want
+        # is missing the answer is a wider radius or more road classes --
+        # change them on the form and Rebuild fetches again without
+        # closing the dialog or retyping anything.
+        self._rebuild_btn = option._button(buttons, "Rebuild", self._rebuild)
         self.status = tk.Label(buttons, text="", font=("Segoe UI", 9),
                                background=_UI["panel"],
                                foreground=_UI["muted"], anchor="w")
@@ -2432,6 +2438,7 @@ class _ImportDialog:
                 return
             self._picking = False
             self._jtype_row.pack_forget()
+            self._rebuild_btn.pack_forget()
             self._import_btn.configure(text="Cancel")
             self._set_status("finishing the import...")
             # Default ring sizes for a declared roundabout; measured
@@ -2467,15 +2474,72 @@ class _ImportDialog:
         merge = self.dual_var.get() == "Fuse into one road"
         kind = ("single" if self.kind_var.get().startswith("Single")
                 else "multi")
+        # An earlier import under this name may be replaced -- that is
+        # the second try after legs did not come out -- but only with a
+        # yes, and never a shipped network.  Asked here, on the Tk
+        # thread, because the worker cannot put up a dialog.
+        replace = False
+        folder = self._folder_for(where, name)
+        if folder is not None and os.path.isdir(os.path.join("input",
+                                                             folder)):
+            if not map_import.is_imported(folder):
+                self._set_status(f"input/{folder} is a shipped network -- "
+                                 "pick another name", error=True)
+                return
+            if not messagebox.askyesno(
+                    "Replace the earlier import?",
+                    f"input/{folder} is an earlier import. Replace it with "
+                    "this one?\n\nThe old one is deleted as soon as the "
+                    "new fetch starts.", parent=self.top):
+                self._set_status("kept the earlier import -- pick another "
+                                 "name to import alongside it")
+                return
+            replace = True
         self._cancelled = False
         self._import_btn.configure(text="Cancel")
         self._set_status("working -- this takes a minute or two")
         self._worker = threading.Thread(
             target=self._work,
-            args=(where, name, radius, classes, merge, kind), daemon=True)
+            args=(where, name, radius, classes, merge, kind, replace),
+            daemon=True)
         self._worker.start()
 
-    def _work(self, where, name, radius, classes, merge, kind):
+    @staticmethod
+    def _folder_for(where, name):
+        """The folder an import would land in, or None until geocoded.
+
+        Mirrors the worker's naming: the typed name, else the typed
+        coordinates, else the place text itself (the geocoder's display
+        name is never used -- see _work).
+        """
+        if name:
+            return map_import.slugify(name)
+        point = map_import.parse_location(where)
+        if point is not None:
+            return map_import.slugify(f"Imported {point[0]:.4f}, "
+                                      f"{point[1]:.4f}")
+        return map_import.slugify(where)
+
+    def _rebuild(self):
+        """Throw the staged network away and fetch again with the form
+        as it now stands -- the second try, from inside the picker."""
+        if not self._picking or self._worker is not None:
+            return
+        if self._job is not None:
+            self._job.discard()
+        self._job = None
+        self._picking = False
+        self._pick = None
+        self._jtype_row.pack_forget()
+        self._rebuild_btn.pack_forget()
+        self.preview.delete("all")
+        self._preview_photos = []
+        self.preview_label.configure(text="")
+        self._append("rebuilding with the settings as they now stand...")
+        self._start()
+
+    def _work(self, where, name, radius, classes, merge, kind,
+              replace=False):
         post = self._queue.put
 
         def log(line):
@@ -2501,7 +2565,8 @@ class _ImportDialog:
                     name = f"Imported {lat:.4f}, {lon:.4f}"
             folder = map_import.slugify(name)
             self._job = map_import.ImportJob(
-                name, folder, lat, lon, radius, classes, merge, kind)
+                name, folder, lat, lon, radius, classes, merge, kind,
+                replace=replace)
             # Stop after the build and hand the network to the junction
             # picker; the rest runs from _finish_work once the user has
             # chosen the junction(s) and their legs.  Both kinds pick:
@@ -2511,7 +2576,7 @@ class _ImportDialog:
             out_dir = self._job.fetch_and_build(log, lambda: self._cancelled)
             try:
                 shape = map_import.read_network_shape(out_dir)
-                if not any(n["junction"] for n in shape[1].values()):
+                if not map_import.junction_candidates(*shape[:2]):
                     raise RuntimeError(
                         "no junction with three or more legs in the "
                         "extract -- try a slightly larger radius")
@@ -2554,6 +2619,7 @@ class _ImportDialog:
             elif kind == "error":
                 self._worker = None
                 self._job = None
+                self._rebuild_btn.pack_forget()
                 self._import_btn.configure(text="Import")
                 self._set_status(message[1], error=True)
                 self._append("FAILED: " + message[1])
@@ -2579,6 +2645,8 @@ class _ImportDialog:
                 # arriving now would wipe the picker off the canvas.
                 self._preview_gen += 1
                 self._import_btn.configure(text="Finish import")
+                self._rebuild_btn.pack(side="left", padx=(10, 0),
+                                       before=self.status)
                 if message[4] == "single":
                     self._jtype_row.pack(anchor="w", pady=(4, 0))
                 self._render_picker(*message[1:])
@@ -2713,8 +2781,9 @@ class _ImportDialog:
             "links": {lid: [to_canvas(x, y) for x, y in link["points"]]
                       for lid, link in links.items()},
             "width": {lid: link["width"] for lid, link in links.items()},
-            "nodes": {nid: to_canvas(node["x"], node["y"])
-                      for nid, node in nodes.items() if node["junction"]},
+            "nodes": {nid: to_canvas(nodes[nid]["x"], nodes[nid]["y"])
+                      for nid in map_import.junction_candidates(links,
+                                                                 nodes)},
             "mpp": mpp, "kind": kind, "junctions": [], "arms": [],
             "legs": set(), "centres": {},
         }
@@ -2748,14 +2817,17 @@ class _ImportDialog:
                     "of the circle. Click another amber dot to move the "
                     "selection, click a leg to drop or restore it (at "
                     "least two stay), say what the junction is below, then "
-                    "Finish import.")
+                    "Finish import. Missing a leg? Change the radius or "
+                    "roads and press Rebuild.")
         else:
             text = ("The nearest junction is selected with every leg kept "
                     "(green) -- each leg is the whole road out to the edge "
                     "of the circle or to the next chosen junction. Click "
                     "amber dots to add junctions (click again to remove), "
                     "click a leg to drop or restore it, then Finish "
-                    "import. The chosen junctions must be joined by road.")
+                    "import. The chosen junctions must be joined by road. "
+                    "Missing a leg? Change the radius or roads and press "
+                    "Rebuild.")
         self.preview_label.configure(text=text)
         self._legs_status("adjust, then Finish import")
 
@@ -2768,8 +2840,8 @@ class _ImportDialog:
             if len(pick["arms"]) < 3:
                 self._set_status(
                     f"only {len(pick['arms'])} legs here -- click "
-                    "another dot, or re-import with local streets "
-                    "included", error=True)
+                    "another dot, or widen the radius or roads and "
+                    "Rebuild", error=True)
             else:
                 self._set_status(f"{count} legs kept -- {tail}")
         else:
@@ -3202,32 +3274,14 @@ class DhakaSimFrame:
         dark_button(zoom_row, "Reset", self.reset_zoom,
                     size=8).pack(side="left")
 
-        # Only offered where imagery was actually fetched, so the control
-        # never promises something the network cannot show.
-        if self.panel is not None and self.panel._basemap is not None:
-            self._basemap_var = tk.BooleanVar(value=self.panel.show_basemap)
-
-            def flip():
-                self.panel.toggle_basemap()
-                self._basemap_var.set(self.panel.show_basemap)
-                self.panel.repaint()
-
-            # "Background map", not "Satellite map": every network ships with
-            # the OpenStreetMap street rendering now, and only says satellite
-            # if someone re-fetches with --provider esri.
-            tk.Checkbutton(legend, text="Background map", bg=bg,
-                           fg=_UI["text"], font=("Segoe UI", 9), anchor="w",
-                           variable=self._basemap_var, command=flip,
-                           cursor="hand2", activebackground=bg,
-                           activeforeground=_UI["text"],
-                           selectcolor=_UI["seg_off"],
-                           highlightthickness=0).pack(anchor="w", pady=(0, 6))
-            tk.Label(legend, text="Zoom steps are fixed while the map is on, "
-                                  "so the imagery stays lined up with the "
-                                  "roads.",
-                     bg=bg, fg=_UI["faint"], font=("Segoe UI", 8), anchor="w",
-                     justify="left", wraplength=170).pack(anchor="w",
-                                                          pady=(0, 6))
+        # The imagery controls live in a box of their own, because what
+        # goes in it can change mid-run: a network with no map on disk
+        # offers to fetch one, and once that lands the box is refilled with
+        # the ordinary checkbox.
+        self._basemap_box = tk.Frame(legend, bg=bg)
+        self._basemap_box.pack(anchor="w", fill="x")
+        self._basemap_dark_button = dark_button
+        self._fill_basemap_box()
 
         header = tk.Frame(legend, bg=bg)
         header.pack(anchor="w", fill="x")
@@ -3451,6 +3505,120 @@ class DhakaSimFrame:
         except tk.TclError:
             pass
 
+    def _fill_basemap_box(self) -> None:
+        """The legend's imagery controls, for the run as it stands.
+
+        With imagery loaded: the Background map checkbox.  Without it, and
+        with the network georeferenced (every import is), a button that
+        fetches the map now -- the imagery files are gitignored, so a
+        checkout elsewhere gets every import without its map, and a tile
+        fetch that failed at import time only warned.  Only offered where
+        the network can actually be placed, so the control never promises
+        something it cannot show.
+        """
+        box = self._basemap_box
+        for child in box.winfo_children():
+            child.destroy()
+        bg = _UI["panel"]
+        panel = self.panel
+        if panel is None:
+            return
+        if panel._basemap is not None:
+            self._basemap_var = tk.BooleanVar(value=panel.show_basemap)
+
+            def flip():
+                self.panel.toggle_basemap()
+                self._basemap_var.set(self.panel.show_basemap)
+                self.panel.repaint()
+
+            # "Background map", not "Satellite map": every network ships with
+            # the OpenStreetMap street rendering now, and only says satellite
+            # if someone re-fetches with --provider esri.
+            tk.Checkbutton(box, text="Background map", bg=bg,
+                           fg=_UI["text"], font=("Segoe UI", 9), anchor="w",
+                           variable=self._basemap_var, command=flip,
+                           cursor="hand2", activebackground=bg,
+                           activeforeground=_UI["text"],
+                           selectcolor=_UI["seg_off"],
+                           highlightthickness=0).pack(anchor="w", pady=(0, 6))
+            tk.Label(box, text="Zoom steps are fixed while the map is on, "
+                               "so the imagery stays lined up with the "
+                               "roads.",
+                     bg=bg, fg=_UI["faint"], font=("Segoe UI", 8), anchor="w",
+                     justify="left", wraplength=170).pack(anchor="w",
+                                                          pady=(0, 6))
+            return
+        if basemap_module.read_centre(Parameters.NETWORK_DIR) is None:
+            return                    # nowhere on Earth to fetch for
+        self._basemap_var = None
+        self._fetch_map_btn = self._basemap_dark_button(
+            box, "Fetch background map", self._fetch_basemap, size=9)
+        self._fetch_map_btn.pack(anchor="w", pady=(0, 4))
+        self._fetch_map_note = tk.Label(
+            box, text="No map on disk for this network. Fetching takes a "
+                      "minute and needs the internet.",
+            bg=bg, fg=_UI["faint"], font=("Segoe UI", 8), anchor="w",
+            justify="left", wraplength=170)
+        self._fetch_map_note.pack(anchor="w", pady=(0, 6))
+
+    def _fetch_basemap(self) -> None:
+        """Fetch the imagery for the running network, then show it.
+
+        The script runs in a thread (it is a subprocess, like every step
+        of an import); the thread never touches Tk, and the result is
+        collected by an ``after`` poll on the Tk side.
+        """
+        if self.panel is None or getattr(self, "_fetching_map", False):
+            return
+        network = Parameters.NETWORK_DIR
+        self._fetching_map = True
+        self._fetch_map_btn.configure(state="disabled",
+                                      text="Fetching the map...")
+        self._fetch_map_note.configure(text="Downloading tiles from "
+                                            "OpenStreetMap...")
+        result = {}
+
+        def work():
+            lines = []
+            try:
+                ok = map_import.fetch_basemap(network, log=lines.append)
+            except Exception as exc:          # a missing script, say
+                ok, lines = False, [str(exc)]
+            result["ok"], result["lines"] = ok, lines
+
+        threading.Thread(target=work, daemon=True).start()
+
+        def poll():
+            if self.panel is None:
+                self._fetching_map = False
+                return                    # the run was torn down meanwhile
+            if "ok" not in result:
+                self.root.after(300, poll)
+                return
+            self._fetching_map = False
+            panel = self.panel
+            if result["ok"]:
+                panel._basemap = basemap_module.load_for_current_network(
+                    panel.link_list, panel.node_list)
+            if panel._basemap is None:
+                tail = result["lines"][-1] if result["lines"] else ""
+                self._fetch_map_btn.configure(state="normal",
+                                              text="Fetch background map")
+                self._fetch_map_note.configure(
+                    text="The fetch did not succeed" + (f": {tail}" if tail
+                                                        else "") +
+                         " -- try again later, or run fetch_basemap.py "
+                         f"--network {network}.")
+                return
+            # Imagery landed: refill the box with the checkbox, and re-snap
+            # the zoom to a scale the picture can be drawn at exactly.
+            self._fill_basemap_box()
+            panel.set_scale(panel.scale)
+            self.sync_zoom_slider(panel.scale)
+            panel.repaint()
+
+        self.root.after(300, poll)
+
     def show_options(self) -> None:
         """Return to the start form, ready for another run."""
         self._teardown()
@@ -3483,6 +3651,8 @@ class DhakaSimFrame:
         # Belong to the legend that is about to be destroyed, and the next
         # run may not have imagery at all.
         self._basemap_var = None
+        self._basemap_box = None
+        self._fetching_map = False
         self._delay_var = None
         self._commit_delay = None
         self._scale_slider = None

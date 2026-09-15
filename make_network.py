@@ -139,6 +139,80 @@ def load_ways(path: str, classes):
     return ways
 
 
+def _vertex_key(point):
+    return (round(point[0], 7), round(point[1], 7))
+
+
+def collapse_roundabouts(ways):
+    """Replace every ``junction=roundabout`` ring with its centre point.
+
+    OSM draws a roundabout as a circular way (or a few arcs of one) with
+    the approach roads ending on the ring.  Left alone, the ring's
+    opposite sides sit within the dual-carriageway separation and get
+    fused into a centreline through the island, the approaches reconnect
+    to whatever is left, and Mirpur 10 came out as one junction with a
+    hooked 100 m stub for a south leg and no north leg at all.  The
+    survey networks state a roundabout as arms converging on a point plus
+    a ``roundabout`` directive, which is also the form the import
+    dialog's picker and ``Processor._open_the_circle`` want -- so the
+    ring goes and every road that touched it now ends at its centre.
+
+    Rings that share a vertex are one roundabout (a circle mapped as
+    several arcs); a way with two or more ring vertices (one that runs
+    through) has the whole run between them replaced by the single
+    centre point.  Returns ``(ways, number of roundabouts)``.
+    """
+    rings = [(props, coords) for props, coords in ways
+             if str(props.get("junction", "")).strip() == "roundabout"]
+    if not rings:
+        return ways, 0
+    # Group arcs that share vertices into whole roundabouts.
+    owner = list(range(len(rings)))
+
+    def find(i):
+        while owner[i] != i:
+            owner[i] = owner[owner[i]]
+            i = owner[i]
+        return i
+
+    seen = {}
+    for i, (_props, coords) in enumerate(rings):
+        for point in coords:
+            key = _vertex_key(point)
+            if key in seen:
+                owner[find(i)] = find(seen[key])
+            seen[key] = i
+    groups = {}
+    for i, (_props, coords) in enumerate(rings):
+        groups.setdefault(find(i), set()).update(_vertex_key(p) for p in coords)
+    centre_of = {}
+    for keys in groups.values():
+        cx = sum(k[0] for k in keys) / len(keys)
+        cy = sum(k[1] for k in keys) / len(keys)
+        for key in keys:
+            centre_of[key] = (cx, cy)
+
+    out = []
+    for props, coords in ways:
+        if str(props.get("junction", "")).strip() == "roundabout":
+            continue
+        new, i = [], 0
+        while i < len(coords):
+            centre = centre_of.get(_vertex_key(coords[i]))
+            if centre is None:
+                new.append(coords[i])
+                i += 1
+                continue
+            last = max(j for j in range(i, len(coords))
+                       if centre_of.get(_vertex_key(coords[j])) == centre)
+            if not new or _vertex_key(new[-1]) != _vertex_key(centre):
+                new.append([centre[0], centre[1]])
+            i = last + 1
+        if len(new) >= 2:
+            out.append((props, new))
+    return out, len(groups)
+
+
 def way_width(props) -> float:
     """Carriageway width from the OSM tags, falling back to the road class."""
     raw = props.get("width")
@@ -763,6 +837,11 @@ def main(argv=None) -> int:
     if not ways:
         print(f"no roads of the requested classes in {args.geojson}")
         return 1
+    ways, roundabouts = collapse_roundabouts(ways)
+    if roundabouts:
+        print(f"{roundabouts} roundabout ring(s) collapsed to a point; "
+              "declare it with a roundabout line in geometry.txt (the "
+              "import dialog's picker offers the choice)")
 
     if args.centre:
         lat0, lon0 = (float(v) for v in args.centre.split(","))

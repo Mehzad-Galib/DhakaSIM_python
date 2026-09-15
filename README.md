@@ -950,8 +950,10 @@ leg kept. A **leg is the whole
 approach road**, walked outward from the junction to the edge of the
 import circle — not the first OSM fragment touching the node, which at a
 dual-carriageway crossing is a few metres long. The walk treats every
-crossing-node within 35 m of the chosen one as part of the same junction
-(OSM draws one divided-road crossing as a square of four), carries on
+node within the junction's reach — 35 m plus half the widest road meeting
+there — as part of the same junction (OSM draws one divided-road crossing
+as a square of four, with stubs and turning loops around it), joins a road
+that passes within that reach even where OSM has no node there, carries on
 through side-street junctions along whichever road turns least (under
 60°), and stops at the boundary, a sharper turn, or a road another leg
 already took. So a real four-way crossing offers its four approaches,
@@ -963,7 +965,12 @@ whatever it includes) and leaves the slip roads (`*_link`) out of the
 fetch — the model states a junction as arms meeting at a point and has
 no use for a slip road, while at a big junction like Shahbag the slip
 roads confuse the build badly enough to lose two of the four legs. Slip
-roads are left out of both kinds. For a single intersection, click
+roads are left out of both kinds, and an OpenStreetMap roundabout ring is
+collapsed to its centre point before the network is built, so a
+roundabout (Mirpur 10, ECB) arrives as arms converging on a point — pick
+**Roundabout** in the strip and the ring is built from the directive. A
+junction dot is offered wherever three or more roads leave a spot, even
+where OSM draws the crossing as several tiny fragments. For a single intersection, click
 another dot to move the selection; for a **multi-intersection** import,
 clicking a dot **adds** that junction with all its legs (click it again
 to remove it), and where a chosen junction's leg reaches another chosen
@@ -973,7 +980,16 @@ along it. The chosen junctions must be joined by road (an island nothing
 connects to has no routes) and each needs two legs; Finish import says
 so if not. In either kind, click a leg to drop it (dashed red) or restore
 it — the leg under the pointer thickens so a click is never a guess — and
-at least two must stay. For a single intersection a strip under the panel
+at least two must stay. **If the leg you want is not there**, the extract
+does not hold it: a road cut short by the circle ends at a boundary node,
+and a road of a class the preset leaves out is not fetched at all. Change
+the radius or the roads preset on the form and press **Rebuild** — the
+staged network is thrown away and fetched again with the new settings,
+and the picker comes back, without closing the dialog or retyping
+anything. The same second try is open after an import has finished:
+importing under the name of an earlier import asks whether to replace it
+(the old one is deleted when the new fetch starts); a shipped network's
+name is refused outright. For a single intersection a strip under the panel
 asks what the junction **is**:
 a signalised crossing, or a **roundabout** — OSM maps many Dhaka
 roundabouts (Palashi, say) as plain crossings, and the choice writes a
@@ -986,6 +1002,16 @@ junctions and legs before the routes, demand, imagery and road fitting
 are generated — so an import really is the junctions you chose at a
 sensible scale, not a neighbourhood that happens to contain them. Closing
 the dialog mid-pick discards the staged folder.
+
+**If a network shows no background map** — the imagery files
+(`basemap.png`, `basemap.txt`, `osm_roads.json`) are gitignored, so a
+checkout on another machine gets every imported network without its map,
+and a tile fetch that failed at import time only warned — the run
+screen's legend offers **Fetch background map** in place of the usual
+checkbox. It runs `fetch_basemap.py` for that network in the background
+(a minute, needs the internet) and shows the map the moment it lands,
+mid-run. The button appears only for networks that record a centre
+coordinate, which every import does.
 
 The preview itself can be **dragged**: pan the map and, on release, the
 point under the centre crosshair becomes the import point — the Where box

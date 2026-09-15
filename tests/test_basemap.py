@@ -382,5 +382,40 @@ class TileGridTest(unittest.TestCase):
         self.assertLess(abs(span - expected), 1.0)
 
 
+class OwnerSuppliedTest(unittest.TestCase):
+    """A hand-placed picture is recognised by its source line.
+
+    The BUET-DU-DMC map is the owner's Google Maps screenshot, and a
+    routine re-fetch once replaced it with tiles.  ``owner_supplied`` is
+    what ``fetch_basemap.py`` asks before writing; it must say yes for a
+    non-URL source, no for a tile URL, and no where there is no index.
+    """
+
+    FOLDER = os.path.join("input", "_test_basemap_tmp")
+
+    def setUp(self):
+        os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        os.makedirs(self.FOLDER, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.FOLDER, ignore_errors=True)
+
+    def _index(self, source):
+        with open(os.path.join(self.FOLDER, basemap.INDEX_NAME), "w",
+                  encoding="utf-8") as handle:
+            handle.write("# a basemap\n" + source + "size 10 10\n"
+                         "bounds 90.0 23.8 90.1 23.7\n")
+
+    def test_a_picture_is_owner_supplied_and_tiles_are_not(self):
+        self.assertFalse(basemap.owner_supplied("_test_basemap_tmp"))
+        self.assertIsNone(basemap.imagery_source("_test_basemap_tmp"))
+        self._index("source owner screenshot, Google Maps hybrid\n")
+        self.assertTrue(basemap.owner_supplied("_test_basemap_tmp"))
+        self.assertEqual(basemap.imagery_source("_test_basemap_tmp"),
+                         "owner screenshot, Google Maps hybrid")
+        self._index("source https://tile.openstreetmap.org/{z}/{x}/{y}.png\n")
+        self.assertFalse(basemap.owner_supplied("_test_basemap_tmp"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

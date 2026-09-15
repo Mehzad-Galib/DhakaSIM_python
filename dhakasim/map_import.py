@@ -300,87 +300,118 @@ def network_legs(links, nodes, junctions, cluster_m: float = JUNCTION_CLUSTER_M,
     edge of the extract, or to the next chosen junction, and that is what
     this walks:
 
-    * a *junction* is the chosen node together with every crossing-node
-      within ``cluster_m`` of it that a link joins it to -- one real
-      crossing, however many OSM nodes it is drawn as -- plus any
-      boundary node that close, a dangling arm end being a reconnection
-      the build missed rather than a road that ends at the crossing.  A
-      chosen node that already lies inside an earlier junction's cluster
+    * a *junction* is the chosen node together with every node within its
+      **reach** -- ``cluster_m`` plus half the widest road meeting there,
+      because a crossing of two forty-metre avenues is forty metres
+      across and its OSM crossing-nodes, stubs and turning loops lie
+      that far out (Khamarbari's south node sat 40 m from its north
+      one).  Boundary nodes count too: a dangling arm end that close is
+      a reconnection the build missed, not a road that ends there.  A
+      chosen node that already lies inside an earlier junction's reach
       is that junction, and gets no entry of its own;
-    * every link leaving a cluster starts a leg, which continues through
-      each further node along the outgoing link that turns least,
+    * before walking, every link is **split** at any interior vertex
+      within a chosen junction's reach, so a road that passes the
+      crossing without an OSM node there (the Farmgate westbound
+      carriageway, which bent north 40 m from Khamarbari inside one
+      link) can still be joined to it.  Interior bends elsewhere are the
+      road's own shape and never end a leg -- splitting at corners was
+      tried and cut Farmgate's south-east arm 90 m out at a 68-degree
+      sweep;
+    * every link leaving a junction starts a leg, which continues
+      through each further node along the outgoing link that turns least,
       provided the turn is under ``max_turn_deg``, and stops at a boundary
       node, a sharper turn, a node it has already passed, a link another
-      leg has claimed -- or on reaching another chosen junction's cluster,
-      in which case the leg joins the two junctions and the walk back
-      from the other side finds its links claimed.  A road that loops
-      back to its own crossing is not a leg.
+      leg has claimed -- or on reaching another chosen junction, in which
+      case the leg joins the two, and the walk back from the other side
+      finds its links claimed.  A road that loops back within reach of
+      its own crossing is not a leg.
 
     Returns ``(legs, centres)``: ``centres`` maps each junction (in the
     order chosen) to the mean of its cluster's node positions, and each
-    leg is ``{"junction": chosen id, "links": [ids, junction end first],
-    "forward": [bool per link -- True where the link's stated up->down
-    order runs outward], "points": [(x, y), ...] from the junction
-    outward, "end": node id, "end_junction": chosen id or None}``.  Legs
-    come grouped by junction, each group clockwise from north by the
-    bearing it leaves on, so they read round the junction like a clock
-    face.
+    leg is ``{"junction": chosen id, "links": [original link ids, junction
+    end first, consecutive repeats folded], "forward": [bool per entry --
+    True where the link's stated up->down order runs outward], "points":
+    [(x, y), ...] from the junction outward, "end": node id (a split
+    vertex gets an id above the file's), "end_junction": chosen id or
+    None, "start_clear"/"end_clear": the reach of the junction at either
+    end, in metres}``.  Legs come grouped by junction, each group
+    clockwise from north by the bearing it leaves on, so they read round
+    the junction like a clock face.
     """
     def position(nid):
         return nodes[nid]["x"], nodes[nid]["y"]
 
+    chosen = [j for j in junctions if j in nodes]
+    reach = {}
+    for junction in chosen:
+        widest = max((links[lid]["width"] for lid in nodes[junction]["links"]
+                      if lid in links), default=0.0)
+        reach[junction] = cluster_m + widest / 2.0
+
+    def near_junction(point):
+        for junction in chosen:
+            jx, jy = position(junction)
+            if math.hypot(point[0] - jx, point[1] - jy) <= reach[junction]:
+                return True
+        return False
+
+    # -- the refined graph: links split where they pass a chosen junction
+    r_nodes = {nid: {"x": node["x"], "y": node["y"], "links": []}
+               for nid, node in nodes.items()}
+    r_links = {}
+    next_node = max(nodes) + 1 if nodes else 0
+    for lid, link in links.items():
+        pts = link["points"]
+        cuts = [i for i in range(1, len(pts) - 1) if near_junction(pts[i])]
+        chain = [link["up"]]
+        for i in cuts:
+            r_nodes[next_node] = {"x": pts[i][0], "y": pts[i][1], "links": []}
+            chain.append(next_node)
+            next_node += 1
+        chain.append(link["down"])
+        bounds = [0] + cuts + [len(pts) - 1]
+        for k in range(len(chain) - 1):
+            piece = pts[bounds[k]:bounds[k + 1] + 1]
+            new_id = len(r_links)
+            r_links[new_id] = {"points": piece, "up": chain[k],
+                               "down": chain[k + 1], "origin": lid}
+            r_nodes[chain[k]]["links"].append(new_id)
+            r_nodes[chain[k + 1]]["links"].append(new_id)
+
     def other_end(lid, nid):
-        link = links[lid]
+        link = r_links[lid]
         return link["down"] if link["up"] == nid else link["up"]
 
     def outward(lid, from_nid):
-        """The link's points leaving ``from_nid``, and whether that is its
-        own stated direction."""
-        link = links[lid]
+        """The piece's points leaving ``from_nid``, and whether that is
+        its original link's own stated direction."""
+        link = r_links[lid]
         forward = link["up"] == from_nid
         return (link["points"] if forward else link["points"][::-1]), forward
 
-    # Boundary nodes join a cluster too: an arm whose inner end stands
-    # alone a few metres from the crossing is one make_network failed to
-    # reconnect after fusing its carriageways (Shahbag's west arm ended
-    # 10 m short of the crossing), and the arm is still a leg.  A dead
-    # end that close would have been trimmed as a stub anyway.
     owners = {}                       # node id -> the junction it belongs to
     centres = {}
     order = {}
-    for junction in junctions:
+    for junction in chosen:
         if junction in owners:
             continue
         jx, jy = position(junction)
-        cluster = {junction}
-        frontier = [junction]
-        while frontier:
-            nid = frontier.pop()
-            for lid in nodes[nid]["links"]:
-                far = other_end(lid, nid)
-                if far in cluster or far in owners:
-                    continue
-                fx, fy = position(far)
-                if math.hypot(fx - jx, fy - jy) <= cluster_m:
-                    cluster.add(far)
-                    frontier.append(far)
-        for nid, node in nodes.items():
-            if (nid not in cluster and nid not in owners
-                    and len(node["links"]) == 1):
-                fx, fy = position(nid)
-                if math.hypot(fx - jx, fy - jy) <= cluster_m:
-                    cluster.add(nid)
+        cluster = {nid for nid, node in r_nodes.items()
+                   if nid not in owners
+                   and math.hypot(node["x"] - jx, node["y"] - jy)
+                   <= reach[junction]}
+        cluster.add(junction)
         for nid in cluster:
             owners[nid] = junction
         centres[junction] = (
-            sum(position(n)[0] for n in cluster) / len(cluster),
-            sum(position(n)[1] for n in cluster) / len(cluster))
+            sum(r_nodes[n]["x"] for n in cluster) / len(cluster),
+            sum(r_nodes[n]["y"] for n in cluster) / len(cluster))
         order[junction] = len(order)
 
     claimed = set()
     exits = []
     for nid, owner in owners.items():
-        for lid in nodes[nid]["links"]:
+        for lid in r_nodes[nid]["links"]:
             if owners.get(other_end(lid, nid)) == owner:
                 claimed.add(lid)          # internal to the crossing
             else:
@@ -399,16 +430,16 @@ def network_legs(links, nodes, junctions, cluster_m: float = JUNCTION_CLUSTER_M,
         if lid in claimed:
             continue
         pts, forward = outward(lid, nid)
-        chain, forwards, points = [lid], [forward], list(pts)
+        pieces, points = [(lid, forward)], list(pts)
         claimed.add(lid)
         visited = {n for n, o in owners.items() if o == owner}
         node = other_end(lid, nid)
         while (node not in owners and node not in visited
-               and len(nodes[node]["links"]) >= 2):
+               and len(r_nodes[node]["links"]) >= 2):
             visited.add(node)
             incoming = _bearing(points[-2], points[-1])
             best, best_turn = None, max_turn_deg
-            for cand in nodes[node]["links"]:
+            for cand in r_nodes[node]["links"]:
                 if cand in claimed or other_end(cand, node) in visited:
                     continue
                 cpts, _f = outward(cand, node)
@@ -418,18 +449,49 @@ def network_legs(links, nodes, junctions, cluster_m: float = JUNCTION_CLUSTER_M,
             if best is None:
                 break
             cpts, forward = outward(best, node)
-            chain.append(best)
-            forwards.append(forward)
+            pieces.append((best, forward))
             points.extend(cpts[1:])
             claimed.add(best)
             node = other_end(best, node)
         end_junction = owners.get(node)
         if end_junction == owner:
             continue                  # looped back to its own crossing
+        if end_junction is None:
+            jx, jy = position(owner)
+            if (math.hypot(points[-1][0] - jx, points[-1][1] - jy)
+                    <= reach[owner]):
+                continue              # a stub or loop ending at its own crossing
+        chain, forwards = [], []
+        for piece, forward in pieces:
+            origin = r_links[piece]["origin"]
+            if chain and chain[-1] == origin:
+                continue
+            chain.append(origin)
+            forwards.append(forward)
         legs.append({"junction": owner, "links": chain, "forward": forwards,
                      "points": points, "end": node,
-                     "end_junction": end_junction})
+                     "end_junction": end_junction,
+                     "start_clear": reach[owner],
+                     "end_clear": (reach[end_junction]
+                                   if end_junction is not None else 0.0)})
     return legs, centres
+
+
+def junction_candidates(links, nodes):
+    """The nodes worth offering as junctions: those with three or more
+    walked legs.
+
+    Degree is the wrong test.  The Azimpur Road / Mirpur Road crossing
+    at Palashi came out of make_network as four nodes within 5 m of each
+    other, of degree 2, 2, 2 and 1 -- the fusing of its dual carriageways
+    left no node with three links -- yet its cluster has three roads
+    leaving it, and the picker offered no dot there at all.  Walking the
+    legs from each node answers the real question; a mid-road node walks
+    to two legs, a boundary node to one, and neither is offered.
+    """
+    return [nid for nid in nodes
+            if nodes[nid]["links"]
+            and len(network_legs(links, nodes, [nid])[0]) >= 3]
 
 
 def junction_legs(links, nodes, junction, cluster_m: float = JUNCTION_CLUSTER_M,
@@ -539,9 +601,12 @@ def prune_to_junctions(folder: str, legs, centres, roundabouts=None) -> None:
         return sum(math.hypot(s.ex - s.sx, s.ey - s.sy)
                    for s in rows[lid].segments)
 
-    def clear_of(point, centre):
+    def clear_of(point, centre, clearance):
+        # Vertices inside a junction's reach are the crossing's own
+        # fragments; the arm leaves the centre clean without them.
         return math.hypot(point[0] - centre[0],
-                          point[1] - centre[1]) >= MOUTH_CLEAR_M
+                          point[1] - centre[1]) >= max(MOUTH_CLEAR_M,
+                                                       clearance)
 
     links_out, boundary_nodes = [], []
     incident = {i: [] for i in junction_ids.values()}
@@ -563,15 +628,18 @@ def prune_to_junctions(folder: str, legs, centres, roundabouts=None) -> None:
         if leg["end_junction"] is not None:
             finish = centres[leg["end_junction"]]
             down = junction_ids[leg["end_junction"]]
-            points = [start] + [p for p in leg["points"][1:-1]
-                                if clear_of(p, start) and clear_of(p, finish)
-                                ] + [finish]
+            points = [start] + [
+                p for p in leg["points"][1:-1]
+                if clear_of(p, start, leg.get("start_clear", 0.0))
+                and clear_of(p, finish, leg.get("end_clear", 0.0))
+            ] + [finish]
         else:
             finish = leg["points"][-1]
             down = len(junction_ids) + len(boundary_nodes)
             boundary_nodes.append((down, finish[0], finish[1], [new_id]))
-            points = [start] + [p for p in leg["points"][1:]
-                                if clear_of(p, start)]
+            points = [start] + [
+                p for p in leg["points"][1:]
+                if clear_of(p, start, leg.get("start_clear", 0.0))]
             if len(points) < 2:
                 points = [start, finish]
         if inward_travel:
@@ -857,6 +925,47 @@ def _to_geojson(data: dict) -> dict:
 
 
 # --------------------------------------------------------------------------
+# fetching a missing basemap on its own
+# --------------------------------------------------------------------------
+
+def basemap_margin_for(network: str) -> str:
+    """The imagery margin an import was fetched with, as fetch_basemap's
+    ``--margin`` argument: 200 m round a single junction (its arms stop at
+    the import circle, and less left half the window bare), 120 m round a
+    multi-junction import, and the script's own default for survey data."""
+    if not is_imported(network):
+        return "60"
+    return "200" if imported_kind(network) == "single" else "120"
+
+
+def fetch_basemap(network: str, log=print, cancelled=lambda: False) -> bool:
+    """Fetch the OpenStreetMap imagery for one network, as a subprocess.
+
+    The dialog does this as the last-but-one step of every import; this is
+    the same call on its own, for a network that has none on disk -- the
+    imagery files are gitignored (megabytes per network), so a checkout
+    elsewhere gets every import without its map, and a tile fetch that
+    failed at import time only warned.  Returns True when the script
+    succeeded; its output goes to ``log`` a line at a time.
+    """
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    process = subprocess.Popen(
+        [sys.executable, "fetch_basemap.py", "--network", network,
+         "--provider", "osm", "--zoom", "18",
+         "--margin", basemap_margin_for(network)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    for raw in process.stdout:
+        line = raw.decode("utf-8", errors="replace").rstrip()
+        if line:
+            log(line)
+        if cancelled():
+            process.terminate()
+            return False
+    return process.wait() == 0
+
+
+# --------------------------------------------------------------------------
 # the build chain
 # --------------------------------------------------------------------------
 
@@ -871,9 +980,13 @@ class ImportJob:
 
     def __init__(self, place_name: str, folder: str, lat: float, lon: float,
                  radius_m: float, classes, merge_dual: bool = True,
-                 kind: str = "multi"):
+                 kind: str = "multi", replace: bool = False):
         self.place_name = place_name
         self.folder = folder
+        #: Whether an earlier *import* under the same folder name may be
+        #: deleted to make way -- the second try at a junction whose legs
+        #: did not come out.  Survey data is never replaceable.
+        self.replace = replace
         self.lat = lat
         self.lon = lon
         self.radius_m = radius_m
@@ -935,9 +1048,7 @@ class ImportJob:
         start-screen tile, and a broken tile crashes the run.
         """
         out_dir = os.path.join("input", self.folder)
-        if os.path.exists(out_dir):
-            raise RuntimeError(
-                f"input/{self.folder} already exists -- pick another name")
+        self.clear_way(out_dir)
 
         # No slip roads (``*_link``).  The model states a junction as arms
         # converging on a point and has nothing to do with a slip road;
@@ -984,6 +1095,25 @@ class ImportJob:
             self.discard()
             raise
         return out_dir
+
+    def clear_way(self, out_dir: str) -> None:
+        """Refuse an occupied folder, or empty it when told it may go.
+
+        Only a folder carrying the import marker is ever removed, and only
+        with ``replace`` set -- the dialog asks first.  A shipped network
+        under that name is refused whatever the flag says.
+        """
+        if not os.path.exists(out_dir):
+            return
+        if self.replace and is_imported(self.folder):
+            shutil.rmtree(out_dir)
+            return
+        if is_imported(self.folder):
+            raise RuntimeError(
+                f"input/{self.folder} already exists -- an earlier import; "
+                "say yes to replacing it, or pick another name")
+        raise RuntimeError(
+            f"input/{self.folder} is a shipped network -- pick another name")
 
     def discard(self) -> None:
         """Remove the staged folder -- for a cancelled or abandoned pick."""
