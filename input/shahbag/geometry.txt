@@ -4,7 +4,7 @@
 # Imported via the GUI map-import dialog around 23.73860,90.39560
 #
 # Applied when GeometryMode is On, which it is by default.
-# Cut down to one junction and 4 legs by the import dialog's junction picker.
+# Cut down to 1 junction(s) and 4 legs by the import dialog's junction picker.
 # Medians, measured as the gap between the two one-way
 # carriageways OSM maps a divided road as.
 median 0 5.2   # কাজী নজরুল ইসলাম এভিনিউ

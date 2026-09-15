@@ -303,8 +303,19 @@ The first loop in `_ratio`, returning an exact hit, is not an optimisation:
 imagery, and without it the answer for an exactly-reachable factor differs from
 the answer that produced it, walking the zoom along a step at a time.
 
-**Every network carries the OpenStreetMap street rendering**, not aerial
-photography. Photography was the default and is still one command away
+**Every network but one carries the OpenStreetMap street rendering**, not
+aerial photography. The exception is `buet_du_dmc`: its `basemap.png` is
+the **owner's own Google Maps hybrid screenshot** (1179×699, upscaled ×4),
+georeferenced by registering the network's centrelines against the
+image's yellow-road mask — its `basemap.txt` header says so, and its
+`source` line is not a URL. **Never re-fetch it.** On 15 Sep 2026 a
+routine `fetch_basemap.py --network buet_du_dmc` replaced it with OSM
+tiles; it was rebuilt only because the screenshot was still in the
+owner's Downloads (`WhatsApp Image 2026-08-26 at 2.46.16 PM.jpeg`) and
+the old header recorded the bounds. `fetch_basemap.py` now refuses any
+network whose imagery `basemap.owner_supplied` says is hand-placed unless
+`--force` is passed, and the run screen's fetch button never appears
+while a basemap exists. Photography was the default and is still one command away
 (`fetch_basemap.py --network <n> --provider esri --zoom 19`), but it loses on
 two counts: Dhaka's imagery is off-nadir enough to show building *sides*, so
 towers lean across the streets and a correctly placed road looks wrong, and a
@@ -980,6 +991,23 @@ costs no height, and the density ladder has none to give). Five facts:
   continuation that turns least (under `LEG_MAX_TURN_DEG`), stopping
   at a boundary node, a sharper turn, a revisited node or a link
   another leg claimed; legs come back clockwise by leaving bearing.
+  **A dot is a node with three walked legs, not a node of degree
+  three.** `junction_candidates` walks the legs from every node:
+  the Azimpur Road / Mirpur Road crossing at Palashi came out of
+  make_network as four nodes within 5 m of degree 2, 2, 2 and 1 (the
+  fusing of its dual carriageways left no node with three links),
+  and the picker offered no dot there at all although three roads
+  leave the cluster. A mid-road node walks to two legs and a
+  boundary node to one, so neither is offered.
+  **make_network collapses an OSM roundabout ring to a point**
+  (`collapse_roundabouts`, on the raw ways): a `junction=roundabout`
+  circle's opposite sides sit within the dual-carriageway separation
+  and got fused into a centreline through the island, and Mirpur 10
+  came out as one junction with a hooked 100 m stub for a south leg
+  and no north leg. Every road that touched the ring now ends at its
+  centre — the converging-arms form the survey networks, the picker
+  and `_open_the_circle` all want — and the user declares it a
+  roundabout in the picker's strip. ECB is a ring too.
   **A multi import is the same picker with a set of junctions.**
   `network_legs(links, nodes, junctions)` clusters each chosen node in
   turn (a node already inside an earlier cluster *is* that junction and
@@ -994,6 +1022,17 @@ costs no height, and the density ladder has none to give). Five facts:
   worker discards the staged folder and the user's pick with it;
   `prune_to_junctions` calls it again as its own defence. The
   roundabout strip shows for a single junction only.
+  **The second try.** A leg that is not offered is not in the extract
+  (cut by the circle, or a class the preset left out), so the picker
+  carries a **Rebuild** button: it discards the staging and re-runs
+  `_start` with the form as it now stands — the radius, roads and kind
+  strips stay editable while picking (their preview re-render is
+  guarded, their values are not). Importing under an earlier import's
+  name asks (askyesno, on the Tk thread — the worker cannot) and passes
+  `replace=True` to `ImportJob`; `clear_way` deletes only a folder with
+  the import marker, and refuses a shipped network whatever the flag
+  says. `_folder_for` mirrors the worker's naming so the question is
+  asked about the right folder before anything is fetched.
   `prune_to_junctions(folder, legs, centres, roundabouts)` then writes
   **one link per leg**, junction nodes `0..J-1` at (0,0) in the order
   chosen, boundary nodes after, a joining leg running centre to centre,
@@ -1052,6 +1091,17 @@ costs no height, and the density ladder has none to give). Five facts:
   timeouts), each tile failure degrades to a dark square, and
   `preview_view` computes the projection without any tiles at all, so
   an outage never blocks the pan or the picker.
+- **A missing basemap is fetched from the run screen.** The legend's
+  imagery controls live in `_basemap_box`, filled by
+  `_fill_basemap_box`: the checkbox when imagery loaded, else — for a
+  network `basemap.read_centre` can place — a **Fetch background map**
+  button that runs `map_import.fetch_basemap` (the same subprocess the
+  import's last-but-one step runs, margin by `basemap_margin_for`) in
+  a thread and polls with `after`; on success the panel reloads the
+  imagery, the box is refilled with the checkbox and the zoom re-snaps.
+  It exists because the imagery files are gitignored (megabytes per
+  network): the owner's other checkout had Mirpur 10, ECB and Farmgate
+  with no map at all while this copy showed all three.
 - **The preview is plain OSM tiles on a `tk.Canvas`** —
   `map_import.preview_tiles` picks the deepest zoom whose radius circle
   still fits two thirds of the panel, caches tiles under

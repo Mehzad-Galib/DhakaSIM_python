@@ -285,6 +285,35 @@ def georeference(network: str, link_list, node_list):
     return Georeference(x, y, lat, lon, rule)
 
 
+def imagery_source(network: str):
+    """The ``source`` line of a network's ``basemap.txt``, or ``None``.
+
+    A fetched map records the tile URL it came from; anything else is a
+    picture somebody supplied and georeferenced by hand, which no fetch
+    can reproduce -- the BUET-DU-DMC map is the owner's own Google Maps
+    screenshot, registered against the network's centrelines, and it
+    was once overwritten by a routine re-fetch (15 Sep 2026) and had to
+    be rebuilt from the screenshot.  ``fetch_basemap.py`` asks this
+    before it writes.
+    """
+    path = network_path(network, INDEX_NAME)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line.startswith("source "):
+                    return line[len("source "):].strip()
+    except OSError:
+        return None
+    return None
+
+
+def owner_supplied(network: str) -> bool:
+    """Whether the network's imagery is a hand-placed picture, not tiles."""
+    source = imagery_source(network)
+    return bool(source) and not source.startswith(("http://", "https://"))
+
+
 def network_bounds(link_list, margin: float = 60.0):
     """Bounding box of every carriageway, in metres, with a margin round it.
 

@@ -1,2 +1,2 @@
 # Written by the GUI map-import dialog.
-kind single
+kind multi

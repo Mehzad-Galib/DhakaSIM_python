@@ -155,6 +155,30 @@ class RemovalTest(unittest.TestCase):
         self.assertEqual(map_import.imported_kind("_test_import_tmp"),
                          "single")
 
+    def test_an_occupied_folder_is_replaced_only_when_allowed(self):
+        job = map_import.ImportJob("T", "_test_import_tmp", 23.7, 90.4,
+                                   300.0, ("primary",))
+        # Empty folder, no marker: not an import -- refused.
+        with self.assertRaises(RuntimeError):
+            job.clear_way(self.FOLDER)
+        with open(os.path.join(self.FOLDER, map_import.IMPORT_MARKER),
+                  "w", encoding="utf-8") as handle:
+            handle.write("{}")
+        # An import, but not told it may go: refused, folder intact.
+        with self.assertRaises(RuntimeError):
+            job.clear_way(self.FOLDER)
+        self.assertTrue(os.path.isdir(self.FOLDER))
+        job.replace = True
+        job.clear_way(self.FOLDER)
+        self.assertFalse(os.path.exists(self.FOLDER))
+        # A shipped network is refused whatever the flag says.
+        shipped = map_import.ImportJob("B", "banani_23", 23.7, 90.4, 300.0,
+                                       ("primary",), replace=True)
+        with self.assertRaises(RuntimeError):
+            shipped.clear_way(os.path.join("input", "banani_23"))
+        self.assertTrue(os.path.isfile(
+            os.path.join("input", "banani_23", "link.txt")))
+
     def test_remove_deletes_an_import_and_refuses_survey_data(self):
         with open(os.path.join(self.FOLDER, map_import.IMPORT_MARKER),
                   "w", encoding="utf-8") as handle:
@@ -379,6 +403,62 @@ class PruneTest(unittest.TestCase):
                       map_import.check_legs(thin, centres))
         with self.assertRaises(RuntimeError):
             map_import.prune_to_junctions(self.FOLDER, apart, centres)
+
+    def test_a_road_passing_a_chosen_junction_without_a_node_joins_it(self):
+        links, nodes, _ = self.shape
+        # A second road from the side street's junction (node 4) runs
+        # west and bends north 20 m from node 0 -- inside its reach, but
+        # with no OSM node at the bend.  Chosen together, the walk from 4
+        # must stop at that bend and join node 0, and the northward rest
+        # must become node 0's own leg, not a hooked 400 m road that
+        # merely passes the crossing.
+        links = dict(links)
+        links[7] = {"points": [(700, 500), (520, 480), (520, 100)],
+                    "up": 4, "down": 8, "width": 8.0}
+        nodes = dict(nodes)
+        nodes[4] = dict(nodes[4], links=[1, 2, 6, 7])
+        nodes[8] = {"x": 520, "y": 100, "links": [7], "junction": False}
+        legs, centres = map_import.network_legs(links, nodes, [0, 4])
+        joining = [leg for leg in legs if leg["end_junction"] is not None]
+        self.assertEqual(sorted(leg["links"][0] for leg in joining), [1, 7])
+        north = next(leg for leg in legs
+                     if leg["junction"] == 0 and leg["end"] == 8)
+        self.assertEqual(north["links"], [7])
+        self.assertEqual(north["points"][-1], (520, 100))
+        # Neither piece hooks: the bend vertex is inside node 0's reach,
+        # so it is not a vertex of either leg once written.
+        self.assertGreater(north["start_clear"], 20.0)
+
+    def test_candidates_are_nodes_with_three_walked_legs(self):
+        links, nodes, _ = self.shape
+        # Node 0 (three links, one a stub) and node 4 (the side street's
+        # junction) are junctions; node 5 sits inside node 0's reach and
+        # walks the same legs, so it is offered too -- clicking either
+        # dot means the same crossing.  Boundary nodes never are.
+        self.assertEqual(sorted(map_import.junction_candidates(links, nodes)),
+                         [0, 4, 5])
+        # A crossing drawn as degree-2 fragments still counts: split the
+        # west leg's node 1 end into a chain -- node 1 becomes a degree-2
+        # node 20 m from a new boundary, and gains a side road -- and it
+        # is offered although no single node there has three links.
+        links = dict(links)
+        links[7] = {"points": [(100, 500), (100, 300)], "up": 1, "down": 8,
+                    "width": 6.0}
+        links[8] = {"points": [(100, 500), (0, 500)], "up": 1, "down": 9,
+                    "width": 10.0}
+        del links[0]
+        links[0] = {"points": [(100, 500), (500, 500)], "up": 1, "down": 0,
+                    "width": 10.0}
+        nodes = dict(nodes)
+        nodes[1] = dict(nodes[1], links=[0, 7])
+        nodes[8] = {"x": 100, "y": 300, "links": [7], "junction": False}
+        nodes[9] = {"x": 0, "y": 500, "links": [8], "junction": False}
+        # node 1 has two links; node 10 at (100, 500) is a second node of
+        # the same crossing carrying the third road
+        nodes[10] = {"x": 100, "y": 500, "links": [8], "junction": False}
+        links[8]["up"] = 10
+        nodes[9]["links"] = [8]
+        self.assertIn(1, map_import.junction_candidates(links, nodes))
 
     def test_a_node_inside_another_junctions_cluster_is_that_junction(self):
         links, nodes, _ = self.shape

@@ -324,11 +324,23 @@ def stitch(paths, columns: int, rows: int, out_path: str) -> None:
 def build(network: str, zoom: int, margin: float, url_template: str,
           max_tiles: int, centre=None, dry_run: bool = False,
           attribution: str = "", kind: str = "xyz",
-          api_key: str = "", maptype: str = "terrain") -> bool:
+          api_key: str = "", maptype: str = "terrain",
+          force: bool = False) -> bool:
     try:
         link_list, node_list = basemap.read_network(network)
     except OSError as exc:
         print(f"{network}: cannot read the network ({exc.strerror})")
+        return False
+
+    # A hand-placed picture is not something a fetch can put back.  The
+    # BUET-DU-DMC map is the owner's own Google Maps screenshot,
+    # georeferenced against the network's centrelines; a routine re-fetch
+    # replaced it with tiles once, and only the screenshot still being in
+    # a Downloads folder made it recoverable.
+    if basemap.owner_supplied(network) and not force:
+        print(f"{network}: its basemap is owner-supplied "
+              f"({basemap.imagery_source(network)}), not fetched tiles; "
+              "refusing to overwrite it. Pass --force if you mean to.")
         return False
 
     if centre is not None:
@@ -488,6 +500,9 @@ def main(argv=None) -> int:
                         help="refuse to fetch more than this many (default: 400)")
     parser.add_argument("--dry-run", action="store_true",
                         help="report the tile count and stop")
+    parser.add_argument("--force", action="store_true",
+                        help="overwrite an owner-supplied basemap (one whose "
+                             "source is not a tile URL)")
     args = parser.parse_args(argv)
 
     preset = basemap.PROVIDERS[args.provider]
@@ -543,7 +558,8 @@ def main(argv=None) -> int:
     for name in targets:
         if not build(name, args.zoom, args.margin, url_template,
                      args.max_tiles, centre, args.dry_run, attribution, kind,
-                     api_key, args.maptype):
+                     api_key, args.maptype,
+                     force=args.force):
             failures += 1
     return 1 if failures else 0
 
