@@ -117,7 +117,7 @@ pedestrians that block the kerbside (`ObjectMode`). Both follow the network's
 display options](docs/images/start_screen.png)
 
 Once running the view opens on the whole network -- a surveyed junction lands
-around a 100 m scale bar, the BUET-DU-DMC demo on its full three kilometres.
+around a 100 m scale bar, the BUET-DU-DMC demo on its full two kilometres.
 Drag to pan, and zoom with the mouse wheel or the **Zoom slider** in the
 legend panel (logarithmic, so every framing from whole-network to kerb-level
 gets its share of the slider's travel). **Reset** returns to the opening
@@ -872,7 +872,7 @@ otherwise.
   `KeepClearMode Off --set SignalChangeDuration=1` restores the original
   behaviour byte-for-byte.
 - **Every demand row gets `+30` vehicles/hour.** Negligible on an 8-row
-  junction, but `buet_du_dmc` has 446 OD pairs, so it adds 13,380 veh/h.
+  junction, but `buet_du_dmc` has 91 OD pairs, so it adds 2,730 veh/h.
   `DemandOffset 0` removes it.
 - **`DLC_model 1` used to crash with `ObjectMode On`.** The GHR branch of
   `is_object_in_proximity` evaluated the GHR acceleration against the cached
@@ -1452,15 +1452,15 @@ mean, in **vehicles per hour per OD pair**. The harness's defaults are
 100 / 400 / 800, which are *not* the rates `run_sim.py` builds a network's
 `demand.txt` from. Those come from `DemandType` and divide a total across the
 boundary nodes — `LOW_RATE // acceptable_node` and so on — which for
-`buet_du_dmc` (BUET-DU-DMC Area: 38 boundary nodes, 446 OD pairs) works out to:
+`buet_du_dmc` (BUET-DU-DMC Area: 11 boundary nodes, 91 OD pairs) works out to:
 
 | DemandType | per OD pair |
 | --- | --- |
-| 0 low | 16 |
-| 1 medium | 24 |
-| 2 high | 27 |
+| 0 low | 50 |
+| 1 medium | 100 |
+| 2 high | 109 |
 
-The shipped `input/buet_du_dmc/demand.txt` is a uniform 27, i.e. the high one.
+The shipped `input/buet_du_dmc/demand.txt` is a uniform 100, i.e. the medium one.
 So the harness's default "low" already sits nearly four times beyond the
 simulator's *high*, and its medium and high are further out still. That is a
 legitimate stress test, but it is a different demand range from the one the
