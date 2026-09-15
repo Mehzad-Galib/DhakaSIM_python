@@ -1123,6 +1123,27 @@ Rules:
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
 
+## The BUET-DU-DMC demo was rebuilt (15 Sep 2026)
+
+`input/buet_du_dmc/` is no longer the 220-link, one-link-per-carriageway
+build of 27 Aug: the owner reported its signal bars "clogged within the
+intersections" (every junction was a cluster of nodes joined by metre-long
+stubs, and the stop lines and bars of those stubs sit inside the drawn
+patch) and asked for at most five junctions. It was rebuilt through the
+import dialog's picker — Shahbag, TSC, Katabon, Nilkhet and Palashi, legs
+walked to the next chosen junction or the edge of the owner's map, legs
+leaving the map or dangling short of a junction dropped — and installed
+over the old folder **keeping the owner's Google basemap, `place.txt` and
+`defaults.txt`** and *without* the import marker, so it stays a shipped,
+non-removable network with a parity baseline (re-recorded for it alone).
+Fifteen links, sixteen nodes, ninety-one demand rows. Two make_network
+fixes came out of it: `weld_endpoints` (a fused centreline's end lands a
+metre off the crossing's node, in the next 0.5 m snap cell, and the
+chain collapse then strands the whole road — Shahbag lost Shahbag Road
+that way) and `collapse_roundabouts`. The old build is not in git
+history either (only its committed text files are); the scratchpad kept a
+copy for this session only.
+
 ## Khamarbari is gone
 
 `input/khamarbari/` was removed on the owner's instruction (24 Aug 2026): the

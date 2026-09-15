@@ -340,6 +340,49 @@ def _closest_on_polyline(point, points):
     return best, best_distance
 
 
+def _arc_at(points, point):
+    """Arc length along `points` of the point nearest to `point` -- the
+    same projection as :func:`_closest_on_polyline`, reported as a position
+    rather than a place."""
+    best, best_distance, walked = 0.0, float("inf"), 0.0
+    for a, b in zip(points, points[1:]):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        span = dx * dx + dy * dy
+        leg = math.sqrt(span)
+        t = 0.0
+        if span > 0:
+            t = ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / span
+            t = min(max(t, 0.0), 1.0)
+        d = distance(point, (a[0] + t * dx, a[1] + t * dy))
+        if d < best_distance:
+            best, best_distance = walked + t * leg, d
+        walked += leg
+    return best
+
+
+def _point_at(points, s):
+    """The point `s` metres along a polyline (clamped to its ends)."""
+    walked = 0.0
+    for a, b in zip(points, points[1:]):
+        leg = distance(a, b)
+        if walked + leg >= s and leg > 0:
+            t = min(max((s - walked) / leg, 0.0), 1.0)
+            return (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+        walked += leg
+    return points[-1]
+
+
+def _slice(points, s0, s1):
+    """The stretch of a polyline between arc lengths `s0` and `s1`."""
+    out, walked = [_point_at(points, s0)], 0.0
+    for a, b in zip(points, points[1:]):
+        walked += distance(a, b)
+        if s0 < walked < s1:
+            out.append(b)
+    out.append(_point_at(points, s1))
+    return out
+
+
 def _median(values):
     ordered = sorted(values)
     middle = len(ordered) // 2
@@ -359,7 +402,75 @@ def _is_oneway(edge) -> bool:
     return str(edge["props"].get("oneway", "")).lower() in ("yes", "1", "-1")
 
 
-def merge_dual_carriageways(edges, max_separation: float, samples: int = 12):
+def chain_oneway_pieces(edges):
+    """Join a one-way carriageway's pieces through its degree-2 points.
+
+    OSM chops a carriageway wherever a lane is added or a turn bay begins:
+    Campbell Drive at Homestead arrives as forty ways of 20 to 150 m, cut
+    at different places on its two sides.  Pairing those pieces one by one
+    matched the odd lengths badly -- a 3 m fragment fused with something
+    30 m away and got a 30 m "median" -- and left the road broken between
+    them.  Joined first, each side between two real junctions is one
+    polyline and pairs with its opposite number cleanly.
+
+    Only aligned one-way pieces are joined (first runs into the point,
+    second runs out of it); head-to-head pieces are two roads meeting, and
+    a two-way piece is left for :func:`collapse_and_prune`.
+    """
+    def endpoints(edge):
+        return snap(edge["points"][0]), snap(edge["points"][-1])
+
+    changed = True
+    while changed:
+        changed = False
+        incident = {}
+        for edge in edges:
+            for key in endpoints(edge):
+                incident.setdefault(key, []).append(edge)
+        for key, touching in incident.items():
+            if len(touching) != 2:
+                continue
+            first, second = touching
+            if first is second:
+                continue                      # a loop back to itself
+            if not (_is_oneway(first) and _is_oneway(second)):
+                continue
+            if snap(first["points"][-1]) != key:
+                first, second = second, first
+            if (snap(first["points"][-1]) != key
+                    or snap(second["points"][0]) != key):
+                continue                      # head to head or tail to tail
+            if snap(first["points"][0]) == snap(second["points"][-1]):
+                continue                      # merging would close a ring
+            length_a = polyline_length(first["points"])
+            length_b = polyline_length(second["points"])
+            merged = {"props": dict(first["props"]),
+                      "points": first["points"] + second["points"][1:],
+                      "width": ((first["width"] * length_a
+                                 + second["width"] * length_b)
+                                / max(length_a + length_b, 1e-9))}
+            edges = [e for e in edges if e is not first and e is not second]
+            edges.append(merged)
+            changed = True
+            break
+    return edges
+
+
+#: Endpoints closer than this are one node.  Fusing a dual carriageway
+#: averages two ways into a centreline whose ends no longer coincide with
+#: the shared vertex the approach roads meet at -- typically a metre off,
+#: which the whole-metre snap grid can put in a different cell.  Real
+#: junctions are never this close together; three metres is wider than any
+#: fusing residual seen and narrower than any real gap.
+WELD_METRES = 3.0
+
+
+#: A carriageway must run alongside its partner for at least this far to
+#: be fused with it; anything shorter is a crossing, not a divided road.
+OVERLAP_MIN = 10.0
+
+
+def _merge_pass(edges, max_separation: float, samples: int):
     """Fuse the two one-way sides of a dual carriageway into one link.
 
     OSM maps a divided road as two one-way ways; this simulator's links are
@@ -373,6 +484,14 @@ def merge_dual_carriageways(edges, max_separation: float, samples: int = 12):
     length, and closer together than ``max_separation``.  The merged link takes
     the centreline between the two, a width covering both carriageways and the
     gap, and records that gap as its median.
+
+    Only the stretch where the two run alongside each other is fused.  The
+    first version built the centreline over the whole of one carriageway
+    and threw the other away entirely, so wherever the two were cut to
+    different extents the longer one's overhang vanished from the network
+    -- a 12 m hole in Campbell Drive, found by the picker walking a leg
+    into it.  The overhangs now survive as the one-way pieces they are;
+    :func:`reconnect_to_fused` joins their inner ends to the fused road.
     """
     candidates = [e for e in edges if _is_oneway(e)]
     others = [e for e in edges if not _is_oneway(e)]
@@ -387,8 +506,24 @@ def merge_dual_carriageways(edges, max_separation: float, samples: int = 12):
             length_b = polyline_length(b["points"])
             if not 0.5 <= length_a / max(length_b, 1e-9) <= 2.0:
                 continue
-            left = _resample(a["points"], samples)
-            opposite = [_closest_on_polyline(p, b["points"]) for p in left]
+            # the stretch each runs alongside the other: between the
+            # projections of the other's two ends
+            a_lo, a_hi = sorted((_arc_at(a["points"], b["points"][0]),
+                                 _arc_at(a["points"], b["points"][-1])))
+            b_lo, b_hi = sorted((_arc_at(b["points"], a["points"][0]),
+                                 _arc_at(b["points"], a["points"][-1])))
+            # the shared stretch must be most of the shorter piece: two
+            # pieces that overlap for 13 m of their 70 belong to other
+            # partners, and pairing them robbed those partners (Campbell
+            # Drive at Flagler Avenue, where the greedy pick by gap alone
+            # tied and took the wrong one)
+            shared = min(a_hi - a_lo, b_hi - b_lo)
+            if shared < max(OVERLAP_MIN, 0.5 * min(length_a, length_b)):
+                continue                       # they cross or barely touch
+            a_part = _slice(a["points"], a_lo, a_hi)
+            b_part = _slice(b["points"], b_lo, b_hi)
+            left = _resample(a_part, samples)
+            opposite = [_closest_on_polyline(p, b_part) for p in left]
             gaps = [d for _, d in opposite]
             # the median resists the ends, where one carriageway often runs on
             # past the other and the true separation says nothing
@@ -400,16 +535,31 @@ def merge_dual_carriageways(edges, max_separation: float, samples: int = 12):
             if sum(1 for d in gaps if d > max_separation) > len(gaps) / 3:
                 continue
             scored.append((gap, i, candidates.index(b), left,
-                           [q for q, _ in opposite]))
+                           [q for q, _ in opposite],
+                           (a_lo, a_hi, b_lo, b_hi)))
 
-    scored.sort(key=lambda s: s[0])
-    used, merged = set(), []
-    for gap, i, j, left, right in scored:
+    # Longest shared stretch first, nearest second.  Ordering by gap alone
+    # let a 13 m fragment of one carriageway claim the other side's 79 m
+    # piece and leave that piece's real partner, 66 m alongside it, single.
+    scored.sort(key=lambda s: (-min(s[5][1] - s[5][0], s[5][3] - s[5][2]),
+                               s[0]))
+    used, merged, overhangs = set(), [], []
+    for gap, i, j, left, right, extents in scored:
         if i in used or j in used:
             continue
         used.add(i)
         used.add(j)
         a, b = candidates[i], candidates[j]
+        # what each carriageway runs on past the other stays a one-way
+        # road; a stub shorter than the weld tolerance is a residual of
+        # the fusing, not road, and the weld absorbs its neighbour's end
+        a_lo, a_hi, b_lo, b_hi = extents
+        for edge, lo, hi in ((a, a_lo, a_hi), (b, b_lo, b_hi)):
+            total = polyline_length(edge["points"])
+            for s0, s1 in ((0.0, lo), (hi, total)):
+                if s1 - s0 > WELD_METRES:
+                    overhangs.append(dict(edge, points=_slice(edge["points"],
+                                                              s0, s1)))
         centre = [((p[0] + q[0]) / 2, (p[1] + q[1]) / 2)
                   for p, q in zip(left, right)]
         # OSM puts each way down the centre of its own carriageway, so the gap
@@ -423,7 +573,26 @@ def merge_dual_carriageways(edges, max_separation: float, samples: int = 12):
                        "median": median})
 
     unmatched = [candidates[i] for i in range(len(candidates)) if i not in used]
-    return others + unmatched + merged, len(merged)
+    return others + unmatched + merged + overhangs, len(merged), len(overhangs)
+
+
+def merge_dual_carriageways(edges, max_separation: float, samples: int = 12):
+    """Fuse the one-way sides of every dual carriageway (see
+    :func:`_merge_pass` for the rules), until nothing more pairs.
+
+    More than one pass, because a pass creates candidates.  Campbell
+    Drive's eastbound side runs 866 m unbroken while the westbound one is
+    cut at 1325 m by a junction only it touches; the first pass fuses the
+    798 m the two share and leaves the eastbound 66 m overhang beside the
+    westbound 80 m remainder -- a pair as plain as any, but both were born
+    after the greedy pick had run.  The second pass fuses them.
+    """
+    total = 0
+    while True:
+        edges, fused, leftovers = _merge_pass(edges, max_separation, samples)
+        total += fused
+        if not fused or not leftovers:
+            return edges, total
 
 
 def _insert_vertex(points, q):
@@ -466,19 +635,36 @@ def reconnect_to_fused(edges, tolerance: float):
     The tolerance is the road's own half-width rather than `max_separation`:
     the question is whether the end lies within the road, and a genuinely
     separate street running alongside must not be swallowed.
+
+    A fused road's *own* ends are reattached the same way, to any fused
+    road but itself.  The first version skipped them, and a divided side
+    street meeting a divided arterial then never joined it: both of its
+    carriageways ended at the arterial's carriageways, so its fused end
+    landed squarely on the arterial's centreline -- but between two of
+    that centreline's vertices, where no node exists.  At Al Malaz
+    (Riyadh) Jarir Street, six one-way ways tagged secondary, crossed Al
+    Ahsa Street that way and the picker never offered the crossing; it
+    appeared only when every residential alley was included, because one
+    of those happened to end on the same spot and put a vertex there.
     """
-    fused = [e for e in edges if e.get("median", 0) > 0]
+    # A fused road is one that came out of the merge, whether or not any
+    # divider was left once the two carriageways' own widths were taken
+    # off the gap.  Testing ``median > 0`` missed Musab bin Umair at Al
+    # Malaz -- two 11 m carriageways 9 m apart fuse to a 20 m road with no
+    # median -- so its centreline never joined Al Ahsa Street, and the
+    # whole of Al Ahsa left the network as the smaller component.
+    fused = [e for e in edges if "median" in e]
     if not fused:
         return edges
 
     for edge in edges:
-        if edge.get("median", 0) > 0:
-            continue
         points = list(edge["points"])
         for index in (0, -1):
             end = points[index]
             best = None
             for road in fused:
+                if road is edge:
+                    continue
                 reach = min(road["width"] / 2.0 + 1.0, tolerance)
                 q, d = _closest_on_polyline(end, road["points"])
                 if d <= reach and (best is None or d < best[1]):
@@ -525,6 +711,33 @@ def drop_degenerate(edges):
     return [e for e in edges
             if snap(e["points"][0]) != snap(e["points"][-1])
             and polyline_length(e["points"]) > SNAP_METRES]
+
+
+def weld_endpoints(edges, tolerance: float = WELD_METRES):
+    """Move every edge endpoint onto the first earlier endpoint within
+    ``tolerance``, so near-coincident ends share a snap cell.
+
+    Found at Shahbag in a 1 km build: the fused Shahbag Road ended 1 m
+    from the crossing's node, in the next snap cell, so it never joined;
+    ``collapse_and_prune`` then chained it with Elephant Road into a
+    711 m edge with both ends dangling and ``largest_component`` threw
+    the whole road away -- the crossing came out with three legs.  The
+    same residual left 5 m stubs of Kazi Nazrul Islam Avenue hanging
+    and pulled Katabon's crossing apart.  Interior vertices are left
+    alone: only where edges meet does the grid decide connectivity.
+    """
+    anchors = []                          # representative points, in order
+    for edge in edges:
+        pts = edge["points"]
+        for index in (0, len(pts) - 1):
+            point = pts[index]
+            for anchor in anchors:
+                if distance(point, anchor) <= tolerance:
+                    pts[index] = (anchor[0], anchor[1])
+                    break
+            else:
+                anchors.append((point[0], point[1]))
+    return edges
 
 
 def collapse_and_prune(edges, min_stub: float):
@@ -857,6 +1070,7 @@ def main(argv=None) -> int:
         return 1
     fused = 0
     if not args.no_merge_dual:
+        edges = chain_oneway_pieces(edges)
         edges, fused = merge_dual_carriageways(edges, args.max_separation)
         edges = drop_degenerate(edges)
         if fused:
@@ -865,6 +1079,13 @@ def main(argv=None) -> int:
             # snapping both sides of a crossing onto one point leaves the piece
             # that spanned the old carriageways with no length
             edges = drop_degenerate(edges)
+    # Before the chains are merged: a fused centreline's ends are a metre
+    # or so off the vertex the approach roads share, and the snap grid
+    # would read that as two nodes (see weld_endpoints).
+    edges = weld_endpoints(edges)
+    # welding both ends of a metre-long residual onto one anchor leaves a
+    # zero-length edge, which the writer refuses
+    edges = drop_degenerate(edges)
     edges = collapse_and_prune(edges, args.min_stub)
     if not args.keep_fragments:
         edges = largest_component(edges)

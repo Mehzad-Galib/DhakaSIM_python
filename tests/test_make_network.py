@@ -17,8 +17,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from make_network import (  # noqa: E402
-    Projector, _closest_on_polyline, _median, _resample, collapse_roundabouts,
-    merge_dual_carriageways, polyline_length, simplify, way_width,
+    Projector, _closest_on_polyline, _median, _resample, chain_oneway_pieces,
+    collapse_roundabouts, merge_dual_carriageways, polyline_length,
+    reconnect_to_fused, simplify, way_width, weld_endpoints,
 )
 
 TOL = 1e-6
@@ -221,8 +222,60 @@ def test_unequal_extents_do_not_inflate_the_separation():
     west = _oneway([(120.0, 14.0), (0.0, 14.0)])     # only 60% as long
     edges, fused = merge_dual_carriageways([east, west], max_separation=45.0)
     assert fused == 1
-    close(edges[0]["median"], 7.0, 0.5)
-    close(edges[0]["width"], 21.0, 0.5)
+    merged = [e for e in edges if e.get("median")]
+    assert len(merged) == 1
+    close(merged[0]["median"], 7.0, 0.5)
+    close(merged[0]["width"], 21.0, 0.5)
+
+
+def test_the_longer_carriageway_keeps_its_overhang():
+    """Only the stretch the two share is fused; the 80 m the eastbound
+    side runs on past the westbound one stays a one-way road, joined to
+    the fused road's end, instead of vanishing."""
+    east = _oneway([(0.0, 0.0), (200.0, 0.0)])
+    west = _oneway([(120.0, 14.0), (0.0, 14.0)])
+    edges, fused = merge_dual_carriageways([east, west], max_separation=45.0)
+    assert fused == 1
+    merged = [e for e in edges if e.get("median")][0]
+    close(merged["points"][0][0], 0.0, 0.5)
+    close(merged["points"][-1][0], 120.0, 0.5)     # fused only to x = 120
+    tails = [e for e in edges if not e.get("median")]
+    assert len(tails) == 1, tails
+    assert "oneway" in tails[0]["props"]
+    close(tails[0]["points"][0][0], 120.0, 0.5)
+    close(tails[0]["points"][-1][0], 200.0, 0.5)
+    close(tails[0]["points"][0][1], 0.0, 0.5)        # still on its own side
+
+
+def test_crossing_oneways_are_not_a_pair():
+    """Two one-way roads meeting head-on at a point share no stretch and
+    must not fuse into a road with a giant median."""
+    a = _oneway([(0.0, 0.0), (100.0, 0.0)])
+    b = _oneway([(150.0, 5.0), (100.0, 5.0)])       # antiparallel, end to end
+    edges, fused = merge_dual_carriageways([a, b], max_separation=45.0)
+    assert fused == 0
+
+
+def test_oneway_pieces_are_chained_before_pairing():
+    """Three aligned pieces of one carriageway become one polyline; the
+    opposite carriageway, cut differently, stays separate; a head-on pair
+    and a two-way piece are left alone."""
+    a1 = _oneway([(0.0, 0.0), (60.0, 0.0)], width=6.0)
+    a2 = _oneway([(60.0, 0.0), (90.0, 0.0)], width=8.0)
+    a3 = _oneway([(90.0, 0.0), (200.0, 0.0)], width=6.0)
+    b = _oneway([(200.0, 14.0), (0.0, 14.0)])
+    head_on = _oneway([(300.0, 0.0), (200.0, 0.0)])   # runs INTO a3's end
+    two_way = {"props": {"highway": "primary"}, "width": 7.0,
+               "points": [(0.0, 14.0), (-50.0, 14.0)]}
+    out = chain_oneway_pieces([a1, a2, a3, b, head_on, two_way])
+    chained = [e for e in out if e["points"][0] == (0.0, 0.0)]
+    assert len(chained) == 1
+    assert chained[0]["points"] == [(0.0, 0.0), (60.0, 0.0), (90.0, 0.0),
+                                    (200.0, 0.0)]
+    close(chained[0]["width"], (60 * 6 + 30 * 8 + 110 * 6) / 200.0, 1e-6)
+    assert len(out) == 4                              # a, b, head_on, two_way
+    assert any(e["points"][0] == (300.0, 0.0) for e in out)
+    assert any(e["points"][0] == (0.0, 14.0) for e in out)
 
 
 def test_diverging_roads_are_not_paired():
@@ -258,6 +311,42 @@ def test_a_roundabout_ring_collapses_to_its_centre():
     # No ring at all: the ways come back as they were.
     same, none = collapse_roundabouts(ways[2:])
     assert none == 0 and same == ways[2:]
+
+
+def test_a_fused_side_street_joins_a_fused_arterial():
+    """A divided side street's fused end lands on the divided arterial's
+    centreline between two vertices; it must be pulled onto the line and
+    the arterial given a vertex there, exactly as an undivided one is."""
+    arterial = {"points": [(0.0, 0.0), (200.0, 0.0)], "props": {},
+                "width": 21.0, "median": 7.0}
+    side = {"points": [(100.0, 2.0), (100.0, 90.0)], "props": {},
+            "width": 18.0, "median": 6.0}
+    plain = {"points": [(150.0, -3.0), (150.0, -60.0)], "props": {},
+             "width": 7.0}
+    out = reconnect_to_fused([arterial, side, plain], tolerance=45.0)
+    assert out[1]["points"][0] == (100.0, 0.0), out[1]["points"]
+    assert out[2]["points"][0] == (150.0, 0.0), out[2]["points"]
+    assert (100.0, 0.0) in out[0]["points"], out[0]["points"]
+    assert (150.0, 0.0) in out[0]["points"], out[0]["points"]
+    # the arterial's own ends are not dragged onto the side street
+    assert out[0]["points"][0] == (0.0, 0.0)
+    assert out[0]["points"][-1] == (200.0, 0.0)
+
+
+def test_near_coincident_endpoints_are_welded():
+    """An end a metre off a crossing joins it; ends three metres apart
+    and more stay separate; interior vertices never move."""
+    edges = [
+        {"points": [(0.0, 0.0), (100.0, 0.0)], "props": {}, "width": 10.0},
+        {"points": [(100.8, 0.6), (100.0, 80.0)], "props": {}, "width": 8.0},
+        {"points": [(100.0, 0.0), (150.0, 0.4), (200.0, 0.0)], "props": {},
+         "width": 8.0},
+        {"points": [(104.0, 0.0), (104.0, 50.0)], "props": {}, "width": 6.0},
+    ]
+    out = weld_endpoints(edges, tolerance=3.0)
+    assert out[1]["points"][0] == (100.0, 0.0), out[1]["points"]
+    assert out[2]["points"][1] == (150.0, 0.4), "interior vertex moved"
+    assert out[3]["points"][0] == (104.0, 0.0), "4 m apart must stay apart"
 
 
 if __name__ == "__main__":
