@@ -592,6 +592,11 @@ def apply_setting(name: str, value: str) -> bool:
         Parameters.TRACE_MODE = value.lower() == "on"
     elif name == "KeepClearMode":
         Parameters.KEEP_CLEAR_MODE = value.lower() == "on"
+    elif name == "TurnDisciplineMode":
+        Parameters.TURN_DISCIPLINE_MODE = value.lower() == "on"
+    elif name == "TurnSpeed":
+        # km/h in the file, m/s inside, like MaximumSpeed
+        Parameters.TURN_SPEED = precision2(float(value) * 1000 / 3600)
     elif name == "ShowLabels":
         Parameters.SHOW_LABELS = value.lower() == "on"
     elif name == "RandomSeed":

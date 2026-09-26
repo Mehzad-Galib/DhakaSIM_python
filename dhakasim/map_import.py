@@ -41,9 +41,35 @@ USER_AGENT = "DhakaSim map import (research use)"
 #: network was built, only the mail.ru mirror answered.
 OVERPASS_ENDPOINTS = (
     "https://overpass-api.de/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    # The two real servers behind overpass-api.de.  Its front end answers
+    # 504 the moment the queue is full, but one of the pair is usually
+    # free: on 22 Sep 2026 a 1 km extract got 504 from the front and
+    # from lz4 and 123 ways in six seconds from z.
+    "https://z.overpass-api.de/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    # Last: its certificate chain has failed verification from here.
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 )
+
+#: Seconds to wait on one endpoint before trying the next.  Three minutes
+#: was long enough that two slow mirrors in a row read as "not working"
+#: -- the owner's 500 m and 1000 m imports -- while the server that would
+#: have answered in six seconds sat further down the list.
+OVERPASS_TIMEOUT_S = 60
+
+#: The endpoint that answered last, tried first next time.
+_LAST_GOOD_ENDPOINT = [None]
+
+
+def overpass_endpoints():
+    """The endpoints in the order to try them: the last one that answered
+    first, then the list."""
+    first = _LAST_GOOD_ENDPOINT[0]
+    if first is None or first not in OVERPASS_ENDPOINTS:
+        return list(OVERPASS_ENDPOINTS)
+    return [first] + [e for e in OVERPASS_ENDPOINTS if e != first]
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 
@@ -858,7 +884,7 @@ def preview_tiles(lat: float, lon: float, radius_m: float,
 def _overpass_query(bbox, classes) -> str:
     south, west, north, east = bbox
     pattern = "|".join(classes)
-    return (f'[out:json][timeout:120];\n'
+    return (f'[out:json][timeout:{OVERPASS_TIMEOUT_S}];\n'
             f'way["highway"~"^({pattern})$"]'
             f'({south:.6f},{west:.6f},{north:.6f},{east:.6f});\n'
             f'out geom;\n')
@@ -873,27 +899,32 @@ def fetch_roads(bbox, classes, log=print, cancelled=lambda: False) -> dict:
     """
     body = urllib.parse.urlencode({"data": _overpass_query(bbox, classes)})
     last_error = "no endpoint answered"
-    for attempt in range(6):
+    endpoints = overpass_endpoints()
+    for attempt in range(2 * len(endpoints)):
         if cancelled():
             raise RuntimeError("cancelled")
-        endpoint = OVERPASS_ENDPOINTS[attempt % len(OVERPASS_ENDPOINTS)]
+        endpoint = endpoints[attempt % len(endpoints)]
         host = urllib.parse.urlparse(endpoint).netloc
         log(f"asking {host} for the roads...")
         request = urllib.request.Request(
             endpoint, data=body.encode(),
             headers={"User-Agent": USER_AGENT})
         try:
-            with urllib.request.urlopen(request, timeout=180) as response:
+            with urllib.request.urlopen(
+                    request, timeout=OVERPASS_TIMEOUT_S) as response:
                 data = json.load(response)
+            _LAST_GOOD_ENDPOINT[0] = endpoint
             return _to_geojson(data)
         except (urllib.error.URLError, OSError, ValueError) as exc:
+            # A timeout, a refused connection or a bad certificate is that
+            # mirror's problem, not the request's: try the next one.
             code = getattr(exc, "code", None)
             last_error = f"{host}: {exc}"
             log(f"  {host} did not answer ({code or exc}); trying the next")
             if code not in (429, 504, None):
                 raise RuntimeError(
                     f"the map server refused the request ({exc})") from exc
-            time.sleep(5)
+            time.sleep(2)
     raise RuntimeError(
         "every map server is overloaded right now -- try again in a few "
         f"minutes ({last_error})")
