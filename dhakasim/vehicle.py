@@ -91,7 +91,8 @@ class Vehicle:
                  "_signal_on_link", "_prev_speeds", "_prev_gaps", "_dlc_model",
                  "_has_collided", "_collision_time", "_collision_penalty",
                  "_no_force_move", "_stuck_in_intersection", "_fuel_consumption",
-                 "_penalty_for_collision", "_vehicle_stats")
+                 "_penalty_for_collision", "_vehicle_stats",
+                 "_turn_hold", "_turn_speed_cap")
 
     @classmethod
     def _dummy(cls) -> "Vehicle":
@@ -146,6 +147,8 @@ class Vehicle:
         v._collision_penalty = 0
         v._no_force_move = False
         v._stuck_in_intersection = 0
+        v._turn_hold = 0
+        v._turn_speed_cap = 0.0
         v._fuel_consumption = 0.0
         v._penalty_for_collision = 0.0
         v._vehicle_stats = None
@@ -196,6 +199,11 @@ class Vehicle:
 
         self._no_force_move = False
         self._stuck_in_intersection = 0
+        # TurnDisciplineMode: steps left before the path across the box may
+        # be re-aimed, and the turning-speed cap for the box being crossed
+        # (0 = none, set on entry from the angle of the turn).
+        self._turn_hold = 0
+        self._turn_speed_cap = 0.0
 
         self._link = link
         self._segment_index = segment_index
@@ -1717,6 +1725,7 @@ class Vehicle:
 
         if self._speed > self._current_max_speed:
             self._speed = self._current_max_speed
+        self._cap_turn_speed()
         store_speed = self._speed
 
         temp_speed = 0
@@ -1814,6 +1823,7 @@ class Vehicle:
         self._speed += self._max_acceleration * Vehicle.TIME_STEP
         if self._speed > self._current_max_speed:
             self._speed = self._current_max_speed
+        self._cap_turn_speed()
         store_speed = self._speed
 
         temp_speed = 0
@@ -1834,10 +1844,18 @@ class Vehicle:
         self._speed = store_initial_speed
         return True
 
-    def _try_changing_direction_in_intersection(self) -> bool:
+    def _try_changing_direction_in_intersection(self, nearest_first=False) -> bool:
         """Try all the strips of the entering segment to enter when stuck in
         the current direction; returns whether it can move forward after
-        changing direction."""
+        changing direction.
+
+        The Java order scans from the kerb inwards, so the first free strip
+        is usually the one furthest from the path the vehicle is on and the
+        body swings right across the box.  ``nearest_first`` (the
+        TurnDisciplineMode order) tries the strips closest to the current
+        aim first, so a blocked vehicle shifts by a strip or two rather
+        than changing lanes across the junction.
+        """
         is_ = self.get_current_intersection_strip()
         if is_.end_strip <= is_.entering_segment.middle_low_strip_index:
             begin_limit = 1
@@ -1847,11 +1865,73 @@ class Vehicle:
             begin_limit = is_.entering_segment.middle_high_strip_index
             end_limit = (is_.entering_segment.last_vehicle_strip_index
                          - (self._number_of_strips - 1))
-        for i in range(begin_limit, end_limit + 1):
+        order = range(begin_limit, end_limit + 1)
+        if nearest_first:
+            current = is_.end_strip
+            order = sorted(order, key=lambda i: (abs(i - current), i))
+        for i in order:
             if self._is_change_direction_in_intersection_fruitful(i):
                 self._stuck_in_intersection = 0
                 return True
         return False
+
+    def _cap_turn_speed(self) -> None:
+        """TurnDisciplineMode: no faster than the turn allows."""
+        if (Parameters.TURN_DISCIPLINE_MODE and self._turn_speed_cap > 0
+                and self._speed > self._turn_speed_cap):
+            self._speed = self._turn_speed_cap
+
+    def enter_box(self, leaving_segment, leaving_reverse,
+                  entering_segment, entering_reverse) -> None:
+        """TurnDisciplineMode bookkeeping on entering a signalised junction:
+        work out the angle of the turn from the direction of travel on the
+        two segments and set the speed cap for it, and start with the path
+        held.  A straight-across crossing (under 15 degrees) is not capped;
+        from there the cap falls linearly to ``Parameters.TURN_SPEED`` at a
+        right angle and stays there for anything sharper.  Roundabouts keep
+        their own deflection rule and never come here.
+        """
+        self._turn_hold = 0
+        self._turn_speed_cap = 0.0
+        turn = Vehicle.turn_angle(leaving_segment, leaving_reverse,
+                                  entering_segment, entering_reverse)
+        cap = Vehicle.turning_speed(turn, self._current_max_speed)
+        self._turn_speed_cap = cap
+        if cap > 0 and self._speed > cap:
+            self._speed = cap
+
+    @staticmethod
+    def turn_angle(leaving_segment, leaving_reverse,
+                   entering_segment, entering_reverse) -> float:
+        """Degrees between the directions of travel on the two segments."""
+        def heading(segment, reverse):
+            dx = segment.get_end_x() - segment.get_start_x()
+            dy = segment.get_end_y() - segment.get_start_y()
+            return (-dx, -dy) if reverse else (dx, dy)
+
+        ax, ay = heading(leaving_segment, leaving_reverse)
+        bx, by = heading(entering_segment, entering_reverse)
+        cross = ax * by - ay * bx
+        dot = ax * bx + ay * by
+        if cross == 0 and dot == 0:
+            return 0.0
+        return abs(math.degrees(math.atan2(cross, dot)))
+
+    @staticmethod
+    def turning_speed(turn_degrees: float, max_speed: float) -> float:
+        """The speed cap for a turn of ``turn_degrees``: 0 (no cap) under
+        15 degrees, ``Parameters.TURN_SPEED`` from 90 degrees on, linear
+        between -- and never above ``max_speed``, which a slow vehicle type
+        may already be under."""
+        if turn_degrees < 15.0:
+            return 0.0
+        floor = Parameters.TURN_SPEED
+        if turn_degrees >= 90.0:
+            cap = floor
+        else:
+            span = max(max_speed - floor, 0.0)
+            cap = floor + span * (90.0 - turn_degrees) / 75.0
+        return min(cap, max_speed) if max_speed > 0 else cap
 
     def _is_slower_vehicle_in_proximity_in_intersection(self) -> bool:
         store_distance_in_intersection = self._distance_in_intersection
@@ -1869,6 +1949,22 @@ class Vehicle:
         return False
 
     def move_vehicle_in_intersection(self) -> None:
+        if Parameters.TURN_DISCIPLINE_MODE:
+            # Hold the line across the box.  Re-aim only when no forward
+            # move is possible at all -- not, as the Java model does, the
+            # moment something slower is ahead -- and then to the nearest
+            # free strip, keeping the new line for a few steps so a queue
+            # in the box does not ripple sideways every step.
+            if self._move_forward_in_intersection():
+                if self._turn_hold > 0:
+                    self._turn_hold -= 1
+                return
+            if self._turn_hold > 0:
+                self._turn_hold -= 1
+                return
+            if self._try_changing_direction_in_intersection(nearest_first=True):
+                self._turn_hold = Parameters.TURN_HOLD_STEPS
+            return
         if (not self._move_forward_in_intersection()
                 or self._is_slower_vehicle_in_proximity_in_intersection()):
             self._try_changing_direction_in_intersection()

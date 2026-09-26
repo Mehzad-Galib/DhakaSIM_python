@@ -253,9 +253,10 @@ is drawn in.
 
 `road_geometry.py` builds six things: the carriageway quads, a filled patch per
 junction, the roundabout islands, a curved ribbon for every turning movement,
-the painted lane dividers, and one continuous ribbon per link.  `paint()` draws
-them through the shared surface protocol, so the window, the report and the 3D
-view cannot disagree about the shape of an intersection.
+the lane dividers (built, no longer painted -- see below), and one continuous
+ribbon per link.  `paint()` draws them through the shared surface protocol, so
+the window, the report and the 3D view cannot disagree about the shape of an
+intersection.
 
 The carriageway is painted from the ribbons, one polygon per link, not from the
 quads.  On a straight link the two are the same thing; on a link that bends
@@ -329,11 +330,15 @@ movement impossible in both directions. They are filled in the road colour, so
 the junction silhouette becomes the union of the patch and the turns that swing
 outside it.
 
-Carriageways carry painted lane dividers: dashed grey lines at a nominal
-3.5 m lane spacing, 3 m dash and 3 m gap. They are markings only. The
-simulation has no lanes, a vehicle straddles as many 0.5 m strips as it likes,
-and drivers ignoring the paint is precisely the behaviour being modelled. A
-road narrow enough for one lane gets no divider. The dividers stop at the
+Carriageways no longer show lane dividers (removed 22 Sep 2026). The
+simulation has no lanes -- a vehicle straddles as many 0.5 m strips as it
+likes, and drivers ignoring the paint is precisely the behaviour being
+modelled -- so the dashed lines promised a discipline the traffic never kept
+and read as vehicles "changing lanes". `road_geometry.build` still computes
+them (`lane_markings`, dashed lines at a nominal 3.5 m lane spacing, 3 m dash
+and 3 m gap, none on a road narrow enough for one lane), so the geometry
+tuple keeps its shape and the function keeps its tests; `paint()` skips them.
+Were they ever painted again, they would stop at the
 junction rather than being ruled across it, matching how an approach's markings
 end at an intersection.
 
@@ -813,6 +818,8 @@ touch:
 | `TimeOfDay` | hour of the surveyed day to simulate, `0`-`23`; `-1` uses the busiest hour. The GUI's Time of day strip and `--hour` override it |
 | `GeometryMode` | `On` (default) applies the network's `geometry.txt`: physical medians, one-way arms and roundabouts. `Off` keeps byte-identical parity with the Java reference |
 | `KeepClearMode` | `On` (default) runs the VISSIM-style junction discipline: red lights hold traffic at a stop line at the edge of the junction box, and a vehicle enters the box only when its exit has room for it and for everyone already inside bound for the same strips. `Off` is the Java-parity behaviour, where queues form on the junction itself |
+| `TurnDisciplineMode` | `On` (default) makes a vehicle cross a signalised junction the way a driver does: capped at a turning speed that falls with the angle of its turn (no cap under 15 degrees, `TurnSpeed` from a right angle on), and holding its line across the box -- it re-aims at another exit strip only when it cannot move at all, to the nearest free strip, and keeps that line for three steps. `Off` is the Java-parity behaviour, where a vehicle keeps road speed through a right angle and re-aims at any exit strip whenever something slower is ahead, sweeping across the box sideways |
+| `TurnSpeed` | km/h, the cap at a right-angle turn under `TurnDisciplineMode`; 20 by default |
 | `ShowLabels` | `On` (default) draws street names beside the links and node names (or bare ids) beside the junctions, in the plan view, the 3D view and the report. The BUET-DU-DMC demo sets `Off` in its `defaults.txt`: its imagery already carries every street name, and a second set of labels drawn over it is clutter. Drawing only — the simulation never reads it |
 | `Seed` | pins the RNG to this value, unlike `RandomSeed` (below), which discards it. `--seed` sets the same thing |
 | `NetworkRoadLength` | km of road used to size the roadside-object population. `auto` (the default) measures it from the loaded network; a number pins it, and `1.01` reproduces the Java original |
@@ -855,6 +862,15 @@ otherwise.
   most of what the traffic negotiates. `--seed` now routes them through the
   seeded generator (`parameters.scratch_random`); without it they behave as
   before. Only the distributions were ever reproducible here, never the stream.
+- **Turns are taken at a turning speed, on one line.** `TurnDisciplineMode
+  On` (22 Sep 2026) caps a vehicle crossing a signalised junction at a speed
+  that falls with the angle of its turn -- full speed straight across,
+  `TurnSpeed` (20 km/h) at a right angle -- and stops it re-aiming across
+  the box whenever something slower is ahead, which is what the Java model
+  did and what read as cars changing lanes inside the junction. Network-wide
+  speed and waiting time move by under 4% on the shipped networks; `Off` is
+  the Java-parity behaviour, checked byte for byte before the baseline was
+  re-recorded.
 - **Junctions run a VISSIM-style discipline by default.** `KeepClearMode On`
   holds red-light queues at a stop line at the drawn edge of the junction
   box and lets a vehicle enter only when it would not have to stop inside it
@@ -923,6 +939,17 @@ otherwise.
 - **The GUI writes `trace.txt` every frame**, which grows quickly.
 
 ## Importing a map from the GUI
+
+A progress bar under the buttons tracks the stages (the road fetch, the
+build, routes, the background map, the fit) and creeps between them, so a
+long build is visibly working rather than hung. The road data comes from
+Overpass, whose public servers are busy: the front end at overpass-api.de
+often answers 504 for a 1 km extract while one of the two servers behind it
+(`z.` or `lz4.overpass-api.de`) answers in seconds, so the fetch walks a list
+of six endpoints with a one-minute wait each and starts from whichever
+answered last. The log names every server asked. If every one is down, the
+import says so within a few minutes instead of sitting on a three-minute
+timeout per mirror.
 
 **Import map…** in the start screen's footer does the whole of the next
 section's pipeline from one small dialog. Say where — a place name
@@ -1068,22 +1095,33 @@ is about as close as an automatic derivation gets.
 ### Miami and Riyadh
 
 `input/miami` and `input/riyadh` exist so the lane / non-lane comparison can be
-run against developed-country road layouts, but they are **idealised grids, not
-surveyed topology** — each `geometry.txt` says so at the top. They come from
-`make_grid.py`, which writes a GeoJSON street grid and feeds it through the same
-converter real data goes through, so the fusion, width and splitting logic is
-identical:
+run against developed-country road layouts. Both are now real OpenStreetMap
+extracts cut down through the import dialog's junction picker (22 Sep 2026):
+**Miami** is six junctions in Homestead, Florida -- Krome Avenue and Flagler
+Avenue at Campbell Drive and at Mowry Drive, and US-1 at Mowry Drive and at
+NE 6th Avenue -- 17 links, 10.3 km of road and 110 demand pairs; **Riyadh**
+is five junctions in Al Malaz -- Omar bin Abdulaziz Road and Ali bin Abi
+Talib at Fatimah Al Zahra Street, Jarir Street at Ali bin Abi Talib and at
+Al Sheikh Saleh bin Ghosoun, and Al Ahsa Street at Musab bin Umair -- 15
+links, 9.2 km and 53 pairs. Each junction's legs run to the next chosen
+junction or the edge of a 1 km extract; each `geometry.txt` names the
+junctions at the top. They replace the arterial builds of 24 Aug 2026 (one
+link per carriageway, ninety and sixty links, every junction a cluster of
+stubs whose signal bars sat inside the drawn box), which in turn replaced the
+idealised grids `make_grid.py` still writes (archived in
+`removed_networks/miami_grid` and `riyadh_grid`):
 
 ```bash
 python make_grid.py riyadh --out riyadh.geojson
 ```
 
-What they reproduce faithfully is the carriageway widths the paper states —
-Miami 10 m and 20 m, Riyadh 18 m and 24 m, with divided arterials — because
-that, not the street pattern, is what its conclusion rests on: wide long roads
-reward lane discipline and narrow ones do not. Miami's area is inferred from the
-paper's Figure 3(d); Riyadh's district could not be identified from Figure 3(h),
-so Al Malaz stands in. Swap either for a real extract with one command.
+The grids reproduced the carriageway widths the paper states -- Miami 10 m
+and 20 m, Riyadh 18 m and 24 m, with divided arterials -- because that, not
+the street pattern, is what its conclusion rests on: wide long roads reward
+lane discipline and narrow ones do not. The real extracts carry OSM's own
+widths instead. Miami's area is inferred from the paper's Figure 3(d);
+Riyadh's district could not be identified from Figure 3(h), so Al Malaz
+stands in.
 
 Note that roadside objects are still Dhaka's — parked rickshaws and CNGs appear
 in Miami and Riyadh too, since `ObjectMode` models one city's side friction. Run
@@ -1208,14 +1246,10 @@ avenue's one-way carriageways, so the midpoint of those two is the junction. It
 lands on (500, 500) like the other four surveyed networks, which is the check
 that it is right.
 
-**Miami will not line up.** It is an idealised grid rather than surveyed
-topology (see above), and ten of its twenty-two links have no real road under
-them at all, so fitting half of them would look worse than fitting none. The
-imagery is placed correctly; it is the network that is a stand-in.
-
-Riyadh started the same way and has been fitted: nineteen of its twenty-two
-links found a real arterial to sit on, so its lattice now follows the district
-it was drawn from. `link.straight.txt` still holds the grid it was.
+**Miami and Riyadh line up now.** Both were idealised grids once, and Miami
+in particular had ten of its twenty-two links over no road at all; since
+22 Sep 2026 both are real extracts (see *Miami and Riyadh* above), fitted by
+the import like any other, and sit on their imagery.
 
 ### What changes on screen
 

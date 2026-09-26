@@ -72,6 +72,13 @@ def networks() -> list[str]:
             os.path.join(root, name, "osm_extract.geojson")))
 
 
+#: Extra ``--set NAME=VALUE`` settings for every run, from the command line.
+#: The way to prove a new default-On behaviour is a pure addition: run the
+#: baseline with the mode Off (``python hash_run.py --set TurnDisciplineMode=Off``)
+#: before re-recording it with the mode On.
+EXTRA_SETTINGS: list[str] = []
+
+
 def _run(network: str) -> tuple[dict[str, str], str]:
     """One seeded headless run; ``({component: sha256}, error)``."""
     stats_dir = tempfile.mkdtemp(prefix=f"dhakasim_hash_{network}_")
@@ -84,6 +91,8 @@ def _run(network: str) -> tuple[dict[str, str], str]:
         # numbers under test do not pass through it, so it is pure runtime.
         "--set", "ReportAnimationFrames=0",
     ]
+    for setting in EXTRA_SETTINGS:
+        command += ["--set", setting]
     result = subprocess.run(command, cwd=REPO, capture_output=True)
     if result.returncode != 0:
         tail = result.stderr.decode("utf-8", "replace").strip().splitlines()
@@ -221,6 +230,14 @@ def main(argv: list[str]) -> int:
         for network in sorted(recorded):
             print(f"{network}: {len(recorded[network])} components")
         return 0
+    argv = list(argv)
+    while "--set" in argv:
+        at = argv.index("--set")
+        if at + 1 >= len(argv):
+            print("--set needs NAME=VALUE")
+            return 2
+        EXTRA_SETTINGS.append(argv[at + 1])
+        del argv[at:at + 2]
     wanted = [arg for arg in argv if not arg.startswith("--")]
     known = networks()
     for name in wanted:

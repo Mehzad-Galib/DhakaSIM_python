@@ -183,9 +183,12 @@ before a near-hairpin sends the mitre to infinity. The quads are still built
 and still returned, because `junction_hulls` probes against them and a quad is
 convex where a ribbon is not.
 
-Lane dividers are paint, not model. The simulator has no lanes; they are drawn
-at `LANE_WIDTH_METRES` spacing because 0.5 m strip boundaries would be
-hatching. Do not let anything in `vehicle.py` consult them.
+Lane dividers are paint, not model, and **since 22 Sep 2026 not even paint**:
+`build` still computes them (at `LANE_WIDTH_METRES` spacing, because 0.5 m
+strip boundaries would be hatching) so the six-list geometry tuple and the
+`lane_markings` tests stand, but `paint` no longer draws them -- the owner
+read the dashes as lanes the vehicles were changing, and the simulator has
+no lanes. Do not let anything in `vehicle.py` consult them.
 
 **The drawn bends are smoothed, the model's are not.** `_smooth_segs` rounds a
 link's interior corners (capped corner-cutting, `SMOOTH_CUT_METRES`, two
@@ -346,8 +349,11 @@ through a Tk stipple, `_SVGGraphics` emits real `fill-opacity`, `Scene3D`
 ignores it — and at 1.0 the canvas takes the fast path and never builds a
 stipple at all.
 
-Miami is an idealised grid, so its map is placed correctly and its roads still
-will not line up with it. That is the network, not the basemap.
+Miami was an idealised grid until 22 Sep 2026, so its map was placed
+correctly while its roads did not line up with it; the note stays because
+the grid is still in `removed_networks/miami_grid` and `make_grid.py` still
+writes one. The shipped Miami is a real extract now (see the rebuild note
+at the end of this file).
 
 ## Two scores, and they disagree on purpose
 
@@ -395,8 +401,10 @@ median distance from 1.2 m to 3.1 m and its painted-road share from 41% to
 | banani_27 | 23.7% | 1.7 m |
 | riyadh | 17.9% | 5.0 m |
 
-Miami reads 19.2 m and always will: ten of its twenty-two links have no real
-road under them, which is why it is deliberately not fitted. **banani_23,
+Miami read 19.2 m while it was a grid (ten of its twenty-two links had no
+real road under them); the riyadh row above is the 24 Aug arterial build.
+Both were replaced by picker-built extracts on 22 Sep 2026 and have not
+been re-scored. **banani_23,
 banani_27 and bijoy_sarani all declare `median` links and have not been
 refitted since the dual-carriageway rule went in**, so their scores are the
 old ones; refitting them would change every statistic they produce, which is
@@ -551,12 +559,11 @@ arm's endpoint, which is exactly the test that tells a boundary node from a
 junction stored at (0, 0). `node.straight.txt` backs it up; `--restore` puts
 both files back.
 
-Miami is deliberately **not** fitted, and `--all` will fit it: ten of its
-twenty-two links have no real road under them at all, so fitting half of them
-looks worse than fitting none. Riyadh *is* fitted -- 19 of 22 links matched --
-so `--all` is now safe for everything except Miami. Both keep their
-`link.straight.txt`, and the `experiments/` paper comparison was run on the
-straight geometry.
+Miami was deliberately **not** fitted while it was a grid (ten of its
+twenty-two links had no real road under them). Since 22 Sep 2026 both Miami
+and Riyadh are picker-built extracts, fitted by the import chain like every
+other, so `--all` is safe everywhere. The `experiments/` paper comparison was
+run on the old straight grids, which only `removed_networks/` still holds.
 
 ## The report's framing
 
@@ -689,7 +696,8 @@ picture nobody can drive on.
 
 `KeepClearMode` (default On, Off = byte-identical Java parity, pinned by
 running `hash_run.py` with it Off before its baseline was re-recorded) is the
-VISSIM-style junction behaviour, in three pieces:
+VISSIM-style junction behaviour, in three pieces (a fourth,
+`TurnDisciplineMode`, follows them):
 
 - **Stop lines.** `Processor._set_stop_lines` stores a per-end setback on
   each mouth segment of every ≥3-arm non-roundabout node, read off **the
@@ -768,6 +776,29 @@ VISSIM-style junction behaviour, in three pieces:
   light `network_files` nodes (no bundles → `Node.is_signalised()` False)
   get none at all. `tests/test_signals.py` pins all of this.
 
+- **Turning discipline** (`TurnDisciplineMode`, default On, own switch so
+  the two can be studied apart; Off is Java parity, checked with
+  `python hash_run.py --set TurnDisciplineMode=Off` against the previous
+  baseline before the 22 Sep re-record). Two things the owner saw as "cars
+  changing lanes and taking turns too quickly while crossing
+  intersections", both Java behaviours. First, a vehicle crossed the box
+  at road speed whatever the angle: `Vehicle.enter_box` (called from the
+  entry code in `Processor._move_vehicle_at_segment_end`, signalised nodes
+  only -- roundabouts keep their deflection rule) now works the turn angle
+  out from the two segments' directions of travel and caps the speed
+  inside the box (`turning_speed`: none under 15 degrees, linear down to
+  `TURN_SPEED` at 90), applied wherever the box code clamps to the
+  vehicle's maximum (`_cap_turn_speed`). Second,
+  `move_vehicle_in_intersection` re-aimed at another exit strip the moment
+  anything slower was ahead, scanning from the kerb inwards, so the first
+  free strip was usually the far one and the body swept across the box;
+  now it re-aims only when no forward move is possible at all, tries the
+  strips nearest its current aim first, and holds the new line for
+  `TURN_HOLD_STEPS`. Measured at 300 steps, seed 7: network speed and
+  waiting time move by under 4% on banani, kakrail, buet and miami. The
+  two new `Vehicle` slots (`_turn_hold`, `_turn_speed_cap`) are set in
+  `_dummy` too, or a phantom leader fails to construct.
+
 ## Node labels and the text halo
 
 `draw_node_id` places a junction's name by probing candidate directions (the
@@ -841,6 +872,23 @@ property of the objective, not a bug.
 
 Measured, not guessed. Two rules if you touch the inner loop.
 
+**The plan view keeps a static layer too** (22 Sep 2026). It used to
+`delete("all")` and rebuild the whole canvas every step -- imagery, several
+hundred road items, every label -- which was both the slowest thing a frame
+did and the reason the picture flashed while a run played (the owner's
+"UI flashing consistently"): Tk repaints the cleared window before the new
+items land. `CanvasGraphics` now stamps every item with `CanvasGraphics.tags`,
+`paint_component` sets it to `STATIC_2D_TAG` for the imagery, roads and
+labels and `DYNAMIC_2D_TAG` for everything after, and keys the static layer
+on `_static2d_key` (size, scale, translation, ppm, roads on, imagery on,
+geometry identity, labels, background); a matching key deletes only the
+dynamic tag and the furniture. The 2D and 3D keys clear each other, because
+a canvas holding one view's static items must never be reused by the other.
+Banani 23 over imagery: 154 static items kept, ~180 dynamic redrawn, 23 ms a
+step including the model; BUET 376 kept, ~800 redrawn, 56 ms. Anything new
+that draws per-frame-changing content before the tag switch must move after
+it or join the key -- the same rule as `_static3d_key`.
+
 **The accident log is opened once and kept open** (`vehicle.accident_log`,
 closed by `atexit`). Reverting it to open-append-close per row costs 40% of a
 simulation step: a near crash is a common event, ten thousand rows in four
@@ -853,7 +901,10 @@ of twice, which means the strict `<` that keeps the first of equal candidates
 and the NaN comparisons that silently drop a vehicle both had to survive
 untouched. The check is a seeded run hashed end to end, not the test suite —
 the suites do not run the traffic model. That check is now one command:
-`python hash_run.py` runs every network headless (seed 7, 90 steps) and
+`python hash_run.py` runs every network headless (seed 7, 90 steps; add
+`--set NAME=VALUE` to run them all under a setting, which is how a new
+default-On mode is shown to be a pure addition before its baseline is
+re-recorded) and
 compares the console summary and every CSV against `run_hashes.txt`,
 per component, so a drift report names the output that moved. Re-record with
 `--record` only after a change is *verified* — recording is the same statement
@@ -932,6 +983,19 @@ use.
 `dhakasim/map_import.py` is the logic — location parsing, Nominatim
 geocoding, the Overpass fetch with its mirror list, and `ImportJob`, which
 drives the chain — and `_ImportDialog` in `gui.py` is the window over it,
+with a progress bar (a `tk.Canvas` strip under the buttons, not a
+`ttk.Progressbar`, for the usual Windows-theme reason) whose stage floors
+come from the worker's own log lines through `import_progress` and which
+creeps towards the next floor on every `_poll` tick, so a long build is
+visibly working. The Overpass list (22 Sep 2026): the public front end
+`overpass-api.de` answers 504 the moment its queue is full, which for a
+1 km extract was most of the time -- the owner's "radius 500 and 1000 not
+working" -- while one of the two servers behind it (`z.` and `lz4.`) usually
+answers in seconds; both are listed explicitly, the per-endpoint wait is
+`OVERPASS_TIMEOUT_S` (60 s, down from 180 -- two dead mirrors in a row used
+to look like a hang), the endpoint that answered last is tried first
+(`overpass_endpoints`), and `maps.mail.ru` sits last because its certificate
+chain fails verification from here. Five facts:
 opened by **Import map…** in the start screen's *footer* (a footer button
 costs no height, and the density ladder has none to give). Five facts:
 
@@ -1143,6 +1207,34 @@ chain collapse then strands the whole road — Shahbag lost Shahbag Road
 that way) and `collapse_roundabouts`. The old build is not in git
 history either (only its committed text files are); the scratchpad kept a
 copy for this session only.
+
+## Miami and Riyadh were rebuilt (22 Sep 2026)
+
+The same treatment as BUET-DU-DMC, on the owner's "do the same for Miami
+and Riyadh, just 5/6 intersections": both went through the picker from a
+1 km extract with `+ local streets` and were installed over the old folders
+keeping `basemap.*`, `place.txt`, `defaults.txt` and `vehicle_mix.txt`, no
+import marker, baselines re-recorded. Miami is six junctions (Krome /
+Campbell, Campbell / Flagler, Krome / Mowry, Flagler / Mowry, US-1 / Mowry,
+US-1 / NE 6th Ave; 17 links, 110 demand rows), Riyadh five (Omar bin
+Abdulaziz / Fatimah Al Zahra, Fatimah / Ali bin Abi Talib, Jarir / Ali bin
+Abi Talib, Al Ahsa / Musab bin Umair, Jarir / Al Sheikh Saleh bin Ghosoun;
+15 links, 53 rows). Four make_network defects came out of it, all in the
+dual-carriageway merge and all pinned in `tests/test_make_network.py`:
+`reconnect_to_fused` skipped fused roads' own ends (Jarir, itself divided,
+never joined Al Ahsa) and identified fused roads by `median > 0` (Musab bin
+Umair fuses to a 20 m road with no median and never joined either -- Al
+Ahsa left the network as the smaller component); the pairing threw away the
+longer carriageway's overhang (a 12 m hole in Campbell Drive) and paired
+OSM's 20-150 m pieces one by one (a 3 m fragment got a 30 m "median").
+Now `chain_oneway_pieces` joins each carriageway first, `_merge_pass` fuses
+only the shared stretch (longest shared stretch first, at least half the
+shorter piece) and keeps the overhangs as one-way pieces, and
+`merge_dual_carriageways` repeats until nothing more pairs, because the
+overhangs of one pass are the pairs of the next. The picker harness that
+built them drops a leg leaving the basemap, one ending within 250 m of
+another chosen junction, and a boundary stub under 100 m where the
+junction keeps three.
 
 ## Khamarbari is gone
 

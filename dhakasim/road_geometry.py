@@ -1282,11 +1282,17 @@ def paint(g, link_list, node_list, pixel_per_meter, geometry=None,
           fill=True) -> None:
     """Paint the whole road network onto the graphics surface *g*.
 
-    Draw order matters: road surfaces, then kerb outlines, then the painted
-    lane dividers, then the junction patches and the turning connectors on top
-    so they cover the kerb stubs and the markings and the intersection reads as
-    one smooth area, then each roundabout island last of all so the circulatory
-    carriageway reads as a ring.
+    Draw order matters: road surfaces, then kerb outlines, then the junction
+    patches and the turning connectors on top so they cover the kerb stubs and
+    the intersection reads as one smooth area, then each roundabout island
+    last of all so the circulatory carriageway reads as a ring.
+
+    The lane dividers ``build`` computes are not painted (owner request,
+    22 Sep 2026): the simulator has no lanes -- a carriageway is a row of
+    half-metre strips and vehicles straddle the painted lines freely -- so
+    the dashes promised a discipline the traffic never kept.  They are still
+    built, so the geometry tuple keeps its six lists and ``lane_markings``
+    keeps its tests.
 
     With *fill* off the carriageway is washed rather than painted: the same
     areas are filled, in a near-white grey at part opacity, so the road still
@@ -1298,7 +1304,7 @@ def paint(g, link_list, node_list, pixel_per_meter, geometry=None,
     A Tk canvas has no alpha, so there the wash is a stipple; the report's SVG
     surface renders the same call as real opacity.
     """
-    _quads, hulls, discs, connectors, markings, carriage = (
+    _quads, hulls, discs, connectors, _markings, carriage = (
         geometry if geometry is not None
         else build(link_list, node_list, pixel_per_meter))
 
@@ -1307,8 +1313,6 @@ def paint(g, link_list, node_list, pixel_per_meter, geometry=None,
     # rather than on the blank canvas.
     border = (Constants.road_border_color if fill
               else Constants.overlay_border_color)
-    marking = (Constants.lane_marking_color if fill
-               else Constants.overlay_marking_color)
     surface = (Constants.road_fill_color if fill
                else Constants.overlay_fill_color)
     kerb_width = ((KERB_WIDTH_METRES if fill else OVERLAY_KERB_WIDTH_METRES)
@@ -1335,14 +1339,6 @@ def paint(g, link_list, node_list, pixel_per_meter, geometry=None,
             for i in range(len(edge) - 1):
                 g.draw_line(edge[i][0], edge[i][1],
                             edge[i + 1][0], edge[i + 1][1])
-
-    # Painted dividers, on the road surface but under the junction patch: the
-    # markings of a real approach stop at the intersection rather than being
-    # ruled straight across it.
-    g.set_color(marking)
-    g.set_stroke(MARKING_WIDTH_METRES * pixel_per_meter)
-    for x1, y1, x2, y2 in markings:
-        g.draw_line(x1, y1, x2, y2)
 
     # The junction patch and the turning paths, in the same surface colour so
     # the intersection reads as one area.  They go on after the kerb outlines

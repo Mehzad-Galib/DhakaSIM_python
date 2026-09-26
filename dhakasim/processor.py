@@ -1540,6 +1540,15 @@ class Processor:
                         vehicle.set_in_intersection(False)
                         vehicle.set_speed(0)
                     else:
+                        # TurnDisciplineMode: the turning-speed cap for this
+                        # crossing, from the angle between the two segments'
+                        # directions of travel (see Vehicle.enter_box).
+                        if (Parameters.TURN_DISCIPLINE_MODE
+                                and not node.is_roundabout()):
+                            vehicle.enter_box(
+                                leaving_segment, vehicle.is_reverse_segment(),
+                                entering_segment,
+                                link_segment_orientation.reverse_segment)
                         # Deflection: a roundabout bends the path around the
                         # island, so drivers slow to a circulating speed rather
                         # than crossing at approach speed. Tighter islands

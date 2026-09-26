@@ -87,6 +87,21 @@ class Parameters:
     # spares wait inside the box -- which is exactly the clogged junction a
     # signal is supposed to prevent.  Off is the Java-parity behaviour.
     KEEP_CLEAR_MODE = True
+    # Turning discipline inside the box (owner request, 22 Sep 2026: "cars
+    # changing lanes and taking turns too quickly while crossing
+    # intersections").  A vehicle entering a signalised junction is capped
+    # at a turning speed that falls with the angle of its turn -- full
+    # speed straight across, TURN_SPEED at a right angle -- and holds its
+    # path across the box: the Java model let it re-aim at any strip of
+    # the exit whenever a slower vehicle was ahead, scanning from the far
+    # kerb inwards, so cars swept across the junction sideways.  Now it
+    # re-aims only when it cannot move at all, to the nearest free strip,
+    # and keeps that line for TURN_HOLD_STEPS steps.  Off is the
+    # Java-parity behaviour.
+    TURN_DISCIPLINE_MODE = True
+    #: m/s, the cap at a 90 degree turn (20 km/h); settable as TurnSpeed
+    TURN_SPEED = 20 * 1000 / 3600.0
+    TURN_HOLD_STEPS = 3
     # Whether the plan/3D views and the report label the network: street names
     # along the links, node names (or bare ids) beside the junctions.  A
     # network drawn over imagery that already carries its own street names --

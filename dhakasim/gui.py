@@ -29,6 +29,15 @@ from . import road_geometry
 from . import utilities as Utilities
 
 
+#: Canvas tags for the plan view's two layers.  The static layer (imagery,
+#: carriageways, junction patches, labels) survives from frame to frame
+#: while the view is still; the dynamic layer (signal bars, vehicles,
+#: pedestrians, props, trajectories) is deleted and redrawn every step.
+#: The same economy the 3D view has always had (``Scene3D.STATIC_TAG``).
+STATIC_2D_TAG = "static2d"
+DYNAMIC_2D_TAG = "dynamic2d"
+
+
 class CanvasGraphics:
     """The ``Graphics2D`` surface used by the drawing methods."""
 
@@ -43,6 +52,9 @@ class CanvasGraphics:
         self.translate_y = 0.0
         self.width = 1
         self.height = 1
+        # The tags every item created from now on carries; the paint loop
+        # switches it between the static and the dynamic layer.
+        self.tags = ()
 
     def set_transform(self, width, height, scale, translate_x, translate_y) -> None:
         self.width = width
@@ -104,7 +116,7 @@ class CanvasGraphics:
             opts["arrow"] = "last"
             opts["arrowshape"] = (size * 1.6, size * 2.0, size * 0.7)
         self.canvas.create_line(self._tx(x1), self._ty(y1), self._tx(x2), self._ty(y2),
-                                fill=self._color.to_hex(),
+                                fill=self._color.to_hex(), tags=self.tags,
                                 width=max(1, self._stroke * self.scale), **opts)
 
     def fill_polygon(self, xs, ys, n) -> None:
@@ -118,26 +130,28 @@ class CanvasGraphics:
         # fifty-odd overlapping quads, a hull and its connectors.
         self.canvas.create_polygon(points, fill=self._color.to_hex(),
                                    outline="", stipple=self._stipple,
-                                   offset="#0,0")
+                                   offset="#0,0", tags=self.tags)
 
     def fill_oval(self, x, y, w, h) -> None:
         x1 = self._tx(x)
         y1 = self._ty(y)
         self.canvas.create_oval(x1, y1, x1 + w * self.scale, y1 + h * self.scale,
                                 fill=self._color.to_hex(), outline="",
-                                stipple=self._stipple, offset="#0,0")
+                                stipple=self._stipple, offset="#0,0",
+                                tags=self.tags)
 
     def draw_oval(self, x, y, w, h) -> None:
         x1 = self._tx(x)
         y1 = self._ty(y)
         self.canvas.create_oval(x1, y1, x1 + w * self.scale, y1 + h * self.scale,
                                 fill="", outline=self._color.to_hex(),
-                                width=max(1, self.scale))
+                                width=max(1, self.scale), tags=self.tags)
 
     def draw_string(self, text, x, y, anchor="sw") -> None:
         size = max(1, int(self._font[1] * self.scale))
         self.canvas.create_text(self._tx(x), self._ty(y), text=text, anchor=anchor,
-                                fill=self._color.to_hex(), font=(self._font[0], size))
+                                fill=self._color.to_hex(), font=(self._font[0], size),
+                                tags=self.tags)
 
     def to_screen(self, x, y):
         """World pixels to canvas coordinates.
@@ -213,6 +227,7 @@ class DhakaSimPanel:
         # What the 3D static layer on the canvas was built from; None means
         # there is no reusable static layer.  See paint_component.
         self._static3d_key = None
+        self._static2d_key = None
         self._timer = None
         self._finished = False
         self._basemap = None
@@ -345,6 +360,8 @@ class DhakaSimPanel:
                           round(camera.pitch, 5), camera.fov,
                           self.draw_roads, id(self._road_geometry))
             reuse_static = static_key == self._static3d_key
+            # A 3D frame's static items are not the plan view's.
+            self._static2d_key = None
             if reuse_static:
                 canvas.delete(render3d.Scene3D.DYNAMIC_TAG)
                 canvas.delete("furniture")
@@ -353,14 +370,38 @@ class DhakaSimPanel:
             g2d.begin_frame(width, height, Parameters.pixel_per_meter,
                             keep_static=reuse_static)
         else:
-            canvas.delete("all")
-            # 2D items are untagged, so a later 3D frame must not mistake
-            # what this frame paints for its own static layer.
+            # A plan-view frame's items are not the 3D view's static layer.
             self._static3d_key = None
             g2d = self.graphics
             g2d.set_transform(width, height, self.scale,
                               self.translate_x, self.translate_y)
-            canvas.configure(bg=Constants.background_color.to_hex())
+            # The plan view used to clear the whole canvas and rebuild it
+            # every step -- imagery, several hundred road items, every
+            # label -- which is both the slowest thing a frame did and the
+            # reason the picture flashed while a run played: Tk repaints
+            # the cleared window before the new items land.  Everything
+            # that depends only on the view and the network now stays on
+            # the canvas while none of that changes, and a step deletes
+            # and redraws only the moving things.  Same design as the 3D
+            # view above; the key lists everything the static layer was
+            # drawn from, so any change to it forces a full redraw.
+            if self.draw_roads:
+                self._ensure_road_geometry()
+            static_key = ("2d", width, height, round(self.scale, 9),
+                          round(self.translate_x, 6),
+                          round(self.translate_y, 6),
+                          Parameters.pixel_per_meter, self.draw_roads,
+                          self.basemap_active(), id(self._road_geometry),
+                          Parameters.SHOW_LABELS,
+                          Constants.background_color.to_hex())
+            reuse_static = static_key == self._static2d_key
+            if reuse_static:
+                canvas.delete(DYNAMIC_2D_TAG)
+                canvas.delete("furniture")
+            else:
+                canvas.delete("all")
+                canvas.configure(bg=Constants.background_color.to_hex())
+            g2d.tags = (STATIC_2D_TAG,)
 
         # The current list objects are replaced wholesale when entries are
         # removed, so re-read them from the processor each frame.
@@ -376,7 +417,7 @@ class DhakaSimPanel:
 
         # Imagery underneath everything, so the network reads as being drawn
         # on the place rather than beside it.
-        if self.basemap_active():
+        if self.basemap_active() and not reuse_static:
             self._draw_basemap(g2d)
 
         if self.draw_roads and not reuse_static:
@@ -387,6 +428,10 @@ class DhakaSimPanel:
             # trajectories from now on are tagged for per-frame deletion.
             g2d.begin_dynamic()
             self._static3d_key = static_key
+        else:
+            # Likewise for the plan view: from here on, dynamic items.
+            g2d.tags = (DYNAMIC_2D_TAG,)
+            self._static2d_key = static_key
 
         # Signal state changes every few steps, so the bars are dynamic
         # content -- drawn each frame, under the vehicles that cross them.
@@ -734,7 +779,8 @@ class DhakaSimPanel:
         # Tk drops a photo the moment nothing references it, and the canvas
         # item does not count as a reference.
         self._basemap_photo = photo
-        self.canvas.create_image(x, y, image=photo, anchor="nw")
+        self.canvas.create_image(x, y, image=photo, anchor="nw",
+                                 tags=g2d.tags)
 
     def set_paused(self, paused: bool) -> None:
         """Hold the run where it is, or let it carry on.
@@ -754,14 +800,17 @@ class DhakaSimPanel:
         # Turning it back on re-snaps the zoom; turning it off frees it again.
         self.set_scale(self.scale)
 
-    def draw_road_network(self, g2d) -> None:
-        # The road surface is painted by road_geometry.paint, which the report's
-        # animation also calls, so the two pictures cannot diverge.  Cache the
-        # geometry: it depends only on the network and pixelPerMeter, and
-        # rebuilding it every frame is wasteful.
-        # Two shapes, not one: over imagery the carriageway is drawn wider, so
-        # the cache is keyed by which of the two is wanted.  Toggling the map
-        # rebuilds; it does not silently reuse the other one's geometry.
+    def _ensure_road_geometry(self) -> None:
+        """Build the cached road geometry if the current view needs a new one.
+
+        It depends only on the network and pixelPerMeter, and rebuilding it
+        every frame is wasteful.  Two shapes, not one: over imagery the
+        carriageway is drawn wider, so the cache is keyed by which of the two
+        is wanted.  Toggling the map rebuilds; it does not silently reuse the
+        other one's geometry.  Called before the plan view decides whether
+        its static layer can be reused, because the geometry's identity is
+        part of that decision.
+        """
         widen = (Constants.OVERLAY_WIDEN_METRES if self.basemap_active()
                  else 0.0)
         if self._road_geometry is None or self._road_geometry_widen != widen:
@@ -772,6 +821,11 @@ class DhakaSimPanel:
             # The label placements were probed against the old shapes.
             self._label_dirs = {}
             self._link_label_pts = {}
+
+    def draw_road_network(self, g2d) -> None:
+        # The road surface is painted by road_geometry.paint, which the report's
+        # animation also calls, so the two pictures cannot diverge.
+        self._ensure_road_geometry()
         # Over imagery the carriageway is washed rather than painted: same
         # shapes, but a pale fill at part opacity, so the road still reads as
         # a surface without hiding the very thing the imagery is there for.
@@ -2187,6 +2241,48 @@ class OptionPanel:
         self.dhaka_sim_frame.show_simulation()
 
 
+#: The import's stages, as the first words of the worker's own log lines,
+#: with the share of the whole each one starts at.  The picker sits
+#: between "building the network" and "keeping": the bar is hidden while
+#: the user chooses, and comes back at 0.45 when Finish import is pressed.
+IMPORT_STAGES = (
+    ("looking up", 0.02),
+    ("asking ", 0.06),
+    ("rebuilding", 0.0),
+    ("roads fetched", 0.22),
+    ("building the network", 0.28),
+    ("keeping ", 0.45),
+    ("generating routes", 0.55),
+    ("fetching the background map", 0.70),
+    ("bending the links", 0.86),
+    ("done.", 1.0),
+)
+
+
+def import_progress(line, current):
+    """The stage floor a worker log line moves the bar to, or ``None`` if
+    the line is not a stage boundary.  Never lower than ``current`` --
+    except the "rebuilding" line, which starts the import over."""
+    text = line.strip()
+    for prefix, floor in IMPORT_STAGES:
+        if prefix == "roads fetched":
+            hit = prefix in text          # "166 roads fetched."
+        else:
+            hit = text.startswith(prefix)
+        if hit:
+            return floor if prefix == "rebuilding" else max(current, floor)
+    return None
+
+
+def next_import_floor(floor):
+    """The floor of the stage after the one at ``floor`` -- what the bar
+    creeps towards while that stage runs."""
+    for _prefix, next_floor in IMPORT_STAGES:
+        if next_floor > floor:
+            return next_floor
+    return 1.0
+
+
 class _ImportDialog:
     """The start screen's "Import map" window.
 
@@ -2334,6 +2430,21 @@ class _ImportDialog:
                                foreground=_UI["muted"], anchor="w")
         self.status.pack(side="left", padx=(14, 0))
 
+        # A progress bar for the stretches with nothing to read: the
+        # Overpass wait, make_network on a kilometre of city, the route
+        # generation and the tile fetch each take long enough that a
+        # still window reads as a hung one.  Drawn on a canvas, not a
+        # ttk.Progressbar -- under the Windows theme ttk takes its colours
+        # from the OS.  Stage floors come from the worker's own log lines
+        # (``import_progress``) and the bar creeps towards the next floor
+        # between them, so it keeps moving while a stage runs.
+        self._progress = tk.Canvas(panel, height=5,
+                                   background=_UI["seg_off"],
+                                   highlightthickness=0, bd=0)
+        self._progress_at = 0.0
+        self._progress_floor = 0.0
+        self._progress_shown = False
+
         self.log = tk.Text(panel, height=10, relief="flat",
                            background=_UI["ground"], foreground=_UI["muted"],
                            insertbackground=_UI["text"], font=("Consolas", 8),
@@ -2416,6 +2527,43 @@ class _ImportDialog:
         self.status.configure(
             text=text,
             foreground="#E86A6A" if error else _UI["accent_text"])
+
+    # -- the progress bar --------------------------------------------------
+
+    def _progress_stage(self, line):
+        """A worker log line arrived: move the bar to that stage's floor."""
+        floor = import_progress(line, self._progress_floor)
+        if floor is None:
+            return
+        if not self._progress_shown:
+            self._progress_shown = True
+            self._progress.pack(fill="x", pady=(0, 6), before=self.log)
+        self._progress_floor = floor
+        self._progress_at = max(self._progress_at, floor)
+        self._draw_progress()
+
+    def _hide_progress(self):
+        if self._progress_shown:
+            self._progress_shown = False
+            self._progress.pack_forget()
+        self._progress_at = 0.0
+        self._progress_floor = 0.0
+
+    def _tick_progress(self):
+        """Creep towards the next stage's floor while a stage runs."""
+        if not self._progress_shown:
+            return
+        goal = next_import_floor(self._progress_floor)
+        self._progress_at += (goal - self._progress_at) * 0.03
+        self._draw_progress()
+
+    def _draw_progress(self):
+        bar = self._progress
+        bar.delete("all")
+        width = bar.winfo_width() or 1
+        height = int(bar.cget("height"))
+        bar.create_rectangle(0, 0, width * min(self._progress_at, 1.0),
+                             height, fill=_UI["accent"], outline="")
 
     # -- the work ----------------------------------------------------------
 
@@ -2611,14 +2759,17 @@ class _ImportDialog:
         """The dialog's one message pump, running for its whole life."""
         if not self.top.winfo_exists():
             return
+        self._tick_progress()
         while not self._queue.empty():
             message = self._queue.get_nowait()
             kind = message[0]
             if kind == "log":
                 self._append(message[1])
+                self._progress_stage(message[1])
             elif kind == "error":
                 self._worker = None
                 self._job = None
+                self._hide_progress()
                 self._rebuild_btn.pack_forget()
                 self._import_btn.configure(text="Import")
                 self._set_status(message[1], error=True)
@@ -2627,6 +2778,7 @@ class _ImportDialog:
                 self._worker = None
                 self._job = None
                 self._done = True
+                self._hide_progress()
                 self._finish(message[1], message[2])
             elif kind == "preview":
                 (_kind, gen, lat, lon, display, radius, mpp, placed,
@@ -2641,6 +2793,7 @@ class _ImportDialog:
             elif kind == "pick":
                 self._worker = None
                 self._picking = True
+                self._hide_progress()
                 # Invalidate any slow preview still in flight: its render
                 # arriving now would wipe the picker off the canvas.
                 self._preview_gen += 1
