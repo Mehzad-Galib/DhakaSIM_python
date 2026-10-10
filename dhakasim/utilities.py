@@ -618,6 +618,8 @@ def apply_setting(name: str, value: str) -> bool:
         Parameters.DEMAND_OVERRIDE = float(value)
     elif name == "DemandOffset":
         Parameters.DEMAND_OFFSET = int(value)
+    elif name == "TrafficLevel":
+        Parameters.DEMAND_SCALE = max(0.01, float(value))
     elif name == "NetworkRoadLength":
         # "auto" (or any negative value) measures it from the network
         Parameters.NETWORK_ROAD_LENGTH = (

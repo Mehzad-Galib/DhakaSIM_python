@@ -1113,7 +1113,10 @@ class Processor:
             if jint(self.next_generation_time[i] / Constants.TIME_STEP) == \
                     Parameters.simulation_step:
                 demand = self.demand_list[i].get_demand()
-                mean_headway = jdiv(3600.0, demand)
+                # The traffic level scales the rate, not the stored demand,
+                # so the statistics still report the survey's figure and a
+                # change mid-run takes hold on this stream's next draw.
+                mean_headway = jdiv(3600.0, demand * Parameters.DEMAND_SCALE)
                 while True:
                     self._create_a_vehicle(i)
 

@@ -150,6 +150,12 @@ class Parameters:
     # nothing on an 8-row junction and +13,380 veh/h across buet_du_dmc's 446
     # rows, so a demand sweep usually wants this at 0.
     DEMAND_OFFSET = 30
+    # A multiplier on every route's arrival rate, read at the moment a
+    # stream draws its next headway -- so it can be moved while a run plays
+    # (the run screen's Traffic slider) as well as set on the start screen
+    # (the strip beside End time) or by TrafficLevel.  At 1.0 the headway is
+    # bit-identical to the Java original's, so the parity baseline stands.
+    DEMAND_SCALE = 1.0
     simulation_step = 1
     simulation_end_time = 0
     pixel_per_strip = 0.0

@@ -80,6 +80,86 @@ Kakrail Mor hazing into the distance](docs/images/view3d_kakrail_corridor.png)
 
 ## Running
 
+### What the screens tell you (6 Oct 2026)
+
+Both screens now follow Nielsen's usability heuristics for *visibility of
+system status*, *recognition rather than recall*, *error prevention* and
+*user control*:
+
+- **Start screen.** The footer line says what Start will run ("Start runs
+  Banani Road 23 · peak hour · 300 s · traffic x1 · seed 65 · plan view").
+  Change anything and it says what moved, to what, what that means and what
+  it was ("Maximum speed → 45 km/h: the speed limit on every link. Was
+  60 km/h."); the row's name gets a green dot while its value differs from
+  the place's own defaults, and the summary counts the changed settings.
+  Choosing a junction reports the defaults it brought with it. A value that
+  cannot be used (an end time of "abc", a speed of 0) is named in red as it
+  is typed, and Start refuses it with the same sentence instead of a
+  traceback.
+- **Run screen.** The toolbar carries a status line ("Step 120 of 300 ·
+  plan view", "Paused at step 120 …") and every button names its key
+  (Space pauses, V switches views, M hides the map). Each change of view
+  shows a short message on the picture itself: what the new view is, how to
+  move in it, and how to get back. Switching to 3D is animated: the camera
+  starts looking straight down at the point the plan view was centred on,
+  at the same zoom, and tilts into the perspective view; switching back
+  tilts up and lands the plan view on the same point. Zooming, resetting,
+  hiding the map and pausing each say what they did.
+- **Two pictures beside the settings (7, 10 and 11 Oct 2026).** The start
+  screen shows the setting under the pointer the way a game's graphics
+  menu does: two stills, one above the other, in a column beside the
+  settings -- the setting as the form has it, and the alternative --
+  drawn by the run screen's own panel over the same imagery, roads, stop
+  lines and vehicles. Nothing plays: a picture is drawn once and redrawn
+  only when a setting, the pointer or the window changes. On the junction
+  rows the pictures are maps: the chosen place's roads over its imagery
+  with nothing driving on them, and under it the same for the tile under
+  the pointer, else the main junction close up. Rest the pointer on **3D
+  view** and the lower picture is the same run from the low camera; on
+  **Trace replay** it is the same roads with the last recorded run's
+  vehicles, a few dozen frames in (or a sentence, when trace.txt holds a
+  run of another place); on **Real geometry**, **Side friction**,
+  **Signal control** or the **traffic** strip it is a second seeded run
+  of the same junction, forty steps in, built with that one setting the
+  other way -- the roundabout gone, the kerbs clear, the signal bars
+  under the other scheduler, three times the arrivals; on **Strip width**
+  and **Footpath strip width** both pictures close in on an arm of the
+  junction with the strip grid drawn on the carriageway, so a 0.25 m
+  strip and a 1.0 m one are visibly different things; hover a particular
+  cell and the lower picture shows that value. Headers name what each
+  picture is and which side of the comparison it is, a line under them
+  counts what is in them (junctions, links and road length for a map;
+  vehicles, crossing pedestrians and parked objects for a run), and a
+  sentence says what the picture shows for the setting. Settings with no
+  look of their own (end time, seed) say so in the lower slot. Both
+  pictures take the run screen's mouse controls. The pictures' column is
+  always there, outside the scroller, filling the window's height, and
+  the settings are laid out around it: the roomiest density whose two
+  columns stand beside the widest column (the junction tiles go two
+  abreast to help), else a narrower column, else one column of settings
+  beside the pictures, scrolling if it must; whatever width the settings
+  leave over goes to the pictures. Nothing the preview runs reaches the
+  run: a seeded run started after previewing is byte for byte the run a
+  fresh start screen gives (`test_start_screen` pins it).
+- **A GUI seed now pins the whole run.** Until 7 Oct 2026 the seed typed on
+  the start screen pinned the main generator only; the object, pedestrian
+  and blockage draws, and the pedestrian arrival generators built at
+  launch, went on drawing from clock-seeded generators, so a GUI run was
+  only partly repeatable. Start now does what `--seed` does headless
+  (`Deterministic` on, the arrival generators rebuilt on the seeded
+  stream); `-1` keeps the Java behaviour of a fresh run every time.
+- **Traffic level, live.** The legend's **Traffic** slider (x0.25 to x3)
+  multiplies every route's arrival rate from the next arrival on, so a
+  junction can be loaded up or eased off while the run plays; the start
+  screen's strip beside End time sets the same multiplier for a run from
+  the start (`TrafficLevel` headlessly). Live traffic from Google Maps or
+  another provider is **not** wired in: Google exposes no traffic density
+  to a program without a paid API key and its terms forbid reading the
+  map's colours, and the free alternatives (TomTom, HERE) also need a key
+  each user would have to obtain. The surveyed networks carry their own
+  hourly demand (`demand_by_hour.txt`, the Time of day row); the imports
+  carry a uniform synthetic demand that the traffic level scales.
+
 The simulator reads `input/` and writes `statistics/` relative to the current
 directory, so run it from this folder:
 
@@ -828,6 +908,7 @@ touch:
 | `MaximumSpeed` | network speed limit in km/h. 60 by default, raised to 100 by Miami's and Riyadh's `defaults.txt` |
 | `DemandOverride` | vehicles/hour for every OD pair, replacing `demand.txt`. Negative (the default) uses the file |
 | `DemandOffset` | added to every demand row (default `30`, the Java constant). Set `0` so a requested rate is the rate |
+| `TrafficLevel` | a multiplier on every route's arrival rate (default `1`). The start screen's strip beside End time sets it, and the run screen's Traffic slider moves it while the run plays: it is read when each stream draws its next headway, so a change takes hold on the next arrival of every route and the vehicles already out are unaffected. At `1` the headways are bit-identical to the Java original's |
 | `VehicleMixOverride` | `On` (default) keeps the Java behaviour of forcing the speed-class split to 25/25/50; `Off` lets `SlowVehicle`/`MediumVehicle`/`FastVehicle` take effect |
 | `TraceMode` | `On` replays a recorded `trace.txt` instead of simulating |
 | `DebugMode` | `On` writes per-vehicle traces into `debug/` |
@@ -852,9 +933,9 @@ otherwise.
 
 - **`RandomSeed` in the file is ignored.** The simulator picks a random seed in
   `[0, 101)` at startup, so a plain run is not reproducible. Use `--seed <n>`
-  (or a `Seed` line) for a repeatable one. The GUI's seed field applies the
-  value you type to the main generator, but not to the object and pedestrian
-  generators below, so a GUI run is only partly reproducible.
+  (or a `Seed` line) for a repeatable one. The GUI's seed field does the
+  same as `--seed` since 7 Oct 2026 (see "A GUI seed now pins the whole
+  run" above); before that it pinned the main generator only.
 - **Object and pedestrian generation used its own unseeded RNG.** Roadside
   object placement, parking times, blockage draws and pedestrian arrivals each
   built a fresh clock-seeded generator per call, following the Java original,

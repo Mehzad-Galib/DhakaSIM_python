@@ -85,6 +85,10 @@ def _pinned(self, *args, **kwargs):
 def panel(width, height):
     """A start screen in a window of the given size, laid out and settled."""
     Utilities.initialize()
+    # As the program launches: the preview steps a real run, and a run
+    # needs the parameter-dependent constants (pedestrian arrivals) built.
+    from dhakasim.constants import Constants
+    Constants.initialize()
     tk.Tk.__init__ = _pinned
     try:
         frame = gui.DhakaSimFrame()
@@ -109,6 +113,10 @@ def _desktop():
 
 
 def test_every_monitor_shows_the_whole_form():
+    """The pictures' column is always there, and the settings fit whole
+    beside it down to 1366 px.  At 1280 px the settings become one column
+    beside the pictures -- a game's list-and-picture layout -- and that
+    column may scroll; that is the one width where it may."""
     desktop = _desktop()
     for name, width, height in MONITORS:
         if width > desktop[0] or height > desktop[1]:
@@ -120,7 +128,12 @@ def test_every_monitor_shows_the_whole_form():
         wanted = option._tray.winfo_reqheight()
         room = option._canvas.winfo_height()
         bar = option._bar.winfo_ismapped()
+        pane = option._preview.width
+        shown = option._preview.frame is not None and option._preview.frame.winfo_ismapped()
         frame.root.destroy()
+        assert shown and pane >= 260, "%s: no pictures beside the settings" % name
+        if width < 1366:
+            continue
         assert wanted <= room, (
             "%s: %s wants %d px and has %d"
             % (name, option._d["name"], wanted, room))
@@ -138,9 +151,16 @@ def test_a_big_screen_gets_the_roomiest_layout():
     option = frame.option_panel
     name = option._d["name"]
     captions = option._d["caption"]
+    pane = option._preview.width
+    stacked = option._stacked
     frame.root.destroy()
-    assert name == "roomy", name
-    assert captions, "the roomiest layout must carry its captions"
+    # With a 460 px picture column beside them the two columns stand side
+    # by side at compact (the tiles two abreast); roomy is 1738 px wide
+    # and cannot.  Captions stay on the rows.
+    assert pane >= 400, "a big screen must give the pictures a wide column"
+    assert name in ("roomy", "compact"), name
+    assert captions, "a big screen must keep its captions"
+    assert stacked is False, "a big screen shows two columns of settings"
 
 
 def test_a_short_screen_keeps_the_explanations_somewhere():
@@ -159,14 +179,18 @@ def test_a_short_screen_keeps_the_explanations_somewhere():
     assert shown == text, (shown, text)
 
 
-def test_the_columns_come_apart_again_when_the_form_is_narrow_enough():
-    """Stacking is a last resort, not a rung.  It doubles the height, so the
-    search steps past it -- and a denser layout is narrow enough to stand side
-    by side on a 1280-wide screen, which is the whole point."""
+def test_a_narrow_screen_gives_the_pictures_their_room():
+    """At 1280 px two columns of settings cannot stand beside a picture
+    column, so the settings become one column (scrolling if it must) and
+    the pictures keep their width: the list-and-picture layout of a
+    game's settings menu."""
     frame = panel(1280, 640)
-    stacked = frame.option_panel._stacked
+    option = frame.option_panel
+    stacked = option._stacked
+    pane = option._preview.width
     frame.root.destroy()
-    assert stacked is False, "1280 px is wide enough for two columns"
+    assert stacked is True, "1280 px: one column of settings beside the pictures"
+    assert pane >= 400, "the pictures keep their column"
 
 
 def test_a_rebuild_keeps_what_the_reader_typed():
@@ -195,6 +219,9 @@ def test_a_rebuilt_strip_stops_watching_its_variable():
     time anything writes the variable."""
     frame = panel(1920, 1000)
     option = frame.option_panel
+    # The strip's own trace plus the form's one feedback watcher (made once,
+    # with the variables -- see _make_vars); a rebuild must add nothing.
+    before = len(option.fields["strip"].trace_info())
     for level in (1, 2, 3, 0):
         option._busy = True
         option._level = level
@@ -211,7 +238,7 @@ def test_a_rebuilt_strip_stops_watching_its_variable():
         error = problem
     frame.root.destroy()
     assert error is None, error
-    assert traces == 1, "%d traces left on one variable" % traces
+    assert traces == before, "%d traces on one variable, %d before" % (traces, before)
 
 
 def test_a_place_that_cannot_use_a_setting_loses_its_row():
@@ -243,6 +270,162 @@ def test_a_place_that_cannot_use_a_setting_loses_its_row():
     assert restored == (True, True, True), restored
     assert restored_mode == Parameters.BASE_ACROSS_PEDESTRIAN_MODE
     assert restored_friction == Parameters.BASE_OBJECT_MODE
+
+
+def test_the_run_screen_shows_the_frame_delay_the_start_screen_set():
+    """The legend's delay box is a Spinbox over a list of choices, and Tk
+    writes the first choice into the box's variable when it is built, so a
+    run started at 250 ms used to open with a box reading 1 -- the run was
+    stepping at 250, the legend said otherwise, and the first arrow click
+    stepped from 1."""
+    from tkinter import messagebox
+    from dhakasim.parameters import Parameters
+    frame = panel(1920, 1000)
+    option = frame.option_panel
+    option.network_var.set("banani_23")
+    for _ in range(10):
+        frame.root.update_idletasks()
+        frame.root.update()
+    option.fields["speed"].set("250")
+    asked = messagebox.askyesno
+    messagebox.askyesno = lambda *a, **k: False
+    try:
+        option.start_simulation()
+        frame.root.update()
+        run_panel = frame.panel
+        if run_panel._timer is not None:
+            run_panel.canvas.after_cancel(run_panel._timer)
+            run_panel._timer = None
+        run_panel._finished = True
+        shown = frame._delay_var.get()
+        stepping_at = Parameters.simulation_speed
+        run_panel.dispose()
+    finally:
+        messagebox.askyesno = asked
+        frame.root.destroy()
+    assert shown == "250", shown
+    assert stepping_at == 250, stepping_at
+
+
+def _settle(root, condition, seconds=8.0):
+    """Pump Tk until ``condition`` holds or the time is up."""
+    import time
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        root.update_idletasks()
+        root.update()
+        if condition():
+            return True
+        time.sleep(0.02)
+    return condition()
+
+
+def test_the_preview_shows_the_place_and_follows_the_view_strip():
+    """Beside the settings, on a wide window, a picture of the chosen
+    junction drawn by the run screen's own panel; choosing a 3D style
+    redraws it from the 3D camera over the same run, and a model setting
+    makes a new run behind it."""
+    from tkinter import messagebox
+    frame = panel(1920, 1000)
+    option = frame.option_panel
+    preview = option._preview
+    root = frame.root
+    asked = messagebox.askyesno
+    messagebox.askyesno = lambda *a, **k: False
+    try:
+        built = _settle(root, lambda: preview.panel is not None)
+        placed = preview.mode == "dock"
+        title = preview.headers[0].cget("text")
+        first = preview.panel
+        option.render3d_var.set("Solid")
+        in_3d = _settle(root, lambda: preview.panel is not None
+                        and preview.panel.view_3d
+                        and preview.panel._tween is None)
+        style = preview.panel.scene3d.style
+        same_run = preview.panel is first
+        option.friction_var.set("Off")
+        rebuilt = _settle(root, lambda: preview.panel is not None
+                          and preview.panel is not first)
+        note = preview._note.cget("text")
+    finally:
+        messagebox.askyesno = asked
+        root.destroy()
+    assert built and placed, (built, placed)
+    assert title.startswith("Kakrail Corridor"), title
+    assert in_3d and style == "solid" and same_run, (in_3d, style, same_run)
+    assert rebuilt, "a model setting must rebuild the run behind the picture"
+    assert "kerbside" in note, note
+
+
+def test_a_run_started_after_the_preview_is_the_run_without_it():
+    """The preview is a real run, on the same global Parameters the
+    run reads -- so it must put them back.  A seeded run started after
+    previewing (and after a 3D switch and a rebuild) has to be the run a
+    fresh start screen gives."""
+    from tkinter import messagebox
+    from dhakasim.parameters import Parameters
+
+    def signature(frame):
+        option = frame.option_panel
+        option.network_var.set("kakrail_corridor")
+        option.fields["end_time"].set("90")
+        option.fields["seed"].set("7")
+        option.fields["speed"].set("5000")
+        _settle(frame.root, lambda: False, 0.5)
+        # The report's animation is not part of the signature, and its
+        # basemap embedding opens a second Tk interpreter to write a PNG,
+        # which a process that has made and destroyed twenty Tk roots (this
+        # suite) has been seen to crash in.
+        Parameters.REPORT_ANIMATION_FRAMES = 0
+        option.start_simulation()
+        frame.root.update()
+        run = frame.panel
+        if run._timer is not None:
+            run.canvas.after_cancel(run._timer)
+            run._timer = None
+        run._finished = True
+        for _ in range(40):
+            run.action_performed()
+        vehicles = run.processor.get_vehicle_list()
+        return (len(vehicles),
+                round(sum(v.get_segment_index() + v.get_distance_in_segment()
+                          for v in vehicles), 6),
+                Parameters.simulation_step)
+
+    asked = messagebox.askyesno
+    messagebox.askyesno = lambda *a, **k: False
+    frame = panel(1920, 1000)
+    try:
+        option = frame.option_panel
+        preview = option._preview
+        reference = Parameters.snapshot()
+        docked = preview.mode == "dock"
+        _settle(frame.root, lambda: preview.panel is not None)
+        option.render3d_var.set("Line art")
+        _settle(frame.root, lambda: preview.panel is not None
+                and preview.panel.view_3d)
+        option.fields["traffic"].set("2")
+        _settle(frame.root, lambda: False, 1.0)
+        option.fields["traffic"].set("1")
+        _settle(frame.root, lambda: False, 1.0)
+        previewed = preview.panel is not None
+        preview.stop()
+        after_stop = Parameters.snapshot()
+        with_preview = signature(frame)
+        frame.new_simulation()
+        frame.root.update()
+        option = frame.option_panel
+        option._preview.request = lambda _k: None      # never built
+        option._preview.stop()
+        without_preview = signature(frame)
+    finally:
+        messagebox.askyesno = asked
+        frame.root.destroy()
+    assert docked and previewed, (docked, previewed)
+    leaked = [k for k in reference if k != "random"
+              and reference[k] != after_stop.get(k)]
+    assert not leaked, leaked
+    assert with_preview == without_preview, (with_preview, without_preview)
 
 
 if __name__ == "__main__":

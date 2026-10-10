@@ -799,6 +799,184 @@ VISSIM-style junction behaviour, in three pieces (a fourth,
   two new `Vehicle` slots (`_turn_hold`, `_turn_speed_cap`) are set in
   `_dummy` too, or a phantom leader fails to construct.
 
+## Feedback: what the screens say (6 Oct 2026)
+
+The owner asked for Nielsen's heuristics on both screens: "the user should
+know which settings are modifying and what is actually happening". Four
+pieces, and the constraints each had to respect.
+
+**The start screen's footer line** (`OptionPanel._hint`, now at every
+density, not only the captionless one) is the status: idle, it is
+`_summary()` -- what Start will run, with a count of settings changed from
+the place's defaults; on a change it is `setting_message` for that key
+(`SETTING_INFO` is the vocabulary: label, unit, meaning); on a bad value it
+is `setting_problem` in red, and `start_simulation` refuses with the same
+sentence. One `trace_add` per setting, made once in `_make_vars` with the
+variables -- `test_start_screen` counts a strip's traces across rebuilds,
+so the watcher must not be added in `_build_form`. `_on_network_change`
+sets `_applying_defaults` while it writes the place's values, then
+snapshots them (`_snapshot`): that is what "changed" and the row dots
+(`_refresh_changed_marks`, rows found by `ROW_KEYS` from their labels) are
+measured against, and the network summary covers the write to
+`network_var` itself. The label has `width=1` with fill, so a long
+sentence is clipped rather than widening the form -- the columns stack at
+1280 px on width alone. The traffic strip shares the End time row for the
+height reason in `_init_components`; its caption is one line on purpose.
+
+**The run screen's toast** (`DhakaSimPanel.toast`) is drawn with the map
+furniture, so the static-layer reuse never keeps a stale one and the
+`furniture` delete clears it each frame; a timer drops it. The status line
+(`DhakaSimFrame.update_status`) is refreshed every step from
+`action_performed` -- a label `configure` a step is nothing next to the
+paint.
+
+**The 2D/3D transition is a camera tween** (`set_view_3d` ->
+`_run_tween`, ten `after(28)` frames eased in and out, the run stepping
+underneath). Going in, the camera is aimed at the plan view's centre
+(`w/2 - translate`) at `MAX_PITCH` and tilts to the home pitch; coming
+back it tilts up, unwinds the yaw the short way, and `land()` sets the
+plan view's translation from the target and its scale from the distance.
+That inverse only works because `set_scale`'s 3D mapping is now relative
+to both views' whole-network fits (`home_scale` against
+`camera.home_distance`): the old fixed 0.30 pivot put the camera 2.4x too
+far out on Banani, where the fit scale is 0.12, and the junction arrived as
+a figure in the middle of an empty frame. A second toggle during a tween
+is ignored, not queued. Harnesses that set `panel.view_3d` directly bypass
+all of this, which is what `junction_shots.py` does.
+
+**The traffic level** is `Parameters.DEMAND_SCALE`, applied where a stream
+draws its next headway (`_generate_new_vehicles`): `jdiv(3600.0, demand *
+scale)`, which at 1.0 is the same float division and keeps the baseline
+byte for byte. The legend's slider and the start screen's strip both set
+it; the statistics still report the survey's demand. Live traffic from a
+map provider was asked for and declined on evidence: no provider gives
+density without a per-user key, and the import's demand is synthetic.
+
+## The start screen's preview pictures (7, 10 and 11 Oct 2026)
+
+The owner asked for the picture a game's settings menu has: "while I
+change shadows options, right side shows changes via picture", then for
+the menu's *pair* -- the setting one way and the other -- for the row
+under the pointer, and on 11 Oct for stills instead of a playing run
+("no need to show the simulation in GIF, instead just show the specific
+characteristics": a junction tile shows a map with nothing driving on
+it) and for the column's height to be used. `_SettingsPreview` in
+`gui.py` is that, and six things about it are not obvious from the code.
+
+**Every picture is a still, and what it is comes from a spec.**
+`_specs(key, current, value)` gives the pair for the row under the
+pointer: `("map", network, zoom)` -- roads over imagery, no traffic --
+for the junction rows (the chosen place whole, and under it the hovered
+tile's place or the main junction close up); `("run", view, zoom,
+strips)` for the upper picture of every other row; and for the lower one
+`("view", …)` (the same run from the 3D camera), `("trace", zoom)` (the
+recording's vehicles, `WARM_UP_STEPS` frames in -- `_trace_is_here`
+reads that frame first and, when its vehicles lie off this network,
+the slot says the recording is of another place rather than showing an
+empty road), `("model", key, value, zoom, strips)` (a second run built
+with one setting changed) or a sentence.  `_PreviewPanel.show(view,
+zoom, traffic, strips)` is the whole vocabulary of a picture:
+`draw_traffic` (a `DhakaSimPanel` flag, new: off, the paint skips the
+vehicles, pedestrians, objects and signal bars), `show_strips` (the
+strip grid, drawn by `draw_road_network` into the static layer exactly
+as `Segment._initialize` counts the strips and `Vehicle.draw_vehicle`
+places a vehicle on them), and the zoom: `fit` (whole network),
+`junction` (110 m on the roundabout, else the junction of three or more
+arms nearest the network's centre), `signal` (the nearest signalised
+one, so the bars show -- Kakrail's main junction is the roundabout,
+which has none), `arm` (36 m, 30 m up the junction's longest arm along
+its own line).  The strip pictures turn the imagery off: the grid reads
+on the plain white road, and `BaseMap.snap` never magnifies past 2x,
+which caps the zoom short of the arm framing whenever imagery is on.
+Nothing ticks; `request` is the only thing that rebuilds the upper run
+(`_dirty`), the pointer only re-shows or builds the lower one.
+
+**The lower run is built from a Parameters diff.** A "model" or "map"
+picture is a second `Processor`, built under `_overrides` for that one
+value (or that place), and the *difference* the build leaves in
+`Parameters` -- `GEOMETRY_MODE` and the median tables, `NODE_NAMES`,
+`NETWORK_DIR` -- is captured by snapshot before and after, put back, and
+kept on the panel as `overrides`.  `_PreviewPanel._with` swaps those and
+the panel's own step counter in around every paint, because `Parameters`
+is process-wide and the two runs must not read each other's settings.
+`along_pedestrian_mode` is excluded from the diff: every run toggles it
+every twenty steps, and a build catches it mid-swing.  A map of another
+place is not stepped at all (nothing drives on it), so a tile hover is a
+build and a paint.
+
+**It is the run screen's own panel, not a stored picture.**
+`_PreviewPanel` subclasses `DhakaSimPanel` (which grew `processor=` and
+`trace=` arguments for it: a `_NullWriter` stands in for trace.txt,
+which the preview must never open), so imagery, roads, stop lines,
+vehicles, the 3D camera and the mouse controls are the run screen's by
+construction; `toast` is a no-op there and the help line, compass and
+large labels are off.  A still is painted once, so `_make_panel` calls
+`update_idletasks` before that paint: the run screen's paint reads the
+canvas's own size, which is one pixel until Tk has laid it out, and a
+picture painted at one pixel was a blank with the imagery cropped to
+nothing -- the run screen never noticed because its next step repainted.
+Model prints ("Reverse: >>>", "Geometry:") are redirected to nowhere
+while a run builds and warms up -- they are Java parity, hashed, and not
+to be removed.
+
+**It writes the form into `Parameters` exactly as Start does, under a
+snapshot.** `OptionPanel._apply_to_parameters` is the one function both
+use (it was the body of `start_simulation`).  The preview takes
+`Parameters.snapshot()` before applying and `stop()` restores it; its
+statistics go to a temp folder, `REPORT_ANIMATION_FRAMES` is 0 and no run
+reaches its end time, so no statistics are generated.  The ordering
+trap: `_on_network_change` writes a place's defaults into Parameters, so
+it calls `preview.stop()` *first* -- a restore made after that write
+would undo it.  `test_a_run_started_after_the_preview_is_the_run_without_it`
+pins the whole contract with a signature of a seeded kakrail run.
+
+**That test only became possible with the GUI seed fix.** A GUI run was
+never repeatable: `Constants.initialize` builds the pedestrian arrival
+generators from `scratch_random()` once per process, at launch, before
+any seed is typed, and the GUI never set `DETERMINISTIC`, so objects,
+pedestrians and blockage draws came from clock-seeded generators.  Start
+(and the preview) now set `DETERMINISTIC = seed >= 0` and call
+`Constants.reseed()`, the headless `--seed` behaviour; a GUI seed is now
+the same promise as `--seed`.  The headless path is untouched (hash_run
+clean after the change).
+
+**Where it sits: a column the ladder budgets width for, filled from top
+to bottom.** The owner wanted no Preview button: the picture beside the
+list, as a game's menu has it.  So the pane is a fixed-width frame in
+`body` beside the scroller (`_pane`), never inside the tray, and
+`_fit_to_window` became `_choose_layout`: for each pane width in
+`PANE_WIDTHS` (460, 400, 340, 260), the roomiest density whose two
+columns stand beside it and whose height fits, trying the junction tiles
+two abreast (`_tiles`) as a second go because the tiles are what make
+the left column wide; failing that, one column of settings (stacked)
+beside the pane; failing that, the densest form stacked and scrolling
+beside the widest pane the window leaves.  Whatever width the chosen
+settings leave over goes to the pane (`spare`, up to `PANE_MAX`): the
+two pictures stack in it at its full width, so a wider column is simply
+a bigger picture.  The pane fills the body's height and the holders
+expand to share it; `_fit_slot` (on each holder's `<Configure>`) resizes
+a picture's canvas in place and re-frames it, so a height change costs a
+paint, not a build -- `resize` rebuilds the widgets and the runs only
+when the chosen *width* changes.  `_measure` builds each (level, tiles)
+once and caches the column widths and both heights, keyed on the trimmed
+rows and the network count, because a build is the expensive half.
+Measured at 96 DPI with the shipped networks: 1080p lands on compact,
+tiles two abreast, beside 460 px; 1536 px on minimal beside 400 px;
+1280 px on one scrolling column beside 460 px -- the one width where the
+form may scroll, and `test_every_monitor_shows_the_whole_form` says so.
+Two traps paid for: the canvas's height lags the panel's on a maximise,
+so the first search judged against the old height -- `_recheck_fit`
+looks again after idle and searches once more if the height moved; and
+minimal's `field` is 170, not 196, because with the captions off the
+label column only holds names, and the 26 px per column is what lets two
+columns stand beside 460 px on this laptop's 1536 px desktop.  The
+`<Destroy>` handler that restores Parameters must act only for the pane
+that is current, because Tk delivers Destroy from the event loop and a
+replaced pane reports after its successor has scheduled its build.
+Labels are drawn at half size in the pictures (`label_scale`,
+`Scene3D.label_max_px`) and the scale bar's floor is 36 px
+(`scale_bar_min_px`).
+
 ## Node labels and the text halo
 
 `draw_node_id` places a junction's name by probing candidate directions (the
@@ -1362,6 +1540,9 @@ Nothing asks how big the monitor is: a maximised window is the desktop less
 its title bar and its taskbar, and the DPI setting, the taskbar's edge and
 its auto-hiding all move that number. The check is
 `tray.winfo_reqheight()` against `canvas.winfo_height()`.
+
+The preview pane (above) is a fixed column beside the scroller that the
+search budgets width for; it never adds height. See its own section.
 
 Measured at 96 DPI, the rungs are 812 / 751 / 681 / 421 pixels of settings
 against viewports of 816 (1080p), 644 (1536x864), 535 (720p). So a 1080p
