@@ -14,6 +14,12 @@ import math
 import os
 import re
 import threading
+import time
+import atexit
+import contextlib
+import io
+import shutil
+import tempfile
 import webbrowser
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -198,21 +204,54 @@ _HALO_OFFSETS = ((-1, 0), (1, 0), (0, -1), (0, 1),
                  (-0.7, -0.7), (0.7, -0.7), (-0.7, 0.7), (0.7, 0.7))
 
 
+class _NullWriter:
+    """Where the preview's trace goes: nowhere.  The paint loop writes a
+    trace line per vehicle per frame unconditionally, and the start screen's
+    preview must not touch the run's trace.txt."""
+
+    def write(self, _text) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 class DhakaSimPanel:
-    """Port of ``thesisfinal.DhakaSimPanel``."""
+    """Port of ``thesisfinal.DhakaSimPanel``.
+
+    ``processor`` and ``trace`` exist for the start screen's preview
+    (:class:`_PreviewPanel`): it is this same class, drawing a processor
+    it was handed, with the trace file left alone -- so the preview cannot
+    disagree with the run screen about what anything looks like.
+    """
 
     # The 2D zoom range every control shares -- slider, wheel and Reset.  Wide
     # enough for the BUET-DU-DMC demo at one end (whole network ~0.037) and
     # kerb-level inspection at the other.
     ZOOM_MIN = 0.02
     ZOOM_MAX = 3.0
+    #: The 3D view's corner line of controls; the preview turns it off.
+    show_help = True
+    #: Node and link names are sized in pixel space, for a window-sized
+    #: canvas; the preview draws them at half size.
+    label_scale = 1.0
+    #: The compass dial, and the shortest scale bar worth drawing: both
+    #: sized for a window, both cut down for the preview's small pictures.
+    show_compass = True
+    scale_bar_min_px = 90
 
-    def __init__(self, frame, parent):
+    def __init__(self, frame, parent, processor=None, trace=True):
         self.frame = frame
         self.trace_reader = None
         self.trace_writer = None
         self.draw_roads = True
         self.draw_trajectories = False
+        # Off, the picture is the roads alone: no vehicles, pedestrians,
+        # parked objects or signal bars.  The start screen's map pictures.
+        self.draw_traffic = True
         self.random = Parameters.random
         self.vehicle_id = 0
         self.scale = 0.10 + Constants.DEFAULT_SCALE * 0.05
@@ -234,9 +273,17 @@ class DhakaSimPanel:
         self._basemap_photo = None
         self.show_basemap = True
         self.paused = False
+        # Feedback (Nielsen's visibility of system status): a short message
+        # drawn on the canvas for a moment after a view change, and the
+        # camera tween that carries the plan view into the 3D one.
+        self._toast = None
+        self._toast_until = 0.0
+        self._tween = None
 
         try:
-            if Parameters.TRACE_MODE:
+            if not trace:
+                self.trace_writer = _NullWriter()
+            elif Parameters.TRACE_MODE:
                 self.trace_reader = open("trace.txt", "r")
                 tokenizer = self.trace_reader.readline().split()
                 Parameters.simulation_speed = int(tokenizer[0])
@@ -266,7 +313,7 @@ class DhakaSimPanel:
         self.canvas.bind("<Double-Button-1>", self.mouse_double_clicked)
         self.canvas.bind("<MouseWheel>", self.mouse_wheel_moved)
 
-        self.processor = Processor()
+        self.processor = processor if processor is not None else Processor()
 
         self.mid_point = self.processor.get_mid_point()
         self.pedestrians = self.processor.get_pedestrians()
@@ -316,15 +363,72 @@ class DhakaSimPanel:
         if self.view_3d:
             # One zoom control for both views: the slider's 2D scale is read as
             # a camera distance, so the same handle does the same job in each.
+            # Relative to the whole-network fit of each view (home_scale and
+            # the camera's home distance), so the plan view's fit tilts into
+            # the 3D view's fit and 2x closer in one is 2x closer in the
+            # other.  A fixed 0.30 pivot was tried first and put the camera
+            # 2.4x too far out on a junction whose fit scale is 0.12.
             base = self.scene3d.camera.home_distance
-            self.scene3d.camera.distance = base * (0.30 / max(scale, 0.004))
+            self.scene3d.camera.distance = base * (
+                max(self.home_scale, 1e-9) / max(scale, 0.004))
         self.repaint()
 
-    def set_view_3d(self, enabled: bool) -> None:
-        self.view_3d = bool(enabled)
-        if self.view_3d:
+    def set_view_3d(self, enabled: bool, animate: bool = True) -> None:
+        """Swap between the plan view and the 3D view -- visibly.
+
+        A straight cut between the two pictures left the reader to work out
+        that the second was the first seen from a low angle.  Now the camera
+        starts looking straight down at the point the plan view was centred
+        on, at the matching zoom, and tilts to the 3D view's angle over a
+        third of a second; going back it tilts up to vertical first and the
+        plan view lands on the same point at the same zoom.  Only how the
+        frame is drawn changes -- the run steps on underneath.
+        """
+        enabled = bool(enabled)
+        if enabled == self.view_3d or self._tween is not None:
+            return
+        camera = self.scene3d.camera
+        width = self.canvas.winfo_width() or 1
+        height = self.canvas.winfo_height() or 1
+        if enabled:
+            self.view_3d = True
             self.set_scale(self.scale)   # re-derive the camera distance
-        self.repaint()
+            centre = [width / 2.0 - self.translate_x,
+                      height / 2.0 - self.translate_y]
+            end = (centre, camera.distance, 0.0, camera.pitch)
+            if animate:
+                start = (list(centre), camera.distance, 0.0, camera.MAX_PITCH)
+                self._run_tween(start, end, frames=10)
+            else:
+                camera.target = centre
+                self.repaint()
+            self.toast("3D view -- drag to orbit, right-drag to pan, wheel "
+                       "to zoom, double-click to reset; V goes back")
+            self.frame.update_status()
+            return
+
+        def land():
+            self.view_3d = False
+            # The plan view lands where the camera was looking, at the zoom
+            # its distance stood for (the inverse of set_scale's mapping).
+            self.translate_x = width / 2.0 - camera.target[0]
+            self.translate_y = height / 2.0 - camera.target[1]
+            scale = (self.home_scale * camera.home_distance
+                     / max(camera.distance, 1.0))
+            self.set_scale(min(self.ZOOM_MAX, max(self.ZOOM_MIN, scale)))
+            self.frame.sync_zoom_slider(self.scale)
+            self.toast("Plan view -- drag to pan, wheel to zoom; "
+                       "V returns to 3D")
+            self.frame.update_status()
+
+        if not animate:
+            land()
+            return
+        start = (list(camera.target), camera.distance, camera.yaw, camera.pitch)
+        # Unwind the yaw the short way round, so north ends up at the top.
+        yaw_home = 0.0 if camera.yaw <= math.pi else 2 * math.pi
+        end = (list(camera.target), camera.distance, yaw_home, camera.MAX_PITCH)
+        self._run_tween(start, end, frames=8, then=land)
 
     def get_trace_reader(self):
         return self.trace_reader
@@ -436,7 +540,7 @@ class DhakaSimPanel:
         # Signal state changes every few steps, so the bars are dynamic
         # content -- drawn each frame, under the vehicles that cross them.
         # A trace replay has no live signal state to show.
-        if self.draw_roads and not Parameters.TRACE_MODE:
+        if self.draw_roads and self.draw_traffic and not Parameters.TRACE_MODE:
             road_geometry.signal_bars(g2d, self.link_list, self.node_list,
                                       Parameters.pixel_per_meter)
 
@@ -445,7 +549,7 @@ class DhakaSimPanel:
 
         if Parameters.TRACE_MODE:
             Utilities.draw_trace(self.trace_reader, g2d)
-        else:
+        elif self.draw_traffic:
             if Parameters.across_pedestrian_mode:
                 self.trace_writer.write("Current Pedestrians\n")
                 for pedestrian in self.pedestrians:
@@ -497,6 +601,7 @@ class DhakaSimPanel:
         """
         canvas = self.canvas
         ink, paper = "#12263a", "#ffffff"
+        self._draw_toast(width)
 
         # --- imagery credit, bottom right ---
         # The ODbL asks for the credit wherever the tiles are shown, so it is
@@ -508,22 +613,26 @@ class DhakaSimPanel:
                                tags="furniture")
 
         # --- north arrow, top right ---
-        cx, cy = width - 46, 46
-        bearing = -self.scene3d.camera.yaw if self.view_3d else 0.0
-        cos_b, sin_b = math.cos(bearing), math.sin(bearing)
+        if self.show_compass:
+            cx, cy = width - 46, 46
+            bearing = -self.scene3d.camera.yaw if self.view_3d else 0.0
+            cos_b, sin_b = math.cos(bearing), math.sin(bearing)
 
-        def needle(x, y):
-            """Rotate an offset from the dial centre by the camera bearing."""
-            return cx + x * cos_b - y * sin_b, cy + x * sin_b + y * cos_b
+            def needle(x, y):
+                """Rotate an offset from the dial centre by the camera
+                bearing."""
+                return cx + x * cos_b - y * sin_b, cy + x * sin_b + y * cos_b
 
-        canvas.create_oval(cx - 26, cy - 26, cx + 26, cy + 26,
-                           fill=paper, outline="#c7ccd3", tags="furniture")
-        canvas.create_polygon(*needle(0, -19), *needle(-8, 11), *needle(0, 5),
-                              *needle(8, 11), fill=ink, outline="",
-                              tags="furniture")
-        canvas.create_text(*needle(0, 17), text="N", fill=ink,
-                           font=("Segoe UI", 10, "bold"), tags="furniture")
+            canvas.create_oval(cx - 26, cy - 26, cx + 26, cy + 26,
+                               fill=paper, outline="#c7ccd3", tags="furniture")
+            canvas.create_polygon(*needle(0, -19), *needle(-8, 11),
+                                  *needle(0, 5), *needle(8, 11), fill=ink,
+                                  outline="", tags="furniture")
+            canvas.create_text(*needle(0, 17), text="N", fill=ink,
+                               font=("Segoe UI", 10, "bold"), tags="furniture")
 
+        if self.view_3d and not self.show_help:
+            return
         if self.view_3d:
             # A scale bar means nothing under perspective -- the metres a
             # pixel covers change from the top of the frame to the bottom --
@@ -543,7 +652,7 @@ class DhakaSimPanel:
         # pick a round distance whose bar is a comfortable width on screen
         nice = None
         for candidate in (10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000):
-            if candidate * px_per_m >= 90:
+            if candidate * px_per_m >= self.scale_bar_min_px:
                 nice = candidate
                 break
         if nice is None:
@@ -609,7 +718,7 @@ class DhakaSimPanel:
         # Prefer a friendly name (input/node_names.txt) over the numeric id.
         name = Parameters.NODE_NAMES.get(node.get_id(), str(node.get_id()))
         x_m, y_m = self._node_label_point(node)
-        g2d.set_font("Serif", 100)
+        g2d.set_font("Serif", int(100 * self.label_scale))
         g2d.set_color(Color.BLACK)
 
         # Push the label well clear of the carriageway and join it back to the
@@ -749,7 +858,7 @@ class DhakaSimPanel:
         lx = x_m * Parameters.pixel_per_meter
         ly = y_m * Parameters.pixel_per_meter
 
-        g2d.set_font("Serif", 78)
+        g2d.set_font("Serif", int(78 * self.label_scale))
         halo = max(1.0, 1.6 / max(self.scale, 0.0001))
         g2d.set_color(Color.WHITE)
         for ox, oy in _HALO_OFFSETS:
@@ -769,10 +878,18 @@ class DhakaSimPanel:
         base = self._basemap
         ppm = Parameters.pixel_per_meter
         left, top = g2d.to_screen(base.left * ppm, base.top * ppm)
-        placed = base.scaled_region(left, top,
-                                    self.canvas.winfo_width() or 1,
-                                    self.canvas.winfo_height() or 1,
-                                    self.scale, ppm)
+        try:
+            placed = base.scaled_region(left, top,
+                                        self.canvas.winfo_width() or 1,
+                                        self.canvas.winfo_height() or 1,
+                                        self.scale, ppm)
+        except tk.TclError as exc:
+            # Tk can refuse to create a photo (seen as a bare TclError in a
+            # process that has made and dropped many interpreters and
+            # images).  Imagery must never stop a paint: this frame goes
+            # without, and the next one tries again.
+            print(f"basemap unavailable this frame: {exc or 'TclError'}")
+            return
         if placed is None:
             return
         photo, x, y = placed
@@ -790,13 +907,92 @@ class DhakaSimPanel:
         which is most of the point of being able to stop.
         """
         self.paused = bool(paused)
+        self.toast("Paused -- the view still pans, zooms and tilts; "
+                   "Space resumes" if self.paused else "Running")
         self.repaint()
+        self.frame.update_status()
+
+    # ---- feedback ----------------------------------------------------------
+
+    TOAST_SECONDS = 2.8
+
+    def toast(self, text: str, seconds: float = TOAST_SECONDS) -> None:
+        """Say what just happened, on the picture, for a moment.
+
+        Nielsen's first heuristic: a control that changes the view should
+        say so where the reader is looking.  Drawn with the map furniture
+        (so it survives the static-layer reuse and is deleted with the rest
+        of the furniture each frame) and dropped by a timer; a newer
+        message simply replaces an older one.
+        """
+        self._toast = text
+        self._toast_until = time.monotonic() + seconds
+        try:
+            self.canvas.after(int(seconds * 1000) + 20, self._expire_toast)
+        except tk.TclError:
+            pass
+
+    def _expire_toast(self) -> None:
+        if self._toast is not None and time.monotonic() >= self._toast_until:
+            self._toast = None
+            try:
+                self.repaint()
+            except tk.TclError:
+                pass
+
+    def _draw_toast(self, width: int) -> None:
+        if self._toast is None or time.monotonic() >= self._toast_until:
+            return
+        canvas = self.canvas
+        text = canvas.create_text(width / 2.0, 24, text=self._toast,
+                                  fill="#F4F1EE", anchor="n",
+                                  font=("Segoe UI Semibold", 10),
+                                  tags="furniture")
+        x0, y0, x1, y1 = canvas.bbox(text)
+        canvas.create_rectangle(x0 - 16, y0 - 7, x1 + 16, y1 + 7,
+                                fill=_UI["panel"], outline=_UI["accent"],
+                                width=1, tags="furniture")
+        canvas.tag_raise(text)
+
+    def _run_tween(self, start, end, frames: int, then=None) -> None:
+        """Carry the 3D camera from ``start`` to ``end`` over ``frames``
+        repaints (each a ``(target, distance, yaw, pitch)`` tuple), then call
+        ``then``.  The frames are scheduled with ``after`` so the run keeps
+        stepping underneath; a second transition asked for mid-tween is
+        refused by ``set_view_3d`` rather than queued."""
+        camera = self.scene3d.camera
+
+        def ease(t):                    # smooth in and out
+            return t * t * (3.0 - 2.0 * t)
+
+        def step(i):
+            if not self.canvas.winfo_exists():
+                self._tween = None
+                return
+            t = ease(i / float(frames))
+            camera.target = [start[0][0] + (end[0][0] - start[0][0]) * t,
+                             start[0][1] + (end[0][1] - start[0][1]) * t]
+            camera.distance = start[1] + (end[1] - start[1]) * t
+            camera.yaw = start[2] + (end[2] - start[2]) * t
+            camera.pitch = start[3] + (end[3] - start[3]) * t
+            self.repaint()
+            if i < frames:
+                self._tween = self.canvas.after(28, step, i + 1)
+            else:
+                self._tween = None
+                if then is not None:
+                    then()
+
+        step(0)
 
     def toggle_basemap(self) -> None:
         """Show or hide the imagery.  Does nothing if none was fetched."""
         if self._basemap is None:
             return
         self.show_basemap = not self.show_basemap
+        self.toast("Background map shown -- the zoom now snaps to the "
+                   "map's own steps" if self.show_basemap
+                   else "Background map hidden -- the zoom is free again")
         # Turning it back on re-snaps the zoom; turning it off frees it again.
         self.set_scale(self.scale)
 
@@ -866,6 +1062,7 @@ class DhakaSimPanel:
             self.trace_writer.write(f"SimulationStep: {Parameters.simulation_step}\n")
 
         self.processor.manual_process(self)
+        self.frame.update_status()
 
     def on_simulation_finished(self) -> None:
         self._finished = True
@@ -940,6 +1137,7 @@ class DhakaSimPanel:
         if not self.view_3d:
             return
         self.scene3d.camera.reset()
+        self.toast("Camera reset -- the whole network, from the north")
         self.repaint()
 
     def fit_scale(self, width: int, height: int) -> float:
@@ -967,11 +1165,16 @@ class DhakaSimPanel:
         if self.view_3d:
             self.scene3d.camera.reset()
         self.set_scale(self.home_scale)
+        self.toast("View reset -- the whole network in frame")
 
     def mouse_wheel_moved(self, event) -> None:
         notches = -1 if event.delta > 0 else 1
         if self.view_3d:
             self.scene3d.camera.zoom(notches)
+            camera = self.scene3d.camera
+            self.toast("Camera %s -- x%.1f of the whole-network distance"
+                       % ("closer" if notches < 0 else "further",
+                          camera.home_distance / max(camera.distance, 1.0)))
             self.repaint()
             return
         # Multiplicative, not additive: a fixed 0.004 step was a whole zoom
@@ -985,6 +1188,8 @@ class DhakaSimPanel:
         self.set_scale(min(self.ZOOM_MAX,
                            max(self.ZOOM_MIN, self.scale * factor)))
         self.frame.sync_zoom_slider(self.scale)
+        self.toast("Zoom x%.2g of the whole-network framing"
+                   % (self.scale / max(self.home_scale, 1e-9)))
 
 
 #: The start screen's palette.  Warm charcoal rather than the usual near-black:
@@ -1194,8 +1399,12 @@ class _Segmented(tk.Frame):
 
     def __init__(self, parent, options, variable, command=None, columns=None,
                  font=("Segoe UI Semibold", 11), pad=(13, 6), wheel=None,
-                 keep_unknown=True):
+                 keep_unknown=True, hover=None):
         super().__init__(parent, background=_UI["panel"])
+        # Called with a cell's value while the pointer is on it and with
+        # None when it leaves -- how the preview shows a choice before it
+        # is made.  Rebound with the cells, like the wheel.
+        self._hover = hover
         # Cells are destroyed and rebuilt whenever the value changes, which
         # takes their bindings with them.  The wheel one has to come back or
         # the form stops scrolling over whichever row was last touched.
@@ -1274,6 +1483,11 @@ class _Segmented(tk.Frame):
                     cell.bind(sequence, lambda _e, v=value: self._choose(v))
                 cell.bind("<Enter>", lambda _e, c=cell: self._paint(c, True))
                 cell.bind("<Leave>", lambda _e, c=cell: self._paint(c, False))
+                if self._hover is not None:
+                    cell.bind("<Enter>", lambda _e, v=value: self._hover(v),
+                              add="+")
+                    cell.bind("<Leave>", lambda _e: self._hover(None),
+                              add="+")
                 cell.bind("<FocusIn>", lambda _e, c=cell: self._paint(c, False))
                 cell.bind("<FocusOut>", lambda _e, c=cell: self._paint(c, False))
                 if self._wheel is not None:
@@ -1351,9 +1565,1162 @@ _DENSITIES = (
          band=9, note=None, label=11, caption=None, group=8,
          cell=(10, 9), cell_pad=((9, 4), (8, 3)),
          value=10, unit=9, button=10, button_pad=(16, 5),
-         field=196, wrap=None, row_pad=2, band_gap=4, pad=(11, 12),
+         # field 170, not 196: the captions are off at this rung, so the
+         # label column only holds names, and the 26 px it gives back per
+         # column is what lets two columns stand beside a 460 px picture
+         # pane on a 1536 px desktop and beside 260 px on 1366.
+         field=170, wrap=None, row_pad=2, band_gap=4, pad=(11, 12),
          foot_pad=5, tail=4, tiles=3),
 )
+
+
+#: What each start-screen setting is called, its unit, and the sentence the
+#: footer shows the moment it changes -- Nielsen's visibility of system
+#: status and recognition over recall, applied to a form whose captions
+#: vanish at the densest layout.  Keyed by the name the variable is held
+#: under (``fields[...]`` or the ``*_var`` attribute, see ``_watched``).
+SETTING_INFO = {
+    "network": ("Intersection", "", "the junction to simulate; its speed "
+                "limit, signal timing and demand come with it"),
+    "time": ("Time of day", "", "the hour of the surveyed day whose demand "
+             "is used"),
+    "end_time": ("End time", "s", "how many seconds of traffic to simulate"),
+    "traffic": ("Traffic level", "x", "every route's arrival rate, as a "
+                "multiple of the surveyed demand; also adjustable while the "
+                "run plays"),
+    "max_speed": ("Maximum speed", "km/h", "the speed limit on every link"),
+    "seed": ("Random seed", "", "the same seed gives the same run; -1 draws "
+             "a fresh one"),
+    "accident": ("Accidents", "", "close encounters per accident; lower "
+                 "means more accidents"),
+    "trace": ("Trace replay", "", "On replays trace.txt instead of "
+              "simulating"),
+    "signal": ("Signal control", "", "how the junction's greens are decided"),
+    "signal_green": ("Green per approach", "s", "how long each leg stays "
+                     "green under fixed time"),
+    "geometry": ("Real geometry", "", "surveyed medians and roundabouts; Off "
+                 "is Java parity"),
+    "pedestrians": ("Crossing pedestrians", "", "pedestrians crossing the "
+                    "carriageway"),
+    "friction": ("Parked vehicles", "", "parked cars, rickshaws and CNGs on "
+                 "the kerbside strips"),
+    "strip": ("Strip width", "m", "the lateral unit a vehicle slides by; "
+              "there are no lanes"),
+    "footpath": ("Footpath strip width", "m", "the same, for the footpath"),
+    "render3d": ("3D view", "", "how the run is drawn; the results do not "
+                 "change"),
+    "ppm": ("Scale", "px/m", "screen pixels per metre of road"),
+    "speed": ("Frame delay", "ms", "pause between frames; playback only"),
+}
+
+#: Which settings each form row stands for, by its label, so a row can
+#: carry a "changed" mark without every call site naming its keys.
+ROW_KEYS = {
+    "Intersection": ("network",), "Time of day": ("time",),
+    "End time & traffic": ("end_time", "traffic"),
+    "Maximum speed": ("max_speed",), "Random seed": ("seed",),
+    "Accidents": ("accident",), "Trace replay": ("trace",),
+    "Signal control": ("signal", "signal_green"),
+    "Real geometry": ("geometry",), "Side friction": ("pedestrians", "friction"),
+    "Strip width": ("strip",), "Footpath strip width": ("footpath",),
+    "3D view": ("render3d",), "Scale": ("ppm",), "Frame delay": ("speed",),
+}
+
+
+def setting_problem(key: str, value: str):
+    """Why ``value`` cannot be used for the setting ``key``, as a sentence,
+    or ``None`` when it can.  Nielsen's error prevention: said in the footer
+    as it is typed, and again when Start is pressed, instead of a traceback
+    from ``int()`` on the way into the run."""
+    text = value.strip()
+    try:
+        if key == "end_time":
+            if int(text) < 1:
+                raise ValueError
+        elif key == "seed":
+            int(text)
+        elif key == "signal_green":
+            if float(text) < 1:
+                raise ValueError
+        elif key in ("max_speed", "accident", "traffic", "ppm", "strip",
+                     "footpath"):
+            if float(text) <= 0:
+                raise ValueError
+        elif key == "speed":
+            if int(float(text)) < 1:
+                raise ValueError
+    except ValueError:
+        label = SETTING_INFO[key][0]
+        if key in ("end_time", "speed"):
+            return f"{label} must be a whole number of 1 or more."
+        if key == "seed":
+            return f"{label} must be a whole number (-1 draws a fresh one)."
+        if key == "signal_green":
+            return f"{label} must be at least 1 second."
+        return f"{label} must be a number above zero."
+    return None
+
+
+def setting_message(key: str, value: str, default=None) -> str:
+    """The footer's sentence for a change: what moved, to what, what that
+    means, and what it was -- so the reader never has to recall it."""
+    label, unit, meaning = SETTING_INFO[key]
+    shown = value if not unit else (f"{value} {unit}" if unit != "x"
+                                    else f"x{value}")
+    text = f"{label} \u2192 {shown}: {meaning}."
+    if default is not None and default != value:
+        was = default if not unit else (f"{default} {unit}" if unit != "x"
+                                        else f"x{default}")
+        text += f"  Was {was}."
+    elif default is not None:
+        text += "  Back to the place's default."
+    return text
+
+
+#: What the preview picture shows for a setting, by key, as a sentence
+#: that may name the value (``{v}``) and the place (``{place}``) -- the
+#: caption under the picture.  Nielsen's "match between system and the
+#: real world": the setting is explained by what it does to the scene.
+PREVIEW_NOTES = {
+    "network": "This is {place}: its roads over the map, as the run "
+               "screen draws them. Drag to pan, wheel to zoom.",
+    "time": "Demand for {v}: the arrivals a run generates.",
+    "end_time": "The run stops after {v} simulated seconds.",
+    "traffic": "Arrivals at x{v} the surveyed rate: the road a few dozen "
+               "seconds into a run.",
+    "max_speed": "Vehicles now travel at up to {v} km/h on every link.",
+    "seed": "Seed {v}: a different, repeatable sequence of arrivals.",
+    "accident": "{v} close encounters per accident; nothing to see until "
+                "one happens.",
+    "trace": "On replays trace.txt instead of simulating: the recorded "
+             "vehicles on the same roads.",
+    "signal": "{v} decides the greens; the red and green bars at the stop "
+              "lines show the state.",
+    "signal_green": "Each approach stays green for {v} s before the next "
+                    "takes over.",
+    "geometry": {"On": "Surveyed medians and roundabouts, drawn and "
+                       "driven.",
+                 "Off": "Java parity: no medians and no roundabout ring."},
+    "pedestrians": {"On": "Pedestrians cross the carriageway -- the black "
+                          "dots on the road.",
+                    "Off": "Nobody crosses the carriageway."},
+    "friction": {"On": "Parked cars, rickshaws and CNGs and standing "
+                       "pedestrians block the kerbside strips.",
+                 "Off": "The kerbside strips are clear."},
+    "strip": "A carriageway is a row of {v} m strips (the grey lines) "
+             "that vehicles slide between; there are no lanes.",
+    "footpath": "The footpath along each kerb (inside the dark line) is "
+                "divided into {v} m strips the same way.",
+    "render3d": {"Off": "Plan view: straight down, north up.",
+                 "Line art": "The same scene from a low camera, each "
+                             "vehicle a line-art model.",
+                 "Solid": "The same scene from a low camera, each vehicle "
+                          "a solid, lit model."},
+    "ppm": "{v} screen pixels per metre is the model's own resolution; the "
+           "picture is zoomed to fit.",
+    "speed": "{v} ms between frames: how fast a run plays.",
+}
+
+
+def preview_note(key: str, value: str, place: str = "") -> str:
+    """The caption the preview shows for ``key`` at ``value``."""
+    note = PREVIEW_NOTES.get(key, "")
+    if isinstance(note, dict):
+        note = note.get(value, "")
+    if key == "seed" and value.strip() == "-1":
+        return ("A fresh random run each time; the pictures are seeded "
+                "so they are the same every time.")
+    return note.format(v=value, place=place)
+
+
+#: Settings a change of which only changes how the preview is drawn, not
+#: what is simulated -- no rebuild of the run behind it.
+PREVIEW_VIEW_KEYS = ("render3d", "speed")
+
+
+#: Which value the right-hand picture shows for a setting when the pointer
+#: is on its row and on no particular cell: the other side of a switch, the
+#: next size up, the scheduler against fixed time.  None means the setting
+#: has no picture of its own (an end time, a seed) and the right slot says so.
+def preview_alternative(key: str, value: str):
+    value = (value or "").strip()
+    if key in ("geometry", "pedestrians", "friction", "trace"):
+        return "Off" if value == "On" else "On"
+    if key == "render3d":
+        return "Line art" if value == "Off" else "Off"
+    if key in ("strip", "footpath"):
+        ladder = ["0.25", "0.5", "1.0"]
+        try:
+            index = next(i for i, v in enumerate(ladder)
+                         if abs(float(v) - float(value)) < 1e-9)
+        except (StopIteration, ValueError):
+            return "0.5"
+        return ladder[(index + 1) % len(ladder)]
+    if key == "signal":
+        return "Multi-objective v1" if value == "Fixed time" else "Fixed time"
+    if key == "traffic":
+        return "1" if value == "3" else "3"
+    return None
+
+
+#: Settings whose alternative is a second *run* (the model differs), as
+#: opposed to the same run drawn differently (render3d) or replayed (trace).
+PREVIEW_MODEL_KEYS = ("geometry", "pedestrians", "friction", "strip",
+                      "footpath", "signal", "traffic")
+
+
+class _PreviewHost:
+    """What the preview panel sees as its frame: a run screen with no
+    toolbar, no legend and no status line, so every call is a no-op."""
+
+    def __getattr__(self, _name):
+        return lambda *_a, **_k: None
+
+
+class _PreviewPanel(DhakaSimPanel):
+    """The run screen's panel, drawing one still of a run the start screen
+    owns.
+
+    ``overrides`` are the ``Parameters`` this picture's run differs by from
+    the form's -- the lower picture of a pair -- swapped in around every
+    paint (``_with``), together with the run's own step counter, because
+    ``Parameters`` is process-wide and the two runs of a pair must not read
+    each other's settings.  ``show`` is the whole of what a picture can be:
+    a view (plan or 3D), a framing, with or without the traffic, with or
+    without the strip grid.
+    """
+
+    #: How much road the junction framing shows.  The run screen opens on
+    #: the whole network; at a few hundred pixels that is a few specks, and
+    #: the point of the picture is what is on the road.
+    SPAN_METRES = 110.0
+    #: The signal framing: closer than the junction's, so the bars at the
+    #: stop lines are more than a few pixels.
+    SIGNAL_SPAN_METRES = 80.0
+    #: The arm framing, for the strip rows: close enough that a 0.25 m
+    #: strip is a few pixels wide and the grid reads as a grid.
+    ARM_SPAN_METRES = 36.0
+    #: How far up the arm from the junction's centre the arm framing is
+    #: centred: past the box and the stop line, where the queue stands.
+    ARM_OFFSET_METRES = 30.0
+    #: The 3D view's corner help line is the run screen's; here the caption
+    #: under the picture does that job, and at this width it was clipped.
+    show_help = False
+    label_scale = 0.5
+    show_compass = False
+    scale_bar_min_px = 36
+    #: The strip grid: the carriageway's strip boundaries in grey, the two
+    #: footpath bands' inner edges darker, one pixel each, on the plain
+    #: white road -- the imagery is off for these pictures, both so the
+    #: grid reads and because its zoom ladder tops out short of the arm
+    #: framing (``BaseMap.snap``: a picture is never magnified past 2x).
+    STRIP_COLOUR = Color(160, 160, 160)
+    FOOTPATH_COLOUR = Color(80, 80, 80)
+
+    def __init__(self, parent, processor, width, height):
+        super().__init__(_PreviewHost(), parent, processor=processor,
+                         trace=False)
+        self.canvas.configure(width=width, height=height)
+        self._size = (width, height)
+        self.scene3d.label_max_px = 14
+        self.overrides = {}
+        self.sim_step = Parameters.simulation_step
+        self.draw_traffic = True
+        self.show_strips = False
+        self._zoom = "junction"
+        self._trace_start = None        # where trace.txt's first frame starts
+
+    def toast(self, text, seconds=None) -> None:
+        """No toasts: the caption under the picture says what it is."""
+
+    def dispose(self) -> None:
+        # The imagery is the pane's, shared by both pictures of a place
+        # (see _SettingsPreview._share_basemap), so this picture must not
+        # forget it; the pane does when it is torn down.
+        self._basemap = None
+        super().dispose()
+
+    def _with(self, action):
+        """Run ``action`` under this picture's own Parameters and clock."""
+        saved = {k: getattr(Parameters, k) for k in self.overrides}
+        saved_step = Parameters.simulation_step
+        for k, v in self.overrides.items():
+            setattr(Parameters, k, v)
+        Parameters.simulation_step = self.sim_step
+        try:
+            return action()
+        finally:
+            self.sim_step = Parameters.simulation_step
+            Parameters.simulation_step = saved_step
+            for k, v in saved.items():
+                setattr(Parameters, k, v)
+
+    def paint(self) -> None:
+        """Redraw, under this picture's own Parameters.  A trace picture
+        is always the recording's first frame, so a redraw rewinds it."""
+        def go():
+            if self.trace_reader is not None and self._trace_start is not None:
+                self.trace_reader.seek(self._trace_start)
+            self.repaint()
+        self._with(go)
+
+    def show(self, view, zoom, traffic, strips) -> None:
+        """Make this picture ``view`` ("Off", "Line art", "Solid") of the
+        run, framed by ``zoom`` ("fit", "junction", "arm"), with or without
+        the traffic and the strip grid, and draw it."""
+        def go():
+            on, style = OptionPanel.VIEW_CHOICES.get(view, (False, "line"))
+            self.draw_traffic = bool(traffic)
+            self.show_strips = bool(strips)
+            self.show_basemap = not strips      # see STRIP_COLOUR
+            self.scene3d.style = style
+            # Neither flag is in the static layers' keys: a full redraw.
+            self._static2d_key = self._static3d_key = None
+            self.view_3d = False
+            self.frame_view(zoom)
+            if on:
+                self.set_view_3d(True, animate=False)
+            self.paint()
+        self._with(go)
+
+    def set_size(self, width, height) -> None:
+        """The holder was resized: the same picture at the new size."""
+        if (width, height) == self._size:
+            return
+        self.canvas.configure(width=width, height=height)
+        self._size = (width, height)
+        view = ("Line art" if self.scene3d.style == "line" else "Solid") \
+            if self.view_3d else "Off"
+        self.show(view, self._zoom, self.draw_traffic, self.show_strips)
+
+    # ---- framing ------------------------------------------------------------
+
+    def frame_view(self, zoom="junction") -> None:
+        """Frame the plan view: the whole network ("fit"), the main
+        junction a hundred metres or so across ("junction"), the nearest
+        signalised one the same way ("signal"), or one of the main
+        junction's arms a few dozen metres across ("arm").
+
+        The junction is the roundabout if there is one, else the junction
+        (three or more arms) nearest the network's centre -- not
+        ``basemap.anchor_point``, whose bounding-box fallback put Miami's
+        picture on a block of houses.  Home (double-click) is always the
+        whole-network fit.
+        """
+        self._zoom = zoom
+        width, height = self._size
+        ppm = Parameters.pixel_per_meter
+        bounds = basemap_module.network_bounds(self.link_list, margin=30.0)
+        if bounds:
+            x0, y0, x1, y1 = bounds
+            self.translate_x = width / 2.0 - (x0 + x1) / 2.0 * ppm
+            self.translate_y = height / 2.0 - (y0 + y1) / 2.0 * ppm
+        self._home_translate = (self.translate_x, self.translate_y)
+        self.home_scale = self.fit_scale(width, height)
+        if zoom == "fit" or not bounds:
+            self.set_scale(self.home_scale)
+            return
+        try:
+            centre, node = self._junction(signalised=(zoom == "signal"))
+            span = (self.SIGNAL_SPAN_METRES if zoom == "signal"
+                    else self.SPAN_METRES)
+            if zoom == "arm" and node is not None:
+                centre = self._arm_point(centre, node)
+                span = self.ARM_SPAN_METRES
+        except Exception:
+            centre, span = None, self.SPAN_METRES    # the network's centre
+        if centre is not None:
+            self.translate_x = width / 2.0 - centre[0] * ppm
+            self.translate_y = height / 2.0 - centre[1] * ppm
+        close = width / max(span * ppm, 1.0)
+        if zoom == "arm":
+            self.set_scale(min(self.ZOOM_MAX, close))
+        else:
+            self.set_scale(min(self.ZOOM_MAX, max(self.home_scale, close)))
+
+    def _junction(self, signalised=False):
+        """(centre in metres, node) of the junction the pictures open on:
+        the roundabout, else the junction of three or more arms nearest
+        the network's centre.  ``signalised`` asks for one with signals
+        -- the signal pictures want bars to show -- and falls back to the
+        usual when the network has none."""
+        x0, y0, x1, y1 = basemap_module.network_bounds(self.link_list,
+                                                       margin=30.0)
+        mid = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+        if signalised:
+            lit = [n for n in self.node_list
+                   if n.number_of_links() >= 3 and n.is_signalised()
+                   and not n.is_roundabout()]
+            if lit:
+                node = min(lit, key=lambda n: self._far(n, mid))
+                return road_geometry.node_point(self.link_list, node), node
+        roundabout = basemap_module.read_roundabout(Parameters.NETWORK_DIR)
+        if roundabout is not None:
+            centre = basemap_module.anchor_point(
+                self.link_list, self.node_list, roundabout)[:2]
+            if centre is not None:
+                node = min(self.node_list, key=lambda n: self._far(n, centre))
+                return centre, node
+        junctions = [n for n in self.node_list
+                     if n.number_of_links() >= 3] or list(self.node_list)
+        node = min(junctions, key=lambda n: self._far(n, mid))
+        return road_geometry.node_point(self.link_list, node), node
+
+    def _far(self, node, point):
+        x, y = road_geometry.node_point(self.link_list, node)
+        return (x - point[0]) ** 2 + (y - point[1]) ** 2
+
+    def _arm_point(self, centre, node):
+        """A point ``ARM_OFFSET_METRES`` up the longest arm of ``node``,
+        following the arm's own line, so a bent arm is still in frame."""
+        best = None
+        for j in range(node.number_of_links()):
+            link = self.link_list[node.get_link(j)]
+            segments = [link.get_segment(i)
+                        for i in range(link.get_number_of_segments())]
+            if link.get_up_node() != node.get_id():
+                segments.reverse()
+            length = sum(s.get_length() for s in segments)
+            if best is None or length > best[0]:
+                best = (length, segments, link.get_up_node() == node.get_id())
+        if best is None:
+            return centre
+        _length, segments, forward = best
+        left = self.ARM_OFFSET_METRES
+        for seg in segments:
+            if forward:
+                sx, sy, ex, ey = (seg.get_start_x(), seg.get_start_y(),
+                                  seg.get_end_x(), seg.get_end_y())
+            else:
+                sx, sy, ex, ey = (seg.get_end_x(), seg.get_end_y(),
+                                  seg.get_start_x(), seg.get_start_y())
+            length = seg.get_length()
+            if length >= left:
+                t = left / length if length > 0 else 0.0
+                return (sx + (ex - sx) * t, sy + (ey - sy) * t)
+            left -= length
+        last = segments[-1]
+        return ((last.get_start_x(), last.get_start_y()) if not forward
+                else (last.get_end_x(), last.get_end_y()))
+
+    # ---- the strip grid -----------------------------------------------------
+
+    def draw_road_network(self, g2d) -> None:
+        super().draw_road_network(g2d)
+        if self.show_strips and not self.view_3d:
+            self._draw_strips(g2d)
+
+    def _draw_strips(self, g2d) -> None:
+        """The strips a carriageway is divided into, as the model divides
+        it: a footpath strip along each kerb and ``strip_width`` strips
+        between them, exactly as ``Segment._initialize`` counts them and
+        ``Vehicle.draw_vehicle`` places a vehicle on them.  Only segments
+        near the view are drawn; the grid is in the static layer."""
+        ppm = Parameters.pixel_per_meter
+        fp = Parameters.footpath_strip_width * ppm
+        sw = Parameters.strip_width * ppm
+        if sw <= 0.0:
+            return
+        width, height = self._size
+        scale = max(self.scale, 1e-9)
+        reach = max(width, height) / scale
+        cx = width / 2.0 - self.translate_x
+        cy = height / 2.0 - self.translate_y
+        g2d.set_stroke(1)
+        for link in self.link_list:
+            for j in range(link.get_number_of_segments()):
+                seg = link.get_segment(j)
+                x1, y1 = seg.get_start_x() * ppm, seg.get_start_y() * ppm
+                x2, y2 = seg.get_end_x() * ppm, seg.get_end_y() * ppm
+                w = seg.get_segment_width() * ppm
+                if math.hypot(x2 - x1, y2 - y1) <= 1e-9 or w <= 0.0:
+                    continue
+                # Skip a segment whose whole extent lies beyond the view;
+                # a long one crossing it has both ends far away.
+                if (min(x1, x2) > cx + reach + w or max(x1, x2) < cx - reach - w
+                        or min(y1, y2) > cy + reach + w
+                        or max(y1, y2) < cy - reach - w):
+                    continue
+                inner = seg.number_of_strips() - 2    # carriageway strips
+                for k in range(inner + 1):
+                    d = fp + k * sw
+                    if d > w:
+                        break
+                    g2d.set_color(self.FOOTPATH_COLOUR
+                                  if k in (0, inner) else self.STRIP_COLOUR)
+                    g2d.draw_line(Utilities.return_x3(x1, y1, x2, y2, d),
+                                  Utilities.return_y3(x1, y1, x2, y2, d),
+                                  Utilities.return_x4(x1, y1, x2, y2, d),
+                                  Utilities.return_y4(x1, y1, x2, y2, d))
+
+
+class _SettingsPreview:
+    """The pictures beside the settings.
+
+    A game's graphics menu shows a setting as two pictures, the scene with
+    it one way and with it the other, for the row the pointer is on.  This
+    does that with the simulator's own scene, as stills: the upper picture
+    is the setting as the form has it, the lower one the alternative.  For
+    the junction tiles the pictures are maps -- the chosen place's roads
+    over its imagery, nothing driving on them, and under it the same for
+    the tile under the pointer, else the main junction close up.  For the
+    rows that change what is on the road (real geometry, pedestrians,
+    parked vehicles, signal control, traffic) each picture is a seeded run
+    a few dozen steps in, built with that one setting its way; for 3D view
+    the same still from the low camera; for trace replay the recording's
+    first frame; for the strip widths an arm of the junction close enough
+    to show the strip grid the carriageway is divided into.  Every picture
+    is drawn by :class:`DhakaSimPanel`, the run screen's own class, so it
+    is what Start will show: the same imagery, roads, stop lines,
+    vehicles, the same mouse controls.  Nothing plays: a picture is drawn
+    once and redrawn only when a setting, the pointer or the window moves.
+
+    What keeps it honest.  The form's values are written into
+    ``Parameters`` exactly as Start writes them (``_apply_to_parameters``),
+    under a snapshot that ``stop`` puts back; the lower run's own
+    differences are captured as a diff of ``Parameters`` taken around its
+    build and swapped in only while it paints (``_PreviewPanel``).
+    Statistics go to a temp folder, no run reaches its end time, the trace
+    file is never written.  ``_on_network_change`` stops the pane before
+    writing a place's defaults, so the restore cannot undo them.  Every
+    change is debounced, and a value that cannot be used asks for nothing.
+
+    The column it lives in is always there -- ``OptionPanel._choose_layout``
+    lays the settings out around it -- and the two pictures stack in it,
+    each the column's full width, sharing whatever height the window has
+    (``_fit_slot`` resizes the canvases with their holders), so the column
+    is pictures from top to bottom rather than two thumbnails over a blank.
+    """
+
+    WIDTH = 460
+    MIN_WIDTH = 260
+    DEBOUNCE_MS = 300
+    #: How far into a run the pictures are taken: enough for the queues at
+    #: the stop lines and the parked kerbs to have formed.
+    WARM_UP_STEPS = 40
+
+    def __init__(self, option, host):
+        self.option = option
+        self.host = host                # the column the pictures live in
+        self.mode = "hide"              # hide | dock
+        self.width = None
+        self.frame = None
+        self.holders = (None, None)
+        self.headers = (None, None)
+        self.roles = (None, None)
+        self._note = self._counts = None
+        self.panel = None               # the upper picture: the form's run
+        self.alt = None                 # the lower picture
+        self._left_spec = None          # what the upper picture shows
+        self._alt_spec = None           # what the lower picture shows
+        self._alt_text = None           # the slot's label when no picture
+        self._job = None
+        self._key = "network"           # the row last changed
+        self._dirty = True              # a setting changed since the build
+        self._hover_key = None          # the row under the pointer
+        self._peek = None               # (key, value) of the cell under it
+        self._saved = None
+        self._stats_dir = None
+        self._basemaps = {}             # network dir -> its BaseMap, shared
+
+    # ---- the widgets -----------------------------------------------------------
+
+    def _build_widgets(self, parent, width) -> None:
+        self.width = width
+        frame = tk.Frame(parent, background=_UI["panel"],
+                         highlightthickness=1,
+                         highlightbackground=_UI["edge"],
+                         highlightcolor=_UI["edge"])
+        self.frame = frame
+        band = tk.Frame(frame, background=_UI["band"])
+        band.pack(fill="x")
+        _glass(band)
+        tk.Label(band, text="PREVIEW", font=("Segoe UI Semibold", 11),
+                 background=_UI["band"], foreground=_UI["accent_text"],
+                 padx=14, pady=5).pack(side="left")
+        tk.Label(band, text="  what the setting does to the picture",
+                 font=("Segoe UI", 9), background=_UI["band"],
+                 foreground=_UI["muted"]).pack(side="left")
+        # Bottom first, so the caption keeps its lines whatever the height
+        # and the pictures share the rest.
+        self._note = tk.Label(frame, text="", anchor="nw", justify="left",
+                              wraplength=width - 28, height=3,
+                              font=("Segoe UI", 10),
+                              background=_UI["panel"],
+                              foreground=_UI["text"])
+        self._note.pack(side="bottom", fill="x", padx=14, pady=(2, 10))
+        self._counts = tk.Label(frame, text="", anchor="w",
+                                font=("Segoe UI", 9),
+                                background=_UI["panel"], foreground=_UI["muted"])
+        self._counts.pack(side="bottom", fill="x", padx=14, pady=(4, 0))
+        holders, headers, roles = [], [], []
+        for index in (0, 1):
+            slot = tk.Frame(frame, background=_UI["panel"])
+            slot.pack(fill="both", expand=True, padx=12,
+                      pady=(8 if index == 0 else 6, 0))
+            head = tk.Frame(slot, background=_UI["panel"])
+            head.pack(fill="x")
+            header = tk.Label(head, text="", anchor="w", width=1,
+                              font=("Segoe UI Semibold", 9),
+                              background=_UI["panel"],
+                              foreground=_UI["accent_text"] if index == 0
+                              else _UI["muted"])
+            header.pack(side="left", fill="x", expand=True)
+            role = tk.Label(head, text="", anchor="e",
+                            font=("Segoe UI", 8), background=_UI["panel"],
+                            foreground=_UI["faint"])
+            role.pack(side="right")
+            holder = tk.Frame(slot, background=_UI["seg_off"],
+                              highlightthickness=1,
+                              highlightbackground=_UI["edge"])
+            holder.pack(fill="both", expand=True, pady=(3, 0))
+            holder.pack_propagate(False)
+            holder.bind("<Configure>", lambda _e, i=index: self._fit_slot(i))
+            holders.append(holder)
+            headers.append(header)
+            roles.append(role)
+        self.holders = tuple(holders)
+        self.headers = tuple(headers)
+        self.roles = tuple(roles)
+        _glass(frame)
+        # Torn down with the start screen (New simulation, Reset, Start):
+        # the run that follows must find Parameters as the form left them.
+        # Only for the pane that is current: Tk delivers <Destroy> from
+        # the event loop, so a pane replaced by a re-dock reports its
+        # destruction after its successor has scheduled a build, and a
+        # stop here would cancel that build.
+        frame.bind("<Destroy>",
+                   lambda e: self.stop()
+                   if e.widget is frame and self.frame is frame else None)
+
+    def _fit_slot(self, index) -> None:
+        """A holder changed size: its picture follows it."""
+        holder = self.holders[index]
+        panel = (self.panel, self.alt)[index]
+        if holder is None or panel is None:
+            return
+        w, h = holder.winfo_width(), holder.winfo_height()
+        if w > 2 and h > 2:
+            try:
+                panel.set_size(w, h)
+            except tk.TclError:
+                pass
+
+    def _discard(self) -> None:
+        """Drop the runs and the widgets."""
+        self.stop()
+        if self.frame is not None:
+            try:
+                self.frame.destroy()
+            except tk.TclError:
+                pass
+        self.frame = None
+        self.holders = self.headers = self.roles = (None, None)
+        self._note = self._counts = None
+        self.mode = "hide"
+        for base in self._basemaps.values():
+            base.forget()
+        self._basemaps.clear()
+
+    # ---- placement ----------------------------------------------------------
+
+    def resize(self, width) -> None:
+        """The pictures at ``width`` pixels, in their column.
+
+        The column is always there -- the form is laid out around it, see
+        ``OptionPanel._fit_to_window`` -- so this only rebuilds the widgets
+        when the width the search chose has changed, which costs the runs
+        behind the pictures and is why it is not done on every resize; a
+        change of height alone resizes the canvases in place.
+        """
+        width = int(width)
+        if self.mode == "dock" and width == self.width and self.frame is not None:
+            return
+        self._discard()
+        self._build_widgets(self.host, width)
+        self.frame.pack(fill="both", expand=True)
+        self.mode = "dock"
+        self.request(self._key)
+
+    # ---- requests from the form ----------------------------------------------
+
+    def request(self, key: str) -> None:
+        """A setting changed: refresh the pictures shortly, naming it."""
+        self._key = key
+        self._dirty = True
+        self._schedule()
+
+    def focus(self, key) -> None:
+        """The pointer is on a row (``None``: on none)."""
+        if key == self._hover_key:
+            return
+        self._hover_key = key
+        if key is None:
+            self._peek = None
+        self._schedule()
+
+    def peek(self, key: str, value) -> None:
+        """The pointer is on one cell of a strip (``value`` None: left it)."""
+        self._peek = (key, str(value)) if value is not None else None
+        if value is not None:
+            self._hover_key = key
+        self._schedule()
+
+    def _schedule(self) -> None:
+        if self.frame is None:
+            return
+        if self._job is not None:
+            try:
+                self.frame.after_cancel(self._job)
+            except tk.TclError:
+                pass
+        try:
+            self._job = self.frame.after(self.DEBOUNCE_MS, self._refresh)
+        except tk.TclError:
+            self._job = None
+
+    # ---- what the two pictures should show -----------------------------------
+
+    def _focused(self):
+        """The row the pictures are about, and the value the lower one
+        shows: the hovered cell, else the row's alternative."""
+        values = self.option._values()
+        key = self._hover_key or self._key
+        current = values.get(key, "")
+        if self._peek is not None and self._peek[0] == key:
+            value = self._peek[1]
+            if key != "network" and _Segmented._same(value, current):
+                value = preview_alternative(key, current)
+        elif key == "network":
+            value = None
+        else:
+            value = preview_alternative(key, current)
+        return key, current, value
+
+    def _specs(self, key, current, value):
+        """What each picture shows for row ``key``: the upper one with the
+        form's value, the lower one with ``value``.  A spec is a tuple --
+        ("map", network, zoom), ("run", view, zoom, strips),
+        ("view", view, zoom, strips), ("trace", zoom), ("model", key,
+        value, zoom, strips) -- or a sentence for a slot with no picture.
+        The zoom is "arm" for the strip rows, "signal" for the signal
+        rows (a junction with bars to show), else "junction"."""
+        if key == "network":
+            upper = ("map", current, "fit")
+            lower = (("map", value, "fit") if value
+                     else ("map", current, "junction"))
+            return upper, lower
+        strips = key in ("strip", "footpath")
+        zoom = ("arm" if strips else "signal" if key in ("signal", "signal_green")
+                else "junction")
+        view = self.option.render3d_var.get()
+        upper = ("run", view, zoom, strips)
+        if value is None:
+            return upper, SETTING_INFO[key][0] + " changes the run, not its look."
+        if key == "render3d":
+            return upper, ("view", value, zoom, strips)
+        if key == "trace":
+            if value != "On":
+                return upper, "Off: a new run is simulated, as above."
+            if not os.path.isfile("trace.txt"):
+                return upper, "On replays trace.txt; none has been recorded yet."
+            if self.panel is not None and not self._trace_is_here():
+                return upper, ("On replays trace.txt, which holds a run of "
+                               "another place; its vehicles would land off "
+                               "these roads.  Run this junction once to "
+                               "record it.")
+            return upper, ("trace", zoom)
+        if key in PREVIEW_MODEL_KEYS:
+            return upper, ("model", key, value, zoom, strips)
+        return upper, SETTING_INFO[key][0] + " changes the run, not its look."
+
+    # ---- the pictures ---------------------------------------------------------
+
+    def _alive(self) -> bool:
+        return (self.mode != "hide" and self.frame is not None
+                and self.frame.winfo_exists())
+
+    def _refresh(self) -> None:
+        self._job = None
+        if not self._alive():
+            return
+        if self.option._validate():
+            return                      # the footer is already saying why
+        rebuilt = False
+        if self.panel is None or (self._dirty
+                                  and self._key not in PREVIEW_VIEW_KEYS):
+            # A model setting changed (or nothing is built yet): the
+            # upper run is rebuilt from the form, and the lower one with
+            # it.  The pointer moving over rows never rebuilds it.
+            rebuilt = self._build_left()
+        self._dirty = False
+        self._key = self._key if self._key in SETTING_INFO else "network"
+        key, current, value = self._focused()
+        upper, lower = self._specs(key, current, value)
+        if self.panel is not None and (rebuilt or upper != self._left_spec):
+            self._show_left(upper)
+        if rebuilt or lower != self._alt_spec:
+            self._build_right(lower)
+        self._say(key, current, value, upper, lower)
+
+    def _build_left(self) -> bool:
+        """A fresh run of the form's junction under the form's settings."""
+        self.stop()                     # the previous runs, and Parameters
+        self.headers[0].configure(text="Building the preview…")
+        self.frame.update_idletasks()
+        self._saved = Parameters.snapshot()
+        try:
+            self.option._apply_to_parameters(quiet=True)
+            seed = Parameters.seed if Parameters.seed >= 0 else 7
+            Parameters.random = JavaRandom(seed)
+            Parameters.DETERMINISTIC = True
+            Constants.reseed()
+            Parameters.TRACE_MODE = False
+            Parameters.REPORT_ANIMATION_FRAMES = 0
+            Parameters.STATS_DIR = self._scratch_dir()
+            Parameters.simulation_step = 1
+            self.panel = self._make_panel(self.holders[0], None,
+                                          self.WARM_UP_STEPS)
+            self._left_spec = None
+            return True
+        except Exception as exc:          # a broken network must not take
+            self.stop()                   # the start screen down with it
+            self.headers[0].configure(text="No preview for this network")
+            self._counts.configure(text=str(exc)[:70])
+            self.panel = None
+            return False
+
+    def _make_panel(self, holder, processor, warm_up):
+        """A picture in ``holder``: over ``processor``, or over a new run
+        built under the current Parameters and stepped ``warm_up`` times
+        on a private clock.  Not drawn: ``show`` does that."""
+        for child in holder.winfo_children():
+            child.destroy()
+        w, h = holder.winfo_width(), holder.winfo_height()
+        if w < 2 or h < 2:
+            w, h = max(holder.winfo_reqwidth(), 200), max(holder.winfo_reqheight(), 150)
+        if processor is None:
+            with contextlib.redirect_stdout(io.StringIO()):
+                processor = Processor()
+        panel = _PreviewPanel(holder, processor, w, h)
+        self._share_basemap(panel)
+        panel.canvas.pack(fill="both", expand=True)
+        # A still is painted once.  The run screen's paint reads the
+        # canvas's own size, which is one pixel until Tk has laid it out,
+        # and a picture painted at one pixel is a blank with the imagery
+        # cropped to nothing; the run screen never noticed because its
+        # next step repainted.  So the canvas gets its size first.
+        holder.update_idletasks()
+        for _ in range(warm_up):
+            with contextlib.redirect_stdout(io.StringIO()):
+                processor._run_at_each_time_step()
+            Parameters.simulation_step += 1
+        panel.sim_step = Parameters.simulation_step
+        return panel
+
+    def _share_basemap(self, panel) -> None:
+        """One decoded basemap per place for the pane's pictures.
+
+        A panel loads its imagery lazily and decodes the PNG on its first
+        paint -- a second or so for the big ones -- and every hover that
+        builds a lower picture of the same place would decode it again.
+        The pane keeps one ``BaseMap`` per network and hands it to each
+        picture of that place; the pictures do not forget it when they go
+        (``_PreviewPanel.dispose``), the pane does (``_discard``).  Only
+        the form's place and the one just built are kept, so hovering
+        down the tiles does not pile up a decoded PNG per place.
+        """
+        network = Parameters.NETWORK_DIR
+        if panel._basemap is not None:
+            panel._basemap = self._basemaps.setdefault(network, panel._basemap)
+        keep = {network, self.option._values().get("network")}
+        for key in [k for k in self._basemaps if k not in keep]:
+            self._basemaps.pop(key).forget()
+
+    def _show_left(self, spec) -> None:
+        """The upper picture, re-framed and redrawn for ``spec``."""
+        self._left_spec = spec
+        if spec[0] == "map":
+            self.panel.show("Off", spec[2], False, False)
+        else:
+            self.panel.show(spec[1], spec[2], True, spec[3])
+
+    def _build_right(self, spec) -> None:
+        """The lower picture for ``spec`` (see ``_specs``)."""
+        self._drop_right()
+        self._alt_spec = spec
+        holder = self.holders[1]
+        if spec is None:
+            return
+        if isinstance(spec, str) or self.panel is None:
+            self._alt_text = spec if isinstance(spec, str) else ""
+            self._slot_text(holder, self._alt_text)
+            return
+        kind = spec[0]
+        try:
+            if kind == "view":
+                # The same run, drawn the other way.
+                self.alt = self._make_panel(holder, self.panel.processor, 0)
+                self.alt.show(spec[1], spec[2], True, spec[3])
+                return
+            if kind == "trace":
+                # The same roads, with trace.txt's recorded vehicles on
+                # them instead of the live run's -- what Trace replay On
+                # shows on the run screen; the recording's first frame.
+                reader = open("trace.txt", "r")
+                reader.readline()           # the header line
+                self.alt = self._make_panel(holder, self.panel.processor, 0)
+                self.alt.trace_reader = reader
+                self.alt._trace_start = self._trace_frame(reader,
+                                                          self.WARM_UP_STEPS)
+                self.alt.overrides = {"TRACE_MODE": True}
+                self.alt.show("Off", spec[1], True, False)
+                return
+            if kind == "map" and spec[1] == self.option._values()["network"]:
+                # The same place, roads only, framed differently.
+                self.alt = self._make_panel(holder, self.panel.processor, 0)
+                self.alt.show("Off", spec[2], False, False)
+                return
+            # A second run that differs from the upper by one setting (or
+            # is another place): built under Parameters changed for it,
+            # and the differences the build leaves behind are captured
+            # and put back, to be swapped in only while it paints.  A map
+            # needs no traffic, so another place is not stepped at all.
+            if kind == "map":
+                key, value, zoom, strips, warm_up = ("network", spec[1],
+                                                     spec[2], False, 0)
+                view, traffic = "Off", False
+            else:
+                _k, key, value, zoom, strips = spec
+                warm_up = self.WARM_UP_STEPS
+                view, traffic = self.option.render3d_var.get(), True
+            before = Parameters.snapshot()
+            saved_step = Parameters.simulation_step
+            try:
+                for name, override in self._overrides(key, value).items():
+                    setattr(Parameters, name, override)
+                Parameters.simulation_step = 1
+                self.alt = self._make_panel(holder, None, warm_up)
+                after = Parameters.snapshot()
+            finally:
+                Parameters.simulation_step = saved_step
+                Parameters.restore(before)
+            # along_pedestrian_mode is toggled every 20 steps by any run,
+            # so a build catches it mid-swing; pinning it would freeze
+            # that picture's hawkers on or off.
+            self.alt.overrides = {
+                k: v for k, v in after.items()
+                if k not in ("simulation_step", "random", "show_progress_slider",
+                             "along_pedestrian_mode")
+                and before.get(k) != v}
+            self.alt.show(view, zoom, traffic, strips)
+        except Exception as exc:
+            self._drop_right()
+            self._alt_text = "No picture: " + str(exc)[:60]
+            self._slot_text(holder, self._alt_text)
+
+    def _trace_is_here(self) -> bool:
+        """Whether trace.txt was recorded on the network in the upper
+        picture.  The file does not say; what it holds is vehicle corners
+        in model pixels, so a frame from well into it is read and its
+        vehicles are asked whether they lie on this network.  A recording
+        of another place replays as an empty road here, and the run
+        screen does exactly that -- but a picture of an empty road says
+        nothing, so the slot says this instead."""
+        bounds = basemap_module.network_bounds(self.panel.link_list,
+                                               margin=30.0)
+        if not bounds:
+            return True
+        ppm = Parameters.pixel_per_meter
+        x0, y0, x1, y1 = (v * ppm for v in bounds)
+        inside = total = 0
+        try:
+            with open("trace.txt", "r") as reader:
+                reader.readline()
+                self._trace_frame(reader, self.WARM_UP_STEPS)
+                vehicles = False
+                while True:
+                    line = reader.readline()
+                    if not line or line.startswith("End"):
+                        break
+                    if line.startswith("Current"):
+                        vehicles = line.startswith("Current Vehicles")
+                        continue
+                    if not vehicles:
+                        continue
+                    parts = line.split()
+                    if len(parts) < 8:
+                        continue
+                    x, y = int(parts[0]), int(parts[4])
+                    total += 1
+                    inside += x0 <= x <= x1 and y0 <= y <= y1
+        except (OSError, ValueError):
+            return True
+        return total == 0 or inside * 2 >= total
+
+    @staticmethod
+    def _trace_frame(reader, steps):
+        """Where frame ``steps`` of the recording starts, or the last
+        frame when the recording is shorter: a recording's first frames
+        are an empty network, and the picture is meant to show the
+        recorded vehicles.  Leaves the reader at that frame."""
+        position = reader.tell()
+        for _ in range(steps):
+            # Read one frame; if it is incomplete, the previous one was
+            # the last whole frame.
+            while True:
+                line = reader.readline()
+                if not line:
+                    reader.seek(position)
+                    return position
+                if line.startswith("End Step"):
+                    break
+            here = reader.tell()
+            if not reader.readline():       # the recording ends here
+                reader.seek(position)
+                return position
+            position = here
+            reader.seek(position)
+        return position
+
+    def _overrides(self, key, value):
+        """The Parameters a lower run is built with for ``value``."""
+        ppm = Parameters.pixel_per_meter
+        if key == "network":
+            return {"NETWORK_DIR": value}
+        if key == "geometry":
+            return {"GEOMETRY_MODE": value == "On"}
+        if key == "pedestrians":
+            return {"across_pedestrian_mode": value == "On"}
+        if key == "friction":
+            return {"OBJECT_MODE": value == "On"}
+        if key == "strip":
+            return {"strip_width": float(value),
+                    "pixel_per_strip": ppm * float(value)}
+        if key == "footpath":
+            return {"footpath_strip_width": float(value),
+                    "pixel_per_footpath_strip": ppm * float(value)}
+        if key == "signal":
+            return {"SIGNAL_MODE": OptionPanel.SIGNAL_CHOICES.get(value, "fixed")}
+        if key == "traffic":
+            return {"DEMAND_SCALE": float(value)}
+        return {}
+
+    def _slot_text(self, holder, text) -> None:
+        for child in holder.winfo_children():
+            child.destroy()
+        tk.Label(holder, text=text, wraplength=max(60, holder.winfo_width() - 24),
+                 justify="center", font=("Segoe UI", 9),
+                 background=_UI["seg_off"], foreground=_UI["muted"]
+                 ).place(relx=0.5, rely=0.5, anchor="center")
+
+    def _drop_right(self) -> None:
+        if self.alt is not None:
+            reader = getattr(self.alt, "trace_reader", None)
+            try:
+                self.alt.dispose()
+            except tk.TclError:
+                pass
+            if reader is not None:
+                try:
+                    reader.close()
+                except OSError:
+                    pass
+            self.alt = None
+        self._alt_spec = None
+        self._alt_text = None
+
+    def _say(self, key, current, value, upper, lower) -> None:
+        """The headers name what each picture is, the small label beside
+        them which side of the comparison it is, and the caption under
+        them says what the picture shows for the setting."""
+        values = self.option._values()
+        place = _place_name(values["network"])
+        label = SETTING_INFO.get(key, ("", "", ""))[0]
+        if key == "network":
+            titles = (place, _place_name(value) if value else place)
+            roles = ("whole network",
+                     "whole network" if value else "the main junction")
+        else:
+            titles = (f"{label}: {current}" if label else place,
+                      f"{label}: {value}" if value is not None else "")
+            roles = ("as it is", "the alternative" if value is not None else "")
+        if isinstance(lower, str):
+            titles = (titles[0], "")
+            roles = (roles[0], "")
+        for index in (0, 1):
+            self.headers[index].configure(text=titles[index])
+            self.roles[index].configure(text=roles[index])
+        note_key = key if key in PREVIEW_NOTES else "network"
+        note_value = value if (value is not None and key != "network") else current
+        self._note.configure(text=preview_note(
+            note_key, note_value,
+            _place_name(value) if key == "network" and value else place))
+        self._captions(upper)
+
+    def _captions(self, upper) -> None:
+        panel = self.panel
+        if panel is None:
+            return
+        processor = panel.processor
+        if upper[0] == "map":
+            links = processor.get_link_list()
+            nodes = processor.get_node_list()
+            junctions = sum(1 for n in nodes if n.number_of_links() >= 3)
+            metres = sum(link.get_segment(i).get_length()
+                         for link in links
+                         for i in range(link.get_number_of_segments()))
+            parts = [f"{junctions} junction{'s' if junctions != 1 else ''}",
+                     f"{len(links)} links", f"{metres / 1000.0:.1f} km of road"]
+            if any(n.is_roundabout() for n in nodes):
+                parts.append("roundabout")
+            if self.alt is not None and self.alt.processor is not processor:
+                links = self.alt.processor.get_link_list()
+                below = sum(1 for n in self.alt.processor.get_node_list()
+                            if n.number_of_links() >= 3)
+                parts.append(f"| below: {below} junctions, {len(links)} links")
+        else:
+            parts = [f"{panel.sim_step} s into the run",
+                     f"{len(processor.get_vehicle_list())} vehicles"]
+            if Parameters.across_pedestrian_mode:
+                parts.append(f"{len(processor.get_pedestrians())} crossing")
+            if Parameters.OBJECT_MODE:
+                parts.append(f"{len(processor.get_object_list())} parked")
+            if (self.alt is not None and self.alt.processor is not processor
+                    and self.alt.draw_traffic):
+                alt = self.alt.processor
+                parts.append(f"| below: {len(alt.get_vehicle_list())} vehicles")
+        self._counts.configure(text=" · ".join(parts))
+
+    # ---- leaving nothing behind --------------------------------------------
+
+    def stop(self) -> None:
+        """Drop the runs and put ``Parameters`` back as they were before
+        them.  Safe to call twice."""
+        if self._job is not None and self.frame is not None:
+            try:
+                self.frame.after_cancel(self._job)
+            except tk.TclError:
+                pass
+        self._job = None
+        self._drop_right()
+        if self.panel is not None:
+            try:
+                self.panel.dispose()
+            except tk.TclError:
+                pass
+            self.panel = None
+        self._left_spec = None
+        if self._saved is not None:
+            Parameters.restore(self._saved)
+            self._saved = None
+
+    def _scratch_dir(self) -> str:
+        if self._stats_dir is None:
+            self._stats_dir = tempfile.mkdtemp(prefix="dhakasim_preview_")
+            atexit.register(shutil.rmtree, self._stats_dir,
+                            ignore_errors=True)
+        return self._stats_dir
 
 
 class OptionPanel:
@@ -1416,6 +2783,8 @@ class OptionPanel:
         self._busy = False
         self._waiting = 0
         self._viewport = None
+        self._fit_height = 0
+        self._rechecks = 0
         self._hint = None
         self._hint_rows = []
         self._make_vars()
@@ -1449,6 +2818,14 @@ class OptionPanel:
 
         body = tk.Frame(self.frame, background=_UI["ground"])
         body.pack(fill="both", expand=True)
+        # The pictures' column: a fixed width the density search chooses,
+        # outside the scroller so it stays put while the settings scroll,
+        # and always there -- the settings menu of a game puts its picture
+        # beside the list, not behind a button.
+        self._pane = tk.Frame(body, background=_UI["ground"],
+                              width=_SettingsPreview.WIDTH)
+        self._pane.pack(side="right", fill="y", padx=(18, 12), pady=(10, 0))
+        self._pane.pack_propagate(False)
         canvas = tk.Canvas(body, highlightthickness=0, bd=0,
                            background=_UI["ground"])
         # A classic tk scrollbar, not a ttk one: under the Windows theme ttk
@@ -1495,6 +2872,17 @@ class OptionPanel:
         self._rows = [0, 0]
         self._col = 0
         self._stacked = None
+        # How many junction tiles stand abreast: the density's own number,
+        # or two when the search needs the left column narrower.
+        self._tiles = None
+        # (level, tiles, rows shown, networks) -> (column widths, height
+        # side by side, height stacked): what a built form measures,
+        # kept so the search below does not rebuild to ask twice.
+        self._measure_cache = {}
+        # The pictures beside the settings.  Built once with the shell, not
+        # with the form: a density change rebuilds every row but must not
+        # throw away a run that took a third of a second to make.
+        self._preview = _SettingsPreview(self, self._pane)
 
         def fit(_event=None):
             canvas.itemconfigure(window, width=canvas.winfo_width())
@@ -1559,28 +2947,135 @@ class OptionPanel:
             return
         self._waiting = 0
         self._busy = True
+        height = self._canvas.winfo_height()
         try:
-            for level in range(len(_DENSITIES)):
-                if level != self._level:
-                    self._level = level
-                    self._build_form()
-                # The columns are a different width at every density, so
-                # whether they stand side by side has to be decided again --
-                # ``_arrange`` short-circuits on its last answer, and a
-                # stale one here reads as "stacked", which never fits and
-                # sends the search all the way to the bottom of the list.
-                self._stacked = None
-                self.frame.update_idletasks()
-                self._arrange(self._canvas.winfo_width())
-                self.frame.update_idletasks()
-                if (self._tray.winfo_reqheight()
-                        <= self._canvas.winfo_height()):
-                    break
+            level, tiles, width, stacked = self._choose_layout(size[0], height)
+            if (level, tiles) != (self._level, self._tiles):
+                self._level, self._tiles = level, tiles
+                self._build_form()
+            self._pane.configure(width=width)
+            self.frame.update_idletasks()
+            # The columns are a different width at every density, so
+            # whether they stand side by side has to be decided again --
+            # ``_arrange`` short-circuits on its last answer.
+            self._stacked = None
+            self._arrange(0 if stacked else self._canvas.winfo_width())
+            self.frame.update_idletasks()
+            self._preview.resize(width)
             self._viewport = size
         finally:
             self._busy = False
         self._canvas.configure(scrollregion=self._canvas.bbox("all"))
         self._show_bar()
+        # The canvas's height can lag the panel's: a maximise delivers the
+        # panel's <Configure> before the canvas inside it has grown, so the
+        # search above may have judged against the old height (on this
+        # laptop it chose a 340 px pane with the tiles three abreast where
+        # 460 px and two abreast fit).  Look again once Tk has settled, and
+        # search again if the height moved; once per size, so it ends.
+        self._fit_height = height
+        if self._rechecks < 2:
+            self._rechecks += 1
+            self.frame.after_idle(self._recheck_fit)
+        else:
+            self._rechecks = 0
+
+    def _recheck_fit(self) -> None:
+        if not self.frame.winfo_exists():
+            return
+        if abs(self._canvas.winfo_height() - self._fit_height) > 2:
+            self._fit_to_window(force=True)
+        else:
+            self._rechecks = 0
+
+    #: The widths the pictures' column may take, widest first.  The two
+    #: pictures stack in it at its full width, so a wider column is a
+    #: bigger picture, and a screen with width to spare after the settings
+    #: have stood beside the widest gives the rest to it, up to PANE_MAX.
+    PANE_WIDTHS = (460, 400, 340, 260)
+    PANE_MAX = 620
+    #: What the pane costs beyond its own width: its padding and the
+    #: scrollbar's reserve.
+    PANE_MARGIN = 44
+
+    def _measure(self, level, tiles):
+        """What the form measures at a density and tile count: the two
+        columns' widths, and the tray's height side by side and stacked.
+        Built once per combination and cached -- a build is the expensive
+        half of this search."""
+        key = (level, tiles, self._trimmed_rows(),
+               len(Processor.available_networks()))
+        found = self._measure_cache.get(key)
+        if found is not None:
+            return found
+        self._level, self._tiles = level, tiles
+        self._build_form()
+        self.frame.update_idletasks()
+        columns = [c.winfo_reqwidth() for c in self._columns]
+        self._stacked = None
+        self._arrange(10 ** 6)
+        self.frame.update_idletasks()
+        side_by_side = self._tray.winfo_reqheight()
+        self._stacked = None
+        self._arrange(0)
+        self.frame.update_idletasks()
+        stacked = self._tray.winfo_reqheight()
+        found = (columns, side_by_side, stacked)
+        self._measure_cache[key] = found
+        return found
+
+    def _choose_layout(self, width, height):
+        """(level, tiles, pane width, stacked) for a window this size.
+
+        The order of preference, and why.  The pictures come first: the
+        widest column in PANE_WIDTHS, because the comparison is the point
+        of the start screen now and a picture that has to be fetched from
+        behind a button is not one.  Then the roomiest density whose two
+        columns stand beside that pane and whose height fits -- with the
+        junction tiles two abreast as a second try, since the tiles are
+        what make the left column wide.  Failing that, a narrower pane.
+        Failing that, one column of settings beside the pictures, scrolling
+        if it must: the list-and-picture layout of a game's settings menu,
+        which is what a 1280 px screen gets.  Whatever width the chosen
+        settings leave over goes to the pictures (``spare``), up to
+        PANE_MAX; the pictures stack in the column at its full width, so
+        the column is never wider than it can use.
+
+        Measured at 96 DPI with the shipped networks: 1080p lands on
+        compact with the tiles two abreast beside a 460 px pane; a
+        1536 px desktop on minimal beside 400 px; 1280 px on one scrolling
+        column beside 460 px.
+        """
+        def usable(pane):
+            return width - pane - self.PANE_MARGIN
+
+        def spare(pane, needed):
+            # Whatever width the settings leave goes to the pictures.
+            return max(pane, min(self.PANE_MAX,
+                                 width - needed - self.PANE_MARGIN))
+
+        for pane in self.PANE_WIDTHS:
+            for level in range(len(_DENSITIES)):
+                for tiles in dict.fromkeys((_DENSITIES[level]["tiles"], 2)):
+                    columns, side, _stacked = self._measure(level, tiles)
+                    if sum(columns) + 60 <= usable(pane) and side <= height:
+                        return (level, tiles,
+                                spare(pane, sum(columns) + 60), False)
+        for pane in self.PANE_WIDTHS:
+            for level in range(len(_DENSITIES)):
+                tiles = _DENSITIES[level]["tiles"]
+                columns, _side, stacked = self._measure(level, tiles)
+                if max(columns) + 60 <= usable(pane) and stacked <= height:
+                    return (level, tiles,
+                            spare(pane, max(columns) + 60), True)
+        # Nothing fits whole: the densest form in one column, scrolling,
+        # beside the widest pane the window leaves room for.
+        level, tiles = len(_DENSITIES) - 1, 2
+        columns, _side, _stacked = self._measure(level, tiles)
+        pane = max(self.PANE_WIDTHS[-1],
+                   min(self.PANE_WIDTHS[0],
+                       width - max(columns) - 60 - self.PANE_MARGIN))
+        return level, tiles, pane, True
 
     def _build_form(self) -> None:
         """Draw every setting again at the current density.
@@ -1603,22 +3098,38 @@ class OptionPanel:
         self._stacked = None
         self._hint = None
         self._hint_rows = []
+        self._row_labels = []
+        self._row_frames = []
         self._init_components()
         self._bind_wheel(self._tray)
         self._bind_wheel(self._canvas)
         for widgets, text in self._hint_rows:
             for widget in widgets:
                 self._bind_hint(widget, text)
+        # The pointer on a row shows that setting's pair of pictures.
+        # Bound to every descendant, like the hint: Tk hands <Enter> to
+        # the widget under the pointer, not to its row.
+        for key, widgets in self._row_frames:
+            for widget in widgets:
+                self._bind_focus(widget, key)
         self._paint_header()
+        self._refresh_changed_marks()
+        self._idle_status()
+
+    def _bind_focus(self, widget, key) -> None:
+        widget.bind("<Enter>", lambda _e: self._preview.focus(key), add="+")
+        widget.bind("<Leave>", lambda _e: self._preview.focus(None), add="+")
+        for child in widget.winfo_children():
+            self._bind_focus(child, key)
 
     def _bind_hint(self, widget, text) -> None:
         """Show one row's explanation in the footer while the pointer is on
         it.  Added to whatever is already bound, never in place of it: the
         cells paint their own hover state on the same event."""
         widget.bind("<Enter>",
-                    lambda _e: self._hint.configure(text=text), add="+")
+                    lambda _e: self._show_status(text), add="+")
         widget.bind("<Leave>",
-                    lambda _e: self._hint.configure(text=""), add="+")
+                    lambda _e: self._idle_status(), add="+")
         for child in widget.winfo_children():
             self._bind_hint(child, text)
 
@@ -1743,9 +3254,12 @@ class OptionPanel:
         cell = tk.Frame(column, background=_UI["panel"])
         cell.grid(row=self._rows[self._col], column=0, sticky="nw",
                   padx=level["pad"], pady=(level["row_pad"], 0))
-        tk.Label(cell, text=label, font=("Segoe UI", level["label"]),
-                 background=_UI["panel"], foreground=_UI["text"]).pack(
-            anchor="w")
+        name = tk.Label(cell, text=label, font=("Segoe UI", level["label"]),
+                        background=_UI["panel"], foreground=_UI["text"])
+        name.pack(anchor="w")
+        keys = ROW_KEYS.get(label)
+        if keys:
+            self._row_labels.append((name, label, keys))
         if level["caption"]:
             tk.Label(cell, text=caption, font=("Segoe UI", level["caption"]),
                      background=_UI["panel"], foreground=_UI["muted"],
@@ -1757,6 +3271,8 @@ class OptionPanel:
                     pady=(max(1, level["row_pad"] - 1), 0))
         if not level["caption"]:
             self._hint_rows.append(((cell, holder), caption))
+        if keys:
+            self._row_frames.append((keys[0], (cell, holder)))
         return holder
 
     def _unit(self, holder, text):
@@ -1834,6 +3350,8 @@ class OptionPanel:
             else self.TIME_CHOICES[0])
         self.fields["end_time"] = tk.StringVar(
             value=str(Parameters.simulation_end_time))
+        self.fields["traffic"] = tk.StringVar(
+            value=f"{Parameters.DEMAND_SCALE:g}")
         self.fields["max_speed"] = tk.StringVar(
             value=jstr(round(Parameters.maximum_speed * 3.6, 2)))
         self.fields["seed"] = tk.StringVar(value=str(Parameters.seed))
@@ -1885,9 +3403,140 @@ class OptionPanel:
         # does not exist yet.
         self._pinned = frozenset()
         self._shown_rows = None
+        # The feedback state: whether a write is the place's defaults being
+        # applied (not a reader's change), the values those defaults left
+        # (what "changed" is measured against), the row labels that carry
+        # the mark, and the timer that returns the footer to its summary.
+        self._applying_defaults = False
+        self._snapshot = {}
+        self._row_labels = []
+        self._status_job = None
         self.network_var.trace_add("write",
                                    lambda *_a: self._on_network_change())
         self._on_network_change()
+        # One watcher per setting, made once with the variables -- a form
+        # rebuild must not add a second (test_start_screen counts them).
+        for key, var in self._watched().items():
+            var.trace_add("write", lambda *_a, k=key: self._setting_changed(k))
+
+    def _watched(self):
+        """Every setting the footer reports on, by key."""
+        return {"network": self.network_var, "time": self.time_var,
+                "end_time": self.fields["end_time"],
+                "traffic": self.fields["traffic"],
+                "max_speed": self.fields["max_speed"],
+                "seed": self.fields["seed"],
+                "accident": self.fields["accident"],
+                "trace": self.trace_var, "signal": self.signal_var,
+                "signal_green": self.fields["signal_green"],
+                "geometry": self.geometry_var,
+                "pedestrians": self.pedestrian_var,
+                "friction": self.friction_var,
+                "strip": self.fields["strip"],
+                "footpath": self.fields["footpath"],
+                "render3d": self.render3d_var, "ppm": self.fields["ppm"],
+                "speed": self.fields["speed"]}
+
+    def _values(self):
+        return {key: var.get() for key, var in self._watched().items()}
+
+    # ---- feedback: the footer says what every change does ------------------
+
+    def _setting_changed(self, key: str) -> None:
+        """A setting's variable was written.  Say what that means in the
+        footer, mark the row if it now differs from the place's default,
+        and warn at once if the value cannot be used."""
+        if self._applying_defaults or key == "network":
+            return                      # the network summary covers it
+        self._preview.request(key)
+        value = self._watched()[key].get()
+        problem = setting_problem(key, value)
+        if problem:
+            self._show_status(problem, error=True)
+        else:
+            self._show_status(setting_message(key, value,
+                                              self._snapshot.get(key)))
+            if self._status_job is not None:
+                self.frame.after_cancel(self._status_job)
+            self._status_job = self.frame.after(7000, self._idle_status)
+        self._refresh_changed_marks()
+
+    def _show_status(self, text: str, error: bool = False) -> None:
+        if self._hint is None:
+            return
+        try:
+            self._hint.configure(
+                text=text,
+                foreground="#E86A6A" if error else _UI["accent_text"])
+        except tk.TclError:
+            pass
+
+    def _idle_status(self) -> None:
+        """With nothing just changed, the footer says what Start will run."""
+        self._status_job = None
+        if self._hint is None:
+            return
+        problem = self._validate()
+        if problem:
+            self._show_status(problem, error=True)
+            return
+        try:
+            self._hint.configure(text=self._summary(),
+                                 foreground=_UI["muted"])
+        except tk.TclError:
+            pass
+
+    def _summary(self) -> str:
+        values = self._values()
+        view = values["render3d"]
+        changed = sum(1 for k, v in values.items()
+                      if k in self._snapshot and self._snapshot[k] != v)
+        parts = [f"Start runs {_place_name(values['network'])}",
+                 values["time"].split(" (")[0].lower(),
+                 f"{values['end_time']} s", f"traffic x{values['traffic']}",
+                 f"seed {values['seed']}",
+                 "3D view" if view != "Off" else "plan view"]
+        text = " \u00b7 ".join(parts)
+        if changed:
+            text += f"  \u00b7  {changed} setting{'s' if changed > 1 else ''} " \
+                    "changed from the place's defaults"
+        return text
+
+    def _validate(self):
+        """The first setting that cannot be used, as a sentence, or None."""
+        for key, value in self._values().items():
+            problem = setting_problem(key, value)
+            if problem:
+                return problem
+        return None
+
+    def _refresh_changed_marks(self) -> None:
+        """A dot before the name of every row whose value is not the
+        place's default, so the reader can see at a glance what they have
+        moved (and the summary line counts them)."""
+        values = self._values()
+        for widget, label, keys in self._row_labels:
+            changed = any(k in self._snapshot and self._snapshot[k] != values[k]
+                          for k in keys)
+            try:
+                widget.configure(
+                    text=("\u25cf " + label) if changed else label,
+                    foreground=_UI["accent_text"] if changed else _UI["text"])
+            except tk.TclError:
+                pass
+
+    def _network_summary(self, applied) -> str:
+        values = self._values()
+        parts = [f"{_place_name(values['network'])}: "
+                 f"{values['max_speed']} km/h limit",
+                 f"{values['signal_green']} s green per approach"]
+        if "AcrossPedestrianMode" in applied:
+            parts.append("crossing pedestrians "
+                         + ("On" if Parameters.across_pedestrian_mode else "Off"))
+        if "ObjectMode" in applied:
+            parts.append("parked vehicles "
+                         + ("On" if Parameters.OBJECT_MODE else "Off"))
+        return " \u00b7 ".join(parts) + " -- the place's own defaults"
 
     def _init_components(self) -> None:
         level = self._d
@@ -1947,8 +3596,10 @@ class OptionPanel:
             self._seg(holder, [(n, _place_name(n)) for n in group],
                       self.network_var, large=True,
                       command=self._on_network_change,
-                      columns=min(level["tiles"] or len(group), len(group)),
-                      keep_unknown=False).pack(
+                      columns=min(self._tiles or level["tiles"] or len(group),
+                                  len(group)),
+                      keep_unknown=False,
+                      hover=lambda v: self._preview.peek("network", v)).pack(
                 anchor="w", pady=(0, level["row_pad"] + 2))
 
         show_time, show_pedestrians, show_friction = self._trimmed_rows()
@@ -1964,13 +3615,27 @@ class OptionPanel:
                       font=("Segoe UI", level["value"]),
                       pad=(12, max(3, level["row_pad"]))).pack(anchor="w")
         else:
+            # The form adjusting itself, not the reader: no footer sentence,
+            # no preview toast naming the hour over the junction just chosen.
+            was = self._applying_defaults
+            self._applying_defaults = True
             self.time_var.set(self.TIME_CHOICES[0])
+            self._applying_defaults = was
 
         self._band("Run", "  how much traffic, and how repeatable")
-        holder = self._row("End time",
-                           "How many seconds of traffic to simulate.")
+        # The traffic level shares this row rather than taking one of its
+        # own: a captioned row is ~34 px the roomy density does not have at
+        # 1080p, and the strip fits beside the entry inside the column's
+        # 440 px.  The caption is kept to one line for the same reason.
+        holder = self._row("End time & traffic",
+                           "Seconds to run; x1 is the surveyed traffic.")
         self._entry(holder, self.fields["end_time"])
         self._unit(holder, "s")
+        self._seg(holder, ["0.5", "1", "1.5", "2", "3"],
+                  self.fields["traffic"],
+                  hover=lambda v: self._preview.peek("traffic", v)).pack(
+            side="left", padx=(14, 0))
+        self._unit(holder, "x")
 
         holder = self._row("Maximum speed",
                            "The network speed limit. Choosing a junction sets "
@@ -1993,7 +3658,9 @@ class OptionPanel:
         holder = self._row("Trace replay",
                            "On replays trace.txt instead of simulating a new "
                            "run.")
-        self._seg(holder, ["Off", "On"], self.trace_var).pack(anchor="w")
+        self._seg(holder, ["Off", "On"], self.trace_var,
+                  hover=lambda v: self._preview.peek("trace", v)).pack(
+            anchor="w")
 
         # ================= right column ===================================
         self._use(1)
@@ -2009,7 +3676,9 @@ class OptionPanel:
         # the form at 1280 px.  Below the strip costs one entry line, paid
         # for by the slimmer roomy row padding in _DENSITIES.
         self._seg(holder, list(self.SIGNAL_CHOICES), self.signal_var,
-                  columns=2).pack(anchor="w")
+                  columns=2,
+                  hover=lambda v: self._preview.peek("signal", v)).pack(
+            anchor="w")
         timing = tk.Frame(holder, background=_UI["panel"])
         timing.pack(anchor="w", pady=(3, 0))
         self._entry(timing, self.fields["signal_green"])
@@ -2018,7 +3687,9 @@ class OptionPanel:
         holder = self._row("Real geometry",
                            "The surveyed layout: solid medians and real "
                            "roundabouts. Off is Java parity.")
-        self._seg(holder, ["Off", "On"], self.geometry_var).pack(anchor="w")
+        self._seg(holder, ["Off", "On"], self.geometry_var,
+                  hover=lambda v: self._preview.peek("geometry", v)).pack(
+            anchor="w")
 
         if show_pedestrians or show_friction:
             # One captioned row for both street-level nuisances, the strips
@@ -2029,34 +3700,40 @@ class OptionPanel:
                 "Side friction",
                 "Crossing pedestrians, and parked vehicles on the kerbside.")
             if show_pedestrians:
-                self._seg(holder, ["Off", "On"],
-                          self.pedestrian_var).pack(side="left")
+                self._seg(holder, ["Off", "On"], self.pedestrian_var,
+                          hover=lambda v: self._preview.peek("pedestrians", v)
+                          ).pack(side="left")
                 self._unit(holder, "peds")
             if show_friction:
-                self._seg(holder, ["Off", "On"], self.friction_var).pack(
-                    side="left", padx=((10, 0) if show_pedestrians else 0))
+                self._seg(holder, ["Off", "On"], self.friction_var,
+                          hover=lambda v: self._preview.peek("friction", v)
+                          ).pack(side="left",
+                                 padx=((10, 0) if show_pedestrians else 0))
                 self._unit(holder, "parked")
 
         self._band("Road model", "  the strips a vehicle slides between")
         holder = self._row("Strip width",
                            "There are no lanes here. A carriageway is a row of "
                            "strips this wide.")
-        self._seg(holder, ["0.25", "0.5", "1.0"],
-                  self.fields["strip"]).pack(side="left")
+        self._seg(holder, ["0.25", "0.5", "1.0"], self.fields["strip"],
+                  hover=lambda v: self._preview.peek("strip", v)).pack(
+            side="left")
         self._unit(holder, "m")
 
         holder = self._row("Footpath strip width",
                            "The same width again, for the footpath.")
-        self._seg(holder, ["0.25", "0.5", "1.0"],
-                  self.fields["footpath"]).pack(side="left")
+        self._seg(holder, ["0.25", "0.5", "1.0"], self.fields["footpath"],
+                  hover=lambda v: self._preview.peek("footpath", v)).pack(
+            side="left")
         self._unit(holder, "m")
 
         self._band("Display", "  playback only, the results do not change")
         holder = self._row("3D view",
                            "A perspective scene instead of the plan view. "
                            "Line art is the lighter of the two.")
-        self._seg(holder, list(self.VIEW_CHOICES),
-                  self.render3d_var).pack(anchor="w")
+        self._seg(holder, list(self.VIEW_CHOICES), self.render3d_var,
+                  hover=lambda v: self._preview.peek("render3d", v)).pack(
+            anchor="w")
 
         holder = self._row("Scale",
                            "How many screen pixels a metre of road takes up.")
@@ -2090,13 +3767,17 @@ class OptionPanel:
                              primary=True)
         start.pack(side="right")
         start.focus_set()
-        if not level["caption"]:
-            # The captions had to come off the rows to fit the screen; this
-            # is where they went.  One line for all seventeen of them.
-            self._hint = tk.Label(
-                inner, text="", font=("Segoe UI", level["group"] + 1),
-                background=_UI["band"], foreground=_UI["muted"], anchor="w")
-            self._hint.pack(side="left", fill="x", expand=True, padx=16)
+        # The footer's status line, at every density: what the run will be,
+        # what the last change did, or why a value cannot be used.  At the
+        # densest layout it also carries the captions that came off the
+        # rows, while the pointer is on one.  ``width=1`` with fill, so a
+        # long sentence is clipped rather than widening the window -- the
+        # form stacks its columns at 1280 px on width alone.
+        self._hint = tk.Label(
+            inner, text="", font=("Segoe UI", level["group"] + 1),
+            background=_UI["band"], foreground=_UI["muted"], anchor="w",
+            width=1)
+        self._hint.pack(side="left", fill="x", expand=True, padx=16)
 
     def _open_import(self):
         """Open the map-import dialog; a second click fronts the first one."""
@@ -2134,6 +3815,13 @@ class OptionPanel:
         self._fit_to_window(force=True)
 
     def _on_network_change(self):
+        preview = getattr(self, "_preview", None)
+        if preview is not None:
+            # Before the place's defaults are written: the preview holds a
+            # snapshot of Parameters it will put back, and a restore made
+            # after this write would undo it.
+            preview.stop()
+        self._applying_defaults = True
         applied = Utilities.apply_network_defaults(self.network_var.get())
         if "MaximumSpeed" in applied:
             self.fields["max_speed"].set(
@@ -2170,6 +3858,15 @@ class OptionPanel:
             "On" if Parameters.across_pedestrian_mode else "Off")
         self.friction_var.set("On" if Parameters.OBJECT_MODE else "Off")
         self._pinned = frozenset(applied)
+        # What the place set is the baseline a reader's changes are marked
+        # against; the footer names what it set.
+        self._applying_defaults = False
+        self._snapshot = self._values()
+        self._refresh_changed_marks()
+        self._show_status(self._network_summary(applied))
+        if self._status_job is not None:
+            self.frame.after_cancel(self._status_job)
+        self._status_job = self.frame.after(7000, self._idle_status)
         # Settings the selected place cannot use leave the form: an hourly
         # demand profile it does not have, a pedestrians switch its
         # defaults.txt has decided.  Deferred because this runs from the
@@ -2177,6 +3874,19 @@ class OptionPanel:
         # very widget that fired it.
         if self._shown_rows is not None and self._trimmed_rows() != self._shown_rows:
             self.frame.after_idle(self._refit_trimmed)
+        if preview is not None:
+            preview.request("network")
+
+    def dispose(self) -> None:
+        """Stop the preview's runs and put Parameters back, and drop the
+        footer timer so it cannot fire into a destroyed form."""
+        if self._status_job is not None:
+            try:
+                self.frame.after_cancel(self._status_job)
+            except tk.TclError:
+                pass
+            self._status_job = None
+        self._preview._discard()
 
     def _trimmed_rows(self):
         """(time-of-day, pedestrians, side friction) shown for the network."""
@@ -2196,29 +3906,55 @@ class OptionPanel:
         self._fit_to_window(force=True)
 
     def start_simulation(self) -> None:
+        problem = self._validate()
+        if problem:
+            self._show_status(problem, error=True)
+            messagebox.showwarning("Check the settings", problem)
+            return
+        # The preview's run goes first, and its snapshot of Parameters is
+        # put back, so the run starts from the form and nothing else.
+        self._preview.stop()
+        self._apply_to_parameters()
+        self.dhaka_sim_frame.show_simulation()
+
+    def _apply_to_parameters(self, quiet: bool = False) -> None:
+        """Write the form into ``Parameters``, as a run reads them.
+
+        One function for Start and for the preview, so the preview can
+        never show settings the run would read differently.  ``quiet``
+        skips the console lines a run announces itself with.
+        """
+        say = (lambda _text: None) if quiet else print
         Parameters.NETWORK_DIR = self.network_var.get().strip()
+        Parameters.DEMAND_SCALE = float(self.fields["traffic"].get())
         choice = self.time_var.get()
         Parameters.TIME_OF_DAY = (self.TIME_CHOICES.index(choice) - 1
                                   if choice in self.TIME_CHOICES else -1)
-        print("Network: " + (Parameters.NETWORK_DIR or "input/"))
+        say("Network: " + (Parameters.NETWORK_DIR or "input/"))
         Parameters.simulation_speed = int(self.fields["speed"].get())
         Parameters.simulation_end_time = int(self.fields["end_time"].get())
         Parameters.seed = int(self.fields["seed"].get())
-        print("Seed: " + str(Parameters.seed))
-        print("CF Model: " + str(Parameters.car_following_model.name))
+        say("Seed: " + str(Parameters.seed))
+        say("CF Model: " + str(Parameters.car_following_model.name))
         Parameters.random = (JavaRandom() if Parameters.seed < 0
                              else JavaRandom(Parameters.seed))
+        # A seed pins the whole run, as --seed does headless: the object,
+        # pedestrian and blockage draws go through the seeded stream, and
+        # the pedestrian arrival generators built at launch are rebuilt on
+        # it.  -1 keeps the Java behaviour, a fresh run every time.
+        Parameters.DETERMINISTIC = Parameters.seed >= 0
+        Constants.reseed()
         Parameters.TRACE_MODE = self.trace_var.get() == "On"
         Parameters.SIGNAL_MODE = self.SIGNAL_CHOICES.get(
             self.signal_var.get(), "fixed")
-        print("Signal control: " + Parameters.SIGNAL_MODE)
+        say("Signal control: " + Parameters.SIGNAL_MODE)
         try:
             green = int(float(self.fields["signal_green"].get()))
         except ValueError:
             green = Parameters.SIGNAL_CHANGE_DURATION
         Parameters.SIGNAL_CHANGE_DURATION = max(1, green)
         Parameters.GEOMETRY_MODE = self.geometry_var.get() == "On"
-        print("Real geometry: " + ("On" if Parameters.GEOMETRY_MODE else "Off"))
+        say("Real geometry: " + ("On" if Parameters.GEOMETRY_MODE else "Off"))
         Parameters.RENDER_3D, Parameters.RENDER_3D_STYLE = (
             self.VIEW_CHOICES.get(self.render3d_var.get(), (False, "line")))
         Parameters.pixel_per_meter = float(self.fields["ppm"].get())
@@ -2237,8 +3973,6 @@ class OptionPanel:
         Parameters.pixel_per_footpath_strip = (Parameters.pixel_per_meter
                                               * Parameters.footpath_strip_width)
         Parameters.pixel_per_strip = Parameters.pixel_per_meter * Parameters.strip_width
-
-        self.dhaka_sim_frame.show_simulation()
 
 
 #: The import's stages, as the first words of the worker's own log lines,
@@ -3424,6 +5158,30 @@ class DhakaSimFrame:
             "<ButtonRelease-1>",
             lambda _e: self.panel is not None
             and self.sync_zoom_slider(self.panel.scale))
+
+        # Traffic level, live (owner request, 6 Oct 2026: "increase traffic
+        # density while the simulation is running").  A multiplier on every
+        # route's arrival rate, read at the moment each stream draws its next
+        # headway, so a change takes hold on the next arrival of each stream
+        # and the run never has to restart.  x1 is the surveyed (or
+        # imported) demand; the same multiplier is set on the start screen.
+        traffic_row = tk.Frame(legend, bg=bg)
+        traffic_row.pack(anchor="w", fill="x", pady=(0, 8), after=zoom_row)
+        tk.Label(traffic_row, text="Traffic", font=("Segoe UI", 9), bg=bg,
+                 fg=_UI["muted"]).pack(side="left", padx=(0, 6))
+        self._traffic_slider = tk.Scale(
+            traffic_row, from_=25, to=300, orient="horizontal",
+            showvalue=False, borderwidth=0, highlightthickness=0,
+            sliderrelief="flat", sliderlength=18, width=10, length=110,
+            background=_UI["seg_off"], troughcolor=_UI["band"],
+            activebackground=_UI["accent"], command=self._on_traffic_slider)
+        self._traffic_slider.set(int(round(Parameters.DEMAND_SCALE * 100)))
+        self._traffic_slider.pack(side="left", padx=(0, 6))
+        self._traffic_label = tk.Label(
+            traffic_row, text=f"x{Parameters.DEMAND_SCALE:.2g}",
+            font=("Consolas", 9, "bold"), bg=bg, fg=_UI["text"], width=5,
+            anchor="w")
+        self._traffic_label.pack(side="left")
         dark_button(zoom_row, "Reset", self.reset_zoom,
                     size=8).pack(side="left")
 
@@ -3627,6 +5385,13 @@ class DhakaSimFrame:
                           highlightbackground=_UI["edge"],
                           highlightcolor=_UI["accent"])
         spin.pack(side="left")
+        # Building a Spinbox over a ``values`` list writes the *first* entry
+        # into its variable, whatever the variable held -- measured: a box
+        # built over "250" shows "1".  The run was still stepping at 250 ms
+        # (Parameters.simulation_speed is only written by apply, wired
+        # below), so the legend lied and the first arrow click stepped from
+        # 1.  Write the run's own delay back before the trace is attached.
+        self._delay_var.set(str(value))
         # command= only fires for the arrows, so typing needs its own hooks.
         spin.bind("<Return>", lambda _e: apply(True))
         spin.bind("<FocusOut>", lambda _e: apply(True))
@@ -3796,6 +5561,8 @@ class DhakaSimFrame:
         if self.panel is not None:
             self.panel.dispose()
             self.panel = None
+        if self.option_panel is not None:
+            self.option_panel.dispose()
         self.option_panel = None
         self._report_button = None
         self._view_button = None
@@ -3809,6 +5576,8 @@ class DhakaSimFrame:
         self._delay_var = None
         self._commit_delay = None
         self._scale_slider = None
+        self._traffic_slider = None
+        self._traffic_label = None
         Parameters.show_progress_slider = None
         for child in self.container.winfo_children():
             child.destroy()
@@ -3890,6 +5659,9 @@ class DhakaSimFrame:
                                            panel.canvas.winfo_height())
         self.sync_zoom_slider(panel.home_scale)
         panel.set_scale(panel.home_scale)
+        self.update_status()
+        panel.toast("Running -- Space pauses, V tilts into 3D, M hides the "
+                    "map, the wheel zooms")
         panel.start()
 
     def toggle_pause(self) -> None:
@@ -3904,10 +5676,28 @@ class DhakaSimFrame:
             return
         # The button says what it will do, not what the run is doing.
         paused = self.panel.paused
-        self._pause_button.configure(text="\u25b6  Play" if paused
-                                     else "\u23f8  Pause")
-        if self._status is not None:
-            self._status.configure(text="Paused." if paused else "")
+        self._pause_button.configure(text="\u25b6  Play  (Space)" if paused
+                                     else "\u23f8  Pause  (Space)")
+        self.update_status()
+
+    def update_status(self) -> None:
+        """The toolbar's one line of system status: where the run is, and
+        which view is showing.  Cheap enough to refresh every step."""
+        if self._status is None or self.panel is None:
+            return
+        panel = self.panel
+        view = "3D view" if panel.view_3d else "plan view"
+        step, end = Parameters.simulation_step, Parameters.simulation_end_time
+        if panel._finished and step >= end:
+            text = f"Run finished at {end} s \u00b7 {view}"
+        elif panel.paused:
+            text = f"Paused at step {step} of {end} \u00b7 {view}"
+        else:
+            text = f"Step {step} of {end} \u00b7 {view}"
+        try:
+            self._status.configure(text=text)
+        except tk.TclError:
+            pass
 
     # Guards the slider's command while the handle is being moved to match a
     # zoom made elsewhere, so a wheel zoom does not re-enter set_scale.
@@ -3932,6 +5722,22 @@ class DhakaSimFrame:
         if self.panel is None or self._zoom_syncing:
             return
         self.panel.set_scale(self._slider_to_scale(value))
+        self.panel.toast("Zoom x%.2g of the whole-network framing"
+                         % (self.panel.scale / max(self.panel.home_scale, 1e-9)))
+
+    def _on_traffic_slider(self, value) -> None:
+        """The legend's traffic slider: a multiplier on every route's
+        arrival rate, applied from each stream's next arrival on."""
+        level = int(float(value)) / 100.0
+        if abs(level - Parameters.DEMAND_SCALE) < 1e-9:
+            return
+        Parameters.DEMAND_SCALE = level
+        label = getattr(self, "_traffic_label", None)
+        if label is not None:
+            label.configure(text=f"x{level:.2g}")
+        if self.panel is not None:
+            self.panel.toast(f"Traffic x{level:.2g} -- every route's arrivals "
+                             "from now on; the vehicles already out stay")
 
     def sync_zoom_slider(self, scale: float) -> None:
         """Move the handle to match a zoom made elsewhere (wheel, fit)."""
@@ -3973,7 +5779,7 @@ class DhakaSimFrame:
             return
         # The button says where it takes you, not where you are.
         self._view_button.configure(
-            text="Plan view (2D)" if self.panel.view_3d else "3D view")
+            text="Plan view  (V)" if self.panel.view_3d else "3D view  (V)")
 
     def repaint(self) -> None:
         if self.panel is not None:

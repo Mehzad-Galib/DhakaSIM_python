@@ -543,6 +543,9 @@ class Scene3D:
         # an outline instead.  Read once, here, so that a scene handed to the
         # report renders in whatever style the run used.
         self.style = getattr(Parameters, "RENDER_3D_STYLE", "solid")
+        # The largest a node name is drawn, in screen pixels; a small
+        # canvas (the start screen's preview) lowers it.
+        self.label_max_px = 34
         self._color = (0, 0, 0)
         self._stroke = 1.0
         self._font = ("Serif", 12)
@@ -939,7 +942,8 @@ class Scene3D:
             return
         # The font size is quoted in pixel space like everything else, so it
         # shrinks with distance exactly as the road under it does.
-        size = int(_clamp(self._font[1] * self._focal / view[2], 8, 34))
+        size = int(_clamp(self._font[1] * self._focal / view[2], 8,
+                          self.label_max_px))
         self._labels.append((view[2], sx, sy, text,
                              _shaded(self._color, 1.0), anchor, size,
                              self._tag))

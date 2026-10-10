@@ -244,6 +244,26 @@ class Constants:
         cls._initialized = True
 
     @classmethod
+    def reseed(cls) -> None:
+        """Rebuild the pedestrian arrival generators from the current
+        stream.
+
+        ``initialize`` runs once per process, and the headless driver seeds
+        before it, so there the generators follow ``--seed``.  The GUI
+        seeds per run, long after start-up, and until this existed its
+        pedestrians kept drawing from the clock-seeded generators built at
+        launch -- the "only partly reproducible" GUI run.  Called after a
+        run's seed is set; with ``DETERMINISTIC`` off it hands out fresh
+        clock-seeded generators, which is the Java behaviour.
+        """
+        if not cls._initialized:
+            return
+        cls.road_crossing_ped_poisson = PoissonDistribution(
+            Parameters.ACROSS_PEDESTRIAN_PER_HOUR / 3600, scratch_random())
+        cls.road_along_ped_poisson = PoissonDistribution(
+            Parameters.ALONG_PEDESTRIAN_PER_HOUR / 3600, scratch_random())
+
+    @classmethod
     def calibrate_to_network(cls, total_road_length_km: float) -> None:
         """Scale the roadside-object targets to the network that was loaded.
 
