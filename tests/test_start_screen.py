@@ -180,17 +180,20 @@ def test_a_short_screen_keeps_the_explanations_somewhere():
 
 
 def test_a_narrow_screen_gives_the_pictures_their_room():
-    """At 1280 px two columns of settings cannot stand beside a picture
-    column, so the settings become one column (scrolling if it must) and
-    the pictures keep their width: the list-and-picture layout of a
-    game's settings menu."""
+    """At 1280 px the pictures keep a column of their own.  Two columns
+    of the densest settings stand beside it since 12 Oct 2026 (the
+    junction box lost its empty name column); if they ever cannot, the
+    settings become one column, scrolling if it must, and the pictures
+    still get their width: the list-and-picture layout of a game's
+    settings menu."""
     frame = panel(1280, 640)
     option = frame.option_panel
     stacked = option._stacked
     pane = option._preview.width
+    bar = option._bar.winfo_ismapped()
     frame.root.destroy()
-    assert stacked is True, "1280 px: one column of settings beside the pictures"
-    assert pane >= 400, "the pictures keep their column"
+    assert pane >= 260, "1280 px: the pictures keep their column"
+    assert (not stacked and not bar) or pane >= 400, (stacked, bar, pane)
 
 
 def test_a_rebuild_keeps_what_the_reader_typed():
@@ -336,23 +339,33 @@ def test_the_preview_shows_the_place_and_follows_the_view_strip():
         built = _settle(root, lambda: preview.panel is not None)
         placed = preview.mode == "dock"
         title = preview.headers[0].cget("text")
-        first = preview.panel
+        one_map = len(preview.cells)
+        first = preview.panel.processor
         option.render3d_var.set("Solid")
         in_3d = _settle(root, lambda: preview.panel is not None
                         and preview.panel.view_3d
                         and preview.panel._tween is None)
         style = preview.panel.scene3d.style
-        same_run = preview.panel is first
+        same_run = preview.panel.processor is first
+        # A row with four choices previews four pictures.
+        preview.focus("signal")
+        four = _settle(root, lambda: len(preview.cells) == 4
+                       and all(c["panel"] is not None for c in preview.cells),
+                       20)
+        signal_titles = [c["header"].cget("text") for c in preview.cells]
+        preview.focus(None)
         option.friction_var.set("Off")
         rebuilt = _settle(root, lambda: preview.panel is not None
-                          and preview.panel is not first)
+                          and preview.panel.processor is not first)
         note = preview._note.cget("text")
     finally:
         messagebox.askyesno = asked
         root.destroy()
     assert built and placed, (built, placed)
     assert title.startswith("Kakrail Corridor"), title
+    assert one_map == 1, "a junction row shows one map"
     assert in_3d and style == "solid" and same_run, (in_3d, style, same_run)
+    assert four and any("selected" in t for t in signal_titles), signal_titles
     assert rebuilt, "a model setting must rebuild the run behind the picture"
     assert "kerbside" in note, note
 

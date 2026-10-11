@@ -1,0 +1,201 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>DhakaSim: problems addressed, problems it can address</title>
+<style>
+@page { size: A4; margin: 20mm 18mm; }
+body { font: 10.5pt/1.5 "Charter","Georgia",serif; color:#16150f; margin:0; }
+h1 { font-size:19pt; line-height:1.2; margin:0 0 4pt; }
+h2 { font-size:13pt; margin:20pt 0 6pt; padding-bottom:3pt;
+     border-bottom:1px solid #cfc8ba; page-break-after:avoid; }
+h3 { font-size:11pt; margin:13pt 0 3pt; page-break-after:avoid; }
+p { margin:0 0 7pt; }
+.lead { color:#544e42; font-size:10pt; margin-bottom:14pt; }
+ul,ol { margin:0 0 8pt; padding-left:17pt; }
+li { margin-bottom:3pt; }
+table { border-collapse:collapse; width:100%; margin:8pt 0 10pt;
+        font-family:"Helvetica Neue",Arial,sans-serif; font-size:8.6pt; }
+tr { page-break-inside:avoid; }
+thead { display:table-header-group; }
+th,td { border:1px solid #cfc8ba; padding:4pt 6pt; text-align:left;
+        vertical-align:top; }
+th { background:#efeade; font-weight:600; }
+td.k { width:28%; font-weight:600; }
+code { font-family:"Consolas",monospace; font-size:9.2pt; background:#f1ece1;
+       padding:0 3px; border-radius:2px; }
+.box { border:1px solid #cfc8ba; border-left:3px solid #8a7a58;
+       background:#faf7f0; padding:8pt 11pt; margin:10pt 0;
+       page-break-inside:avoid; }
+.box p:last-child { margin-bottom:0; }
+.box b { font-family:"Helvetica Neue",Arial,sans-serif; font-size:9.2pt; }
+.ask { border-left-color:#2f6b3a; background:#f1f6ee; }
+footer { margin-top:18pt; padding-top:6pt; border-top:1px solid #cfc8ba;
+         color:#6d6658; font-size:8.6pt; }
+h2.brk { page-break-before:always; }
+.tp li { margin-bottom:6pt; }
+.tp li b { font-family:"Helvetica Neue",Arial,sans-serif; font-size:9.4pt; }
+.small { font-size:9pt; color:#544e42; }
+</style></head><body>
+
+<h1>DhakaSim: problems addressed, problems it can address</h1>
+<p class="lead">A review of the six published DhakaSim papers (2014 to 2025)
+and of what the Python port in this repository has added, followed by the
+transport problems the simulator can take on now, those one extension away,
+and those it is not suited to. The last page is a set of talking points for
+the supervisor meeting. ASM Nuruzzaman, 11 October 2026.</p>
+
+<h2>Scope and sources</h2>
+<p>Six published papers and this repository's own documents were read: the
+Java-to-Python progress report, the VISSIM comparison, the codebase analysis,
+the research-landscape survey, the machine-learning note, the two thesis
+documents under <code>docs/</code>, and the README's measured results. The
+published PDFs themselves (the <code>DhakaSIM Papers/</code> folder the
+surveys were written from) are not on this machine, so paper findings are
+quoted from the repository's survey of them. The accuracy and impact figures
+are the papers' own, not re-measured here.</p>
+
+<h2>Problems addressed so far, paper by paper</h2>
+<p>Every paper measures speed, waiting time and flow on a few Dhaka routes.
+None measures safety or emissions, and every calibration was done by hand.</p>
+<table>
+<thead><tr><th style="width:20%">Year, venue</th><th style="width:32%">Problem addressed</th><th>What it found</th></tr></thead>
+<tr><td>2014, conference (Dev et al.)</td>
+    <td>How to simulate traffic that has no lane discipline</td>
+    <td>The strip model: a road is a row of 0.2 m strips and a vehicle straddles several; 11 vehicle types. Demonstration only, 8 nodes and 13 links at 1x and 1.5x demand; no field validation.</td></tr>
+<tr><td>2018, ICT4S (Alam et al.)</td>
+    <td>Dhaka-specific behaviours missing from every simulator: jaywalking, hawkers on the carriageway, illegal parking; first calibration</td>
+    <td>Added all three; calibrated against ultrasonic flow and speed sensors; 99% travel-time accuracy on one route between two intersections.</td></tr>
+<tr><td>2020, SIMPAT (Zubaer et al.)</td>
+    <td>Road width, which sets strip count and capacity, is absent from polyline maps</td>
+    <td>A parser for polygonal GIS maps recovering length and width; 86% accuracy on four Dhaka areas (one road in seven wrong); 99% travel time after calibration.</td></tr>
+<tr><td>2024, IEEE T-ITS (Mushfiq et al., RoadBird)</td>
+    <td>Would forcing Dhaka's traffic into lanes help, and would freeing a developed city's traffic hurt?</td>
+    <td>Dhaka, Miami and Riyadh topologies; 13 car-following and 4 lane-changing models. Non-lane beats lane on Dhaka's narrow roads at every demand; lane wins on Riyadh's wide roads and overtakes at high demand; removing slow human-powered vehicles helps both. Validated on two Dhaka routes, 88% mean accuracy by MAPE.</td></tr>
+<tr><td>2025, IEEE Access (Rumi et al.)</td>
+    <td>Which roadside elements cause congestion, and by how much</td>
+    <td>Seven side-friction elements modelled from field data. Up to 36.55% lower speed and 161.3% longer waiting; road-crossing pedestrians are the largest single cause; rickshaws lower speed but keep flow high.</td></tr>
+<tr><td>2025, IEEE Access (Rahaman et al.)</td>
+    <td>Signal timing when traffic is neither lane-based nor homogeneous</td>
+    <td>NSGA-II over green splits with two heterogeneity-aware objectives and a vehicle priority model; 163.1% higher speed and 56.1% less waiting than Dhaka's fixed-time schedules at peak; gains on Miami and Riyadh too.</td></tr>
+</table>
+
+<h2>What the Python port has added</h2>
+<p>The repository reproduces the papers' simulator and adds the engineering
+the VISSIM comparison said was missing, without changing the validated
+arithmetic.</p>
+<ul>
+<li><b>A faithful, tested port.</b> Byte-identical output to the Java original under a matched seed across all 13 car-following and 4 lane-changing models; a seeded run of every network is hashed as one command.</li>
+<li><b>Real junctions.</b> Five surveyed Dhaka junctions (Banani 23, Banani 27, Bijoy Sarani, the two-signal Kakrail corridor with its roundabout) with 24-hour turning counts, hourly demand and hourly vehicle mix, plus BUET-DU-DMC, Miami and Riyadh rebuilt from OpenStreetMap through a junction picker.</li>
+<li><b>Junction discipline.</b> Stop lines read off the drawn junction, VISSIM-style keep-clear entry, turning-speed caps, medians, roundabouts and one-way links; signal bars per approach.</li>
+<li><b>The 2025 scheduler, ported and re-measured.</b> Fixed-time, biased-random and both multi-objective controllers. On the surveyed junctions the first objective set beats the best fixed-time green where traffic is most mixed; the paper's stronger second set is weaker here, because its red-time objective rewards giving the whole cycle to the busiest approach.</li>
+<li><b>Any site from a map.</b> An import dialog turns a place name into a runnable network with imagery and links bent onto the real roads; width comes from map tags rather than the 2020 paper's polygon parser.</li>
+<li><b>Experiments and statistics.</b> A parallel sweep harness, the five error measures and two hypothesis tests of the 2024 paper's Table IV, and a report that tests ten of that paper's claims against a sweep.</li>
+<li><b>Reproducibility.</b> A seed now pins the whole run, headless and in the GUI, including the object and pedestrian draws the Java original left unseeded.</li>
+<li><b>Seeing a run.</b> A 2D plan view over map imagery, a 3D view, a per-run HTML report with animated replays, a live traffic-level control, and a start screen that previews every choice of a setting as a picture beside it.</li>
+</ul>
+
+<h2>Problems DhakaSim can address today</h2>
+<p>These need no code change: each is a setting, an input file or a sweep.
+The outputs are per-link speed, waiting time and flow, per-type trip time and
+fuel, and a per-event near-crash log.</p>
+<table>
+<thead><tr><th style="width:40%">Transport problem</th><th>How it is posed in DhakaSim</th></tr></thead>
+<tr><td>Should a corridor be given lane discipline?</td><td>Strip width as the lane switch; the sweep harness compares lane and non-lane across demand, mix and pedestrians.</td></tr>
+<tr><td>Kerbside management: parking bans, hawker removal, pedestrian crossing control</td><td>Object mode and the three pedestrian classes, each with its own hourly rate; switch an element off and measure the gain.</td></tr>
+<tr><td>Signal timing at a junction or a two-signal corridor</td><td>Green per approach, fixed-time against biased-random and the two multi-objective schedulers; keep-clear box on or off.</td></tr>
+<tr><td>Junction form: roundabout against signals, medians, one-way arms</td><td><code>geometry.txt</code> directives on the same network.</td></tr>
+<tr><td>Road narrowing for construction, flyover works, widening</td><td>The segment's width field; capacity follows from the strip count.</td></tr>
+<tr><td>Road closure, diversion and incident blocking</td><td>Remove the link and re-route, or script a stationary obstacle at a chosen step.</td></tr>
+<tr><td>Demand growth, peak hour against off-peak, a traffic-free day</td><td>Time-of-day profile, and a traffic multiplier settable before and during a run.</td></tr>
+<tr><td>Fleet policy: rickshaw bans, motorbike growth, removing slow vehicles</td><td>Per-network vehicle mix file; the 2024 paper's heterogeneous against homogeneous comparison.</td></tr>
+<tr><td>Any new site, in any city</td><td>Map import from a place name, as done for Dhaka, Miami and Riyadh.</td></tr>
+<tr><td>How much a result depends on the behavioural model</td><td>13 car-following and 4 lane-changing models swapped per run.</td></tr>
+<tr><td>Fuel consumed per vehicle type under each scenario</td><td>The fuel model in the per-type CSVs.</td></tr>
+<tr><td>Is a difference real or seed noise?</td><td>Seeded replication with the built-in t-test and Kolmogorov-Smirnov test.</td></tr>
+</table>
+
+<h2>Problems within reach with a modest extension</h2>
+<p>Each of these is one well-bounded change away; the first unlocks most of
+the others.</p>
+<table>
+<thead><tr><th style="width:36%">Transport problem</th><th>What is missing</th><th style="width:18%">Size of the change</th></tr></thead>
+<tr><td>Congestion forecasting, surrogate models, where congestion propagates</td><td>Per-link state is written only as an end-of-run average; log it per minute, with a run id.</td><td>About twenty lines in the processor</td></tr>
+<tr><td>Agency-standard performance measures: queue length, delay, density, stops, VMT and VHT</td><td>None are reported; all are derivable from state the simulator tracks.</td><td>Small to medium</td></tr>
+<tr><td>Road safety: do throughput measures make pedestrians safer or more exposed?</td><td>The near-crash log describes both parties but carries no run id; time-to-collision from trajectories needs vehicle ids in the trace.</td><td>Small for the log, medium for trajectories</td></tr>
+<tr><td>Which corridors to lane, if only some can be enforced</td><td>Strip width is one global setting; make it per link.</td><td>Small</td></tr>
+<tr><td>Peak spreading, staggered hours, time-varying demand within a run</td><td>The traffic multiplier is live but manual; a demand profile per step is not read.</td><td>Small</td></tr>
+<tr><td>Responsive and adaptive signals, reinforcement-learning control</td><td>A queue-pressure adaptive controller exists but is disabled; per-approach phases with offsets are not in an input file.</td><td>Medium</td></tr>
+<tr><td>Evacuation and demand far beyond capacity</td><td>Nothing stops it, but the model is unvalidated under gridlock; establish its behaviour first.</td><td>Medium, mostly validation</td></tr>
+<tr><td>Pedestrian facilities: footbridge or zebra placement</td><td>Crossing rate is per network, not per link.</td><td>Small</td></tr>
+<tr><td>Emissions of a mixed fleet (human-powered, two-stroke, diesel)</td><td>No emissions model; the fuel model is the hook.</td><td>Medium</td></tr>
+<tr><td>Repeatable calibration, and whether a Dhaka calibration transfers to another city</td><td>An optimiser over parameters, and observed travel times to fit against.</td><td>Medium, plus fieldwork</td></tr>
+<tr><td>Replicated runs with confidence intervals and warm-up exclusion</td><td>Seeds are honoured; the harness lacks warm-up handling and interval reporting.</td><td>Small</td></tr>
+</table>
+
+<h2>Problems it is not suited to</h2>
+<p>DhakaSim is a junction and corridor microsimulator for non-lane traffic.
+The VISSIM comparison's advice stands: extend what it alone does rather than
+imitate VISSIM.</p>
+<ul>
+<li><b>City-scale and strategic planning.</b> Routes are fixed shortest paths with no dynamic assignment or route choice, and runs take minutes for a few dozen links; a network of thousands of links has never been run.</li>
+<li><b>Public transport operations and freight logistics.</b> Buses and trucks are vehicle types, not services with stops, schedules or loads.</li>
+<li><b>Lane-based engineering studies for agencies.</b> Turn pockets, actuated controllers, standard HCM outputs and the mature calibration workflow are VISSIM's ground.</li>
+<li><b>Real-time operation.</b> It is offline; there is no live data feed, and the papers' validation rests on two routes and 88% travel-time accuracy, which every claim about real roads inherits.</li>
+<li><b>Economics of parking, pricing or land use.</b> Nothing in the model responds to cost.</li>
+</ul>
+
+<h2>Suggested next problems, in order</h2>
+<p>Start with the logging change, because three of the four thesis directions
+and most of the extension table depend on it.</p>
+<ol>
+<li>Per-minute per-link logging with a run id, then re-run the existing sweep. Cheapest change, largest unlock.</li>
+<li>Queue, delay, density and VMT/VHT in the report, so results read in the measures agencies use.</li>
+<li>The safety trade-off on the surveyed junctions: re-run the papers' recommended interventions and measure conflicts alongside speed. The clearest gap in the six papers.</li>
+<li>Per-link lane discipline, answering which corridors to lane; the 2024 paper's own stated future work.</li>
+<li>Repeatable calibration, once observed travel times exist; without them, run it as recovery of known parameters from synthetic data.</li>
+</ol>
+
+<h2 class="brk">Talking points for the supervisor meeting</h2>
+<p class="lead">Fifteen minutes of material: one minute of context, three
+findings, one proposal, and the four decisions the meeting should produce.</p>
+
+<h3>Where things stand, in one minute</h3>
+<ol class="tp">
+<li><b>The simulator is now a research instrument, not a student prototype.</b> The Python port is byte-identical to the Java original under a seed, every network is hashed, and a run is reproducible end to end for the first time. That was not true of any of the six papers' code.</li>
+<li><b>There are eight runnable sites.</b> Five surveyed Dhaka junctions with 24-hour counts, plus BUET-DU-DMC, Miami and Riyadh rebuilt from OpenStreetMap. Any other place can be imported from a name in a few minutes.</li>
+<li><b>The 2025 signal scheduler is ported and re-measured.</b> It works, but its second objective set does not transfer to the surveyed junctions, and the reason is a property of the objective, not a bug.</li>
+</ol>
+
+<h3>Three findings worth the supervisor's attention</h3>
+<ol class="tp" start="4">
+<li><b>Nothing in the six papers learns, and nothing measures safety.</b> Every paper compares fixed configurations by speed, waiting time and flow. The safety trade-off of the papers' own recommendations (lane discipline, hawker removal, pedestrian control) has never been measured, and the simulator already logs near-crashes.</li>
+<li><b>The strongest published result does not reproduce on real junctions.</b> The Rahaman et al. second objective set (Equations 3 and 4) rewards giving the whole cycle to the busiest approach once the cycle length is fixed, so it loses to the first set and even to a tuned fixed-time green on the mixed-traffic junctions. This is a finding we can publish as a note, and it is a reason to be careful citing the paper's 163% figure.</li>
+<li><b>The validation base is thin and everything inherits it.</b> Two routes, 88% travel-time accuracy by MAPE, calibrated by hand. Any thesis claim about real roads carries that caveat, so the thesis should either add observed travel times or be framed as a model study with recovery of known parameters.</li>
+</ol>
+
+<h3>The proposal</h3>
+<ol class="tp" start="7">
+<li><b>Do the logging change first, whatever the topic.</b> Per-minute per-link state with a run id is twenty lines and unlocks forecasting, surrogates, safety and agency measures alike. Ask to spend the first week on it and re-run the existing sweep.</li>
+<li><b>Preferred thesis direction: the safety trade-off on the surveyed junctions.</b> Re-run the papers' recommended interventions and measure conflicts (near-crash rate, then time-to-collision from trajectories) alongside speed. It is the clearest gap, it needs no fieldwork, and it uses the surveyed junctions as they are. The fallback is the congestion-forecasting direction from the thesis document, which needs the same logging.</li>
+<li><b>Keep the single-intersection diversion work as the motivating case,</b> not the thesis: one junction gives a handful of scenarios and no model, which a Data Science examiner will notice.</li>
+</ol>
+
+<h3>Decisions to leave the meeting with</h3>
+<ol class="tp" start="10">
+<li><b>Which direction</b>: safety trade-off, congestion forecasting, learned surrogate, or calibration transfer. The documents under <code>docs/</code> set out all four with methodology and novelty.</li>
+<li><b>Field data</b>: can observed travel times or counts be obtained for one or two of the surveyed junctions this term? If not, the calibration direction is off the table and the others are framed as model studies.</li>
+<li><b>The scheduler finding</b>: write it up as a short note to the Rahaman et al. authors or as a section of the thesis, or both.</li>
+<li><b>Compute and scope</b>: the sweep harness runs a few dozen links in minutes per run; agree the number of replications and junctions so the experiment plan fits the term.</li>
+</ol>
+
+<div class="box ask">
+<p><b>Questions to ask</b></p>
+<ul>
+<li>Is a safety outcome (conflicts, time-to-collision) acceptable to the examiners as the thesis's dependent variable, given no crash data exists for the junctions?</li>
+<li>Does the lab still have the ultrasonic sensor data from the 2018 calibration, or contacts at the agencies that hold counts?</li>
+<li>Would the group co-author a note on the second objective set's behaviour, or should it stay inside the thesis?</li>
+<li>Which venue is the target: a transport journal (SIMPAT, T-ITS) or a data-science one? It changes how much of the method has to be learning rather than simulation.</li>
+</ul>
+</div>
+
+<footer>Sources: the six DhakaSim papers as surveyed in <code>docs/research-landscape.md</code>; the repository's README, VISSIM comparison and codebase analysis; <code>docs/thesis-directions.pdf</code> and <code>docs/thesis-proposal.pdf</code>. Figures attributed to papers are the papers' own.</footer>
+</body></html>

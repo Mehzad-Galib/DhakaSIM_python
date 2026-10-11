@@ -857,24 +857,39 @@ density without a per-user key, and the import's demand is synthetic.
 The owner asked for the picture a game's settings menu has: "while I
 change shadows options, right side shows changes via picture", then for
 the menu's *pair* -- the setting one way and the other -- for the row
-under the pointer, and on 11 Oct for stills instead of a playing run
-("no need to show the simulation in GIF, instead just show the specific
+under the pointer, on 11 Oct for stills instead of a playing run ("no
+need to show the simulation in GIF, instead just show the specific
 characteristics": a junction tile shows a map with nothing driving on
-it) and for the column's height to be used. `_SettingsPreview` in
-`gui.py` is that, and six things about it are not obvious from the code.
+it) and for the column's height to be used, and later that day for *one
+picture per choice*: "an option having n number of sub-options should
+preview n number of windows", a 2x2 for the four signal controls, three
+for 3D view, and a single map for the junction rows.  `_SettingsPreview`
+in `gui.py` is that, and six things about it are not obvious from the
+code.
 
-**Every picture is a still, and what it is comes from a spec.**
-`_specs(key, current, value)` gives the pair for the row under the
-pointer: `("map", network, zoom)` -- roads over imagery, no traffic --
-for the junction rows (the chosen place whole, and under it the hovered
-tile's place or the main junction close up); `("run", view, zoom,
-strips)` for the upper picture of every other row; and for the lower one
-`("view", …)` (the same run from the 3D camera), `("trace", zoom)` (the
-recording's vehicles, `WARM_UP_STEPS` frames in -- `_trace_is_here`
-reads that frame first and, when its vehicles lie off this network,
-the slot says the recording is of another place rather than showing an
-empty road), `("model", key, value, zoom, strips)` (a second run built
-with one setting changed) or a sentence.  `_PreviewPanel.show(view,
+**Every picture is a still, and a row is a grid of them, one per
+choice.** `PREVIEW_CHOICES` is each strip's list (pinned against the
+strips by `test_feedback`); `_values_for` gives a row's values (the
+junction row: the hovered tile's place, else the chosen one; a row with
+no strip: the form's value alone) and `_spec_for(key, value, current)`
+what each picture shows: `("map", network)` -- roads over imagery, no
+traffic, the whole network; `("run", view, zoom, strips)` -- the form's
+own run, for the value the form has; `("view", view, zoom, strips)` --
+the form's run from that camera, for the 3D view row; `("trace", zoom)`
+(the recording's vehicles, `WARM_UP_STEPS` frames in -- `_trace_is_here`
+reads that frame first and, when its vehicles lie off this network, the
+slot says the recording is of another place rather than showing an
+empty road); `("model", key, value, zoom, strips)` -- a second run built
+with that one value -- or a sentence.  `_lay_cells` puts n cells in a
+uniform grid, one column up to `ONE_COLUMN_UP_TO` pictures and two
+abreast beyond, each a header (the value, "as set" and accent-coloured
+for the form's), a holder and a line from `PREVIEW_CELL_NOTES` (short:
+a two-abreast cell is two hundred pixels), plus the vehicle count where
+the row is about the traffic.  The cells are built one per turn of the
+event loop (`_pump`, the form's own value first so `self.panel` exists
+soonest) and the runs are cached per (key, value) in `_runs` until the
+form's run is rebuilt, so a four-picture row costs about a second on
+Kakrail the first time and paints only after.  `_PreviewPanel.show(view,
 zoom, traffic, strips)` is the whole vocabulary of a picture:
 `draw_traffic` (a `DhakaSimPanel` flag, new: off, the paint skips the
 vehicles, pedestrians, objects and signal bars), `show_strips` (the
@@ -891,18 +906,22 @@ which caps the zoom short of the arm framing whenever imagery is on.
 Nothing ticks; `request` is the only thing that rebuilds the upper run
 (`_dirty`), the pointer only re-shows or builds the lower one.
 
-**The lower run is built from a Parameters diff.** A "model" or "map"
-picture is a second `Processor`, built under `_overrides` for that one
-value (or that place), and the *difference* the build leaves in
-`Parameters` -- `GEOMETRY_MODE` and the median tables, `NODE_NAMES`,
-`NETWORK_DIR` -- is captured by snapshot before and after, put back, and
-kept on the panel as `overrides`.  `_PreviewPanel._with` swaps those and
-the panel's own step counter in around every paint, because `Parameters`
-is process-wide and the two runs must not read each other's settings.
-`along_pedestrian_mode` is excluded from the diff: every run toggles it
-every twenty steps, and a build catches it mid-swing.  A map of another
-place is not stepped at all (nothing drives on it), so a tile hover is a
-build and a paint.
+**Every other run is built from a Parameters diff.** A "model" or
+"map" picture is a second `Processor` (`_new_run`), built under
+`_overrides` for that one value (or that place), and the *difference*
+the build leaves in `Parameters` -- `GEOMETRY_MODE` and the median
+tables, `NODE_NAMES`, `NETWORK_DIR` -- is captured by snapshot before
+and after, put back, and kept on the panel as `overrides`.
+`_PreviewPanel._with` swaps those and the panel's own step counter in
+around every paint, because `Parameters` is process-wide and the runs
+must not read each other's settings.  `along_pedestrian_mode` is
+excluded from the diff: every run toggles it every twenty steps, and a
+build catches it mid-swing.  A map of another place is not stepped at
+all (nothing drives on it), so a tile hover is a build and a paint.
+The pictures are `_PreviewPanel`s *over* those runs and are re-made
+whenever the grid changes (a Tk widget cannot change parent), which is
+why `test_start_screen` compares `preview.panel.processor`, not the
+panel, to say "the same run".
 
 **It is the run screen's own panel, not a stored picture.**
 `_PreviewPanel` subclasses `DhakaSimPanel` (which grew `processor=` and
@@ -940,6 +959,14 @@ pedestrians and blockage draws came from clock-seeded generators.  Start
 the same promise as `--seed`.  The headless path is untouched (hash_run
 clean after the change).
 
+**The map's caption names the surroundings.** `input/<network>/about.txt`
+is one sentence (comment lines skipped) read by `_place_about`, shown
+under the junction's map in place of the generic sentence: the extracts
+hold roads only, so what stands around a junction -- Dhaka University and
+BUET at Palashi -- has to be written down.  All thirteen shipped and
+imported networks have one; a new import without one gets the generic
+sentence.
+
 **Where it sits: a column the ladder budgets width for, filled from top
 to bottom.** The owner wanted no Preview button: the picture beside the
 list, as a game's menu has it.  So the pane is a fixed-width frame in
@@ -950,7 +977,29 @@ columns stand beside it and whose height fits, trying the junction tiles
 two abreast (`_tiles`) as a second go because the tiles are what make
 the left column wide; failing that, one column of settings (stacked)
 beside the pane; failing that, the densest form stacked and scrolling
-beside the widest pane the window leaves.  Whatever width the chosen
+beside the widest pane the window leaves.  **Density outside, pane
+inside since 12 Oct 2026**: a roomier form beats a wider picture column
+(the owner's "a lot of unused space, the font sizes could be bigger"),
+so this laptop went from the captionless rung beside 460 px to `cosy`.
+**The pane is a third of the window** (`PANE_SHARE`, the owner's
+"one-third of the column space", later the same day): the search tries
+`width // 3` first and the narrower `PANE_WIDTHS` only when no rung
+stands beside the third.  What made the third affordable on this laptop
+was width taken *out of the boxes*: the junction box is the tiles alone
+(`_wide_row`, no name column beside seven rows of tiles -- 180 px),
+Time of day moved under Run, the widest row ("End time & traffic", an
+entry beside a five-cell strip) became two rows, the signal cells say
+"Multi-obj. v1" (`SIGNAL_LABELS`; the values are unchanged), the
+playback strip ends in "Max", and cosy's name column is 150.  With all
+thirteen networks the launch is cosy, tiles two abreast, 663 of 664 px
+tall beside a 512 px pane -- the last 39 px of height came out of cosy's
+row, tile and band paddings, never its type.  A candidate's height is judged against the canvas *its
+own* header and footer would leave (`room`, from `_measure`'s fourth
+value, the footer's measured height): judged against the current rung's
+canvas, the launch rung's tall header hid 38 px from every roomier rung,
+and a rung that only just fits was chosen and then unchosen as its own
+header shrank the canvas.  The canvas's own `<Configure>` re-fits when
+its height moved past what the last search saw, for the same reason.  Whatever width the chosen
 settings leave over goes to the pane (`spare`, up to `PANE_MAX`): the
 two pictures stack in it at its full width, so a wider column is simply
 a bigger picture.  The pane fills the body's height and the holders
@@ -961,9 +1010,12 @@ when the chosen *width* changes.  `_measure` builds each (level, tiles)
 once and caches the column widths and both heights, keyed on the trimmed
 rows and the network count, because a build is the expensive half.
 Measured at 96 DPI with the shipped networks: 1080p lands on compact,
-tiles two abreast, beside 460 px; 1536 px on minimal beside 400 px;
-1280 px on one scrolling column beside 460 px -- the one width where the
-form may scroll, and `test_every_monitor_shows_the_whole_form` says so.
+tiles two abreast, beside 456 px; 1600 and 1536 px on cosy beside 332
+and 268 px; 1366 on minimal beside 269 px; 1280 px on one scrolling
+column beside 460 px -- the one width where the form may scroll, and
+`test_every_monitor_shows_the_whole_form` says so.  With all thirteen
+networks this laptop (1536x793) is cosy beside 295 px, 655 of 664 px
+used.
 Two traps paid for: the canvas's height lags the panel's on a maximise,
 so the first search judged against the old height -- `_recheck_fit`
 looks again after idle and searches once more if the height moved; and
@@ -1517,12 +1569,26 @@ draws sixty concentric filled ovals from the outside in, the outermost one
 the ground colour itself so the bloom has no edge to give it away. A dozen
 steps shows rings at this contrast; sixty does not.
 
-**Glass here is two hairlines, not transparency.** `_glass` places a
-one-pixel highlight along a surface's top edge and a shadow along its bottom,
-which is what translucency actually looks like and is all Tk can do. It uses
-`place`, so it can be applied to a finished widget without disturbing the
-geometry manager its real children use — that is the whole reason it is a
-function and not a widget. Every gloss colour comes from `_mix`, the
+**Glass here is hairlines and corners, not transparency.** `_glass` places
+a highlight along a surface's top edge -- three lines fading into the
+surface since 12 Oct 2026, the nearest a widget without alpha gets to a
+frosted edge -- and a shadow along its bottom, which is what translucency
+actually looks like and is all Tk can do. `_round_corners` (same date,
+the owner's "Apple Glass UI") rounds a rectangular widget's corners at
+no layout cost: four placed canvases on the corners paint the colour
+behind the widget outside a quarter circle and the edge line along it,
+so a column the density search has measured to the pixel is rounded
+without being measured again; the top corners take the first band's
+colour.  Both use `place`, so they can be applied to a finished widget
+without disturbing the geometry manager its real children use — that is
+the whole reason they are functions and not widgets.  **The row icons**
+(`_Icon`, 12 Oct 2026) are line glyphs drawn on a small canvas, one per
+setting key, scaled with the rung's label size: drawn rather than taken
+from a glyph font because the icon fonts Windows ships are not on every
+machine and Tk draws emoji without colour where it draws them at all.
+They sit inside the label column, so they cost no width where the
+longest name already sets it -- except at minimal, whose cell padding
+came down a pixel to pay for them at 1366. Every gloss colour comes from `_mix`, the
 surface's own colour lifted towards white, so a control that changes colour
 (selected, hovered) keeps its highlight in step without a second table of
 colours to maintain.
@@ -1531,11 +1597,30 @@ colours to maintain.
 in `faint` (`#6E6662`) on `panel` (`#232120`) — about 2.4:1, under any
 threshold worth naming. `muted` and `faint` both moved a long way up and the
 captions moved from one to the other. Section titles are `accent_text`, a
-lighter tint of the same green as Start.
+lighter tint of the same blue as Start (blue since 11 Oct 2026, on the
+owner's "blueish, not greenish"; the greys cooled with it, and the
+report's `:root` block was changed in step).
 
-**Height is not a budget any more, it is a search.** `_DENSITIES` holds four
-ways to draw the same seventeen settings and `_fit_to_window` walks them from
-the roomiest, stopping at the first one whose form fits inside the canvas.
+**Height is not a budget any more, it is a search.** `_DENSITIES` holds five
+ways to draw the same settings and `_fit_to_window` walks them from the
+roomiest, stopping at the first one whose form fits inside the canvas.
+The fifth, `cosy` (12 Oct 2026), sits between dense and minimal: captions
+off like minimal, type as large as compact.  Dense is 814 px tall even
+with the columns balanced, because its captions wrap to three lines at
+the larger type, while minimal used 472 of this laptop's 688 and left a
+third of the window blank.  **The columns balance themselves, exactly**: the first build at a
+rung draws each band after the junction tiles into the shorter column
+(`_place`), measures what every band cost (`_band_heights`, from the
+column heights noted before each band), works out the split that makes
+the taller column shortest (`_best_split`, all sixteen) and, when the
+greedy split was not it, draws once more; the split is kept per rung in
+`_plans`.  Greedy alone put Display on a column already level with the
+other and left compact 910 px tall at 1080p where 771 was possible --
+Run always stood under the tiles and left the right column ending a
+third of the way up.  A frame
+whose children were all destroyed keeps requesting its old size, so
+`_build_form` resets each column to 1x1 before rebuilding, or the column
+that was the taller stays "taller" into the next build.
 Nothing asks how big the monitor is: a maximised window is the desktop less
 its title bar and its taskbar, and the DPI setting, the taskbar's edge and
 its auto-hiding all move that number. The check is
@@ -1544,25 +1629,33 @@ its auto-hiding all move that number. The check is
 The preview pane (above) is a fixed column beside the scroller that the
 search budgets width for; it never adds height. See its own section.
 
-Measured at 96 DPI, the rungs are 812 / 751 / 681 / 421 pixels of settings
-against viewports of 816 (1080p), 644 (1536x864), 535 (720p). So a 1080p
-screen gets `roomy`, this machine's own desktop gets `dense`, and 720p gets
-`minimal`. Roomy sits four pixels under its budget, and that is deliberate:
+Measured at 96 DPI before the columns balanced themselves, the rungs
+were 812 / 751 / 681 / 421 pixels of settings against viewports of 816
+(1080p), 644 (1536x864), 535 (720p); balanced and with the larger type
+(12 Oct 2026) they are 788 / 814 / 564 / 472 at compact / dense / cosy
+/ minimal with the eight shipped networks, so 1080p gets `compact`, this
+machine's desktop `cosy`, and 720p `minimal`. Roomy sits four pixels under its budget, and that is deliberate:
 the signal-timing line (27 Aug) had to come out of roomy's paddings
 (`row_pad` 6 → 4, `pad` bottom 22 → 12, header 102 → 96) because a full
 captioned row pushed 1080p off the top rung, and packing the timer beside
 the mode strip instead widened the column enough to stack the form at
 1280 px. Anything else added to the form must pay for itself the same way.
-The side-friction switch (28 Aug) paid by not being a row: it shares the old
-Pedestrians row (now titled "Side friction", two Off/On strips side by side,
-labelled `peds` / `parked`), which costs zero height — and both of its first
-two drafts failed the suite before fitting: labels one word longer
-(`crossing`, `parked / standing`) widened the right column enough to stack
-the form at 1280 px, and a caption one wrapped line longer than the old
-row's pushed roomy to 828 against its 816. Short labels and a one-line
-caption are load-bearing, not style. The row is trimmed like its
-neighbours: `_trimmed_rows` is a **three**-tuple (time, pedestrians, side
-friction), hidden where defaults.txt pins `ObjectMode` (miami, riyadh).
+The side-friction switch (28 Aug) first paid by not being a row: it shared
+the Pedestrians row as two Off/On strips side by side, and the owner read
+the pair as one overlapping control (11 Oct 2026). They are **two rows**
+now, "Crossing pedestrians" and "Parked vehicles", and the row they cost
+was paid for by the **Scale row leaving the form**: a pixels-per-metre
+drawing resolution the picture is zoomed to fit anyway meant nothing to a
+reader, so `PixelPerMeter` is a defaults.txt and `--set` parameter only
+(`fields["ppm"]` is still applied). Frame delay became **Playback speed**,
+a worded strip (`SPEED_CHOICES`: Step/Slow/Normal/Fast/Fastest over the
+same milliseconds); it was six numbered cells plus a live "50 ms" unit at
+first, which widened the right column 15 px past what two columns can
+have beside the pane at 1366 -- five words and no unit fit. Short labels
+and a one-line caption are load-bearing, not style. The rows are trimmed
+like their neighbours: `_trimmed_rows` is a **three**-tuple (time,
+pedestrians, side friction), hidden where defaults.txt pins `ObjectMode`
+(miami, riyadh).
 
 **`minimal` drops the captions, and it has to.** 720p leaves about 1070
 pixels of settings across two columns and the roomiest layout wants 1570.
