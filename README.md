@@ -105,42 +105,47 @@ system status*, *recognition rather than recall*, *error prevention* and
   at the same zoom, and tilts into the perspective view; switching back
   tilts up and lands the plan view on the same point. Zooming, resetting,
   hiding the map and pausing each say what they did.
-- **Two pictures beside the settings (7, 10 and 11 Oct 2026).** The start
-  screen shows the setting under the pointer the way a game's graphics
-  menu does: two stills, one above the other, in a column beside the
-  settings -- the setting as the form has it, and the alternative --
-  drawn by the run screen's own panel over the same imagery, roads, stop
-  lines and vehicles. Nothing plays: a picture is drawn once and redrawn
-  only when a setting, the pointer or the window changes. On the junction
-  rows the pictures are maps: the chosen place's roads over its imagery
-  with nothing driving on them, and under it the same for the tile under
-  the pointer, else the main junction close up. Rest the pointer on **3D
-  view** and the lower picture is the same run from the low camera; on
-  **Trace replay** it is the same roads with the last recorded run's
-  vehicles, a few dozen frames in (or a sentence, when trace.txt holds a
-  run of another place); on **Real geometry**, **Side friction**,
-  **Signal control** or the **traffic** strip it is a second seeded run
-  of the same junction, forty steps in, built with that one setting the
-  other way -- the roundabout gone, the kerbs clear, the signal bars
-  under the other scheduler, three times the arrivals; on **Strip width**
-  and **Footpath strip width** both pictures close in on an arm of the
-  junction with the strip grid drawn on the carriageway, so a 0.25 m
-  strip and a 1.0 m one are visibly different things; hover a particular
-  cell and the lower picture shows that value. Headers name what each
-  picture is and which side of the comparison it is, a line under them
-  counts what is in them (junctions, links and road length for a map;
-  vehicles, crossing pedestrians and parked objects for a run), and a
-  sentence says what the picture shows for the setting. Settings with no
-  look of their own (end time, seed) say so in the lower slot. Both
-  pictures take the run screen's mouse controls. The pictures' column is
-  always there, outside the scroller, filling the window's height, and
-  the settings are laid out around it: the roomiest density whose two
-  columns stand beside the widest column (the junction tiles go two
-  abreast to help), else a narrower column, else one column of settings
-  beside the pictures, scrolling if it must; whatever width the settings
-  leave over goes to the pictures. Nothing the preview runs reaches the
-  run: a seeded run started after previewing is byte for byte the run a
-  fresh start screen gives (`test_start_screen` pins it).
+- **One picture per choice beside the settings (7, 10 and 11 Oct 2026).**
+  The start screen shows the setting under the pointer the way a game's
+  graphics menu does, as stills in a column beside the settings, drawn by
+  the run screen's own panel over the same imagery, roads, stop lines and
+  vehicles. A row with n choices shows n pictures in a grid -- four for
+  Signal control, three for 3D view and the strip widths, five for the
+  traffic strip, two for each switch -- one per choice, each with a short
+  line saying what that choice is and, where the traffic differs, how
+  many vehicles are on the road; the choice the form has is marked "as
+  set". Each picture is a seeded run forty steps in: the form's own run
+  for the value the form has, a second run built with that one value for
+  the others (the roundabout gone, the kerbs clear, the signal bars under
+  the other scheduler, three times the arrivals); the 3D view row draws
+  the form's run from each camera; the strip rows close in on an arm of
+  the junction with the strip grid drawn on the carriageway, so a 0.25 m
+  strip and a 1.0 m one are visibly different things; Trace replay shows
+  the recording's vehicles a few dozen frames in, or a sentence when
+  trace.txt holds a run of another place. The junction rows show one
+  picture, a map of the chosen place -- its roads over its imagery with
+  nothing driving on them -- and the tile under the pointer replaces it
+  while the pointer is there, with junctions, links and kilometres of
+  road counted under it. Settings with no choices (end time, seed) show
+  the form's run and say so. Nothing plays: a picture is drawn once and
+  redrawn only when a setting, the pointer or the window changes, and a
+  row's pictures are built one per turn of the event loop so the form
+  stays live. Every picture takes the run screen's mouse controls. The
+  pictures' column is always there, outside the scroller, filling the
+  window's height, and the settings are laid out around it: the roomiest
+  density whose two columns stand beside a picture column (the junction
+  tiles go two abreast to help; a roomier form beats a wider column, so
+  the pictures narrow to 260 px before the type shrinks), else one column
+  of settings beside the pictures, scrolling if it must; whatever width
+  the settings leave over goes to the pictures, which take a third of
+  the window wherever a rung fits beside it. The junction box holds the
+  tiles alone, Time of day sits under Run, the sections split themselves
+  across the two columns as evenly as their measured heights allow,
+  every row carries a drawn icon, and the columns and the picture pane
+  are rounded, lit along their top edge, in the blue palette of 11 Oct
+  2026. Nothing the preview runs
+  reaches the run: a seeded run started after previewing is byte for byte
+  the run a fresh start screen gives (`test_start_screen` pins it).
 - **A GUI seed now pins the whole run.** Until 7 Oct 2026 the seed typed on
   the start screen pinned the main generator only; the object, pedestrian
   and blockage draws, and the pedestrian arrival generators built at
@@ -188,7 +193,9 @@ python run_dhakasim.py --headless --seed 4 --set StripWidth=2.5 --set CF_model=2
 ```
 
 In the GUI the option form lets you change the seed, end time, speed and road
-geometry before starting. The **Side friction** row carries two switches:
+geometry before starting. **Crossing pedestrians** and **Parked vehicles**
+are two rows (one row with two switches until 11 Oct 2026, which read as one
+overlapping control):
 crossing pedestrians, and the parked cars, rickshaws and CNGs with standing
 pedestrians that block the kerbside (`ObjectMode`). Both follow the network's
 `defaults.txt` — Miami and Riyadh pin them off and drop the row entirely:
@@ -887,7 +894,7 @@ touch:
 | `MaximumSpeed` | network speed limit in **km/h** (shipped: 100) |
 | `DemandType` | 0 low, 1 medium, 2 high — used by `run_sim.py` |
 | `LowRate`, `MediumRate`, `HighRate` | vehicles/hour for each `DemandType` |
-| `ObjectMode` | `On` generates parked cars/rickshaws/CNGs and standing pedestrians. On the start screen as the **Side friction — parked** switch |
+| `ObjectMode` | `On` generates parked cars/rickshaws/CNGs and standing pedestrians. On the start screen as the **Parked vehicles** switch |
 | `AcrossPedestrianMode` | `On` generates road-crossing pedestrians |
 | `AlongPedestrianMode` | `On` generates pedestrians walking along the road |
 | `AcrossPedestrianPerHour`, `AlongPedestrianPerHour` | pedestrian arrival rates |

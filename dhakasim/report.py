@@ -684,9 +684,9 @@ def write_html_report(params: dict, per_type: dict, totals, visual=None,
      the same application: warm charcoal ground, panel cards, and the CNG
      green as the accent.  The animations keep their own daylight inside
      their frames -- they are the picture, not the chrome. */
-  :root {{ --ink:#F4F1ED; --muted:#C3BBB4; --faint:#948B84; --line:#443F3C;
-          --accent:#5BD986; --accent-strong:#1EA046;
-          --bg:#131211; --card:#242120; --band:#302C29; }}
+  :root {{ --ink:#F1F4F8; --muted:#BAC5D1; --faint:#8C99A8; --line:#3A4450;
+          --accent:#7DBDFF; --accent-strong:#2F80D6;
+          --bg:#0F1317; --card:#1C2229; --band:#262E37; }}
   * {{ box-sizing:border-box; }}
   body {{ font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
          color:var(--ink); background:var(--bg); margin:0; padding:32px; }}

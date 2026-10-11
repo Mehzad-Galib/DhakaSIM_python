@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dhakasim.gui import (SETTING_INFO, ROW_KEYS, PREVIEW_NOTES,  # noqa: E402
                           OptionPanel, preview_note, setting_message,
+                          PREVIEW_CHOICES, preview_cell_note,
                           setting_problem)
 
 
@@ -58,6 +59,17 @@ class SettingMessageTest(unittest.TestCase):
 
 class PreviewNoteTest(unittest.TestCase):
     """The caption under the start screen's preview picture."""
+
+    def test_every_choice_of_a_strip_has_a_picture_and_a_line(self):
+        self.assertEqual(PREVIEW_CHOICES["signal"],
+                         tuple(OptionPanel.SIGNAL_CHOICES))
+        self.assertEqual(PREVIEW_CHOICES["render3d"],
+                         tuple(OptionPanel.VIEW_CHOICES))
+        for key, choices in PREVIEW_CHOICES.items():
+            for choice in choices:
+                self.assertTrue(preview_cell_note(key, choice, "20"),
+                                (key, choice))
+        self.assertIn("20 s", preview_cell_note("signal", "Fixed time", "20"))
 
     def test_every_setting_has_a_note(self):
         for key in SETTING_INFO:
