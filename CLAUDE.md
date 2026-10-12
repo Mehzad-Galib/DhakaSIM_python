@@ -847,7 +847,7 @@ all of this, which is what `junction_shots.py` does.
 **The traffic level** is `Parameters.DEMAND_SCALE`, applied where a stream
 draws its next headway (`_generate_new_vehicles`): `jdiv(3600.0, demand *
 scale)`, which at 1.0 is the same float division and keeps the baseline
-byte for byte. The legend's slider and the start screen's strip both set
+byte for byte. The toolbar's slider and the start screen's strip both set
 it; the statistics still report the survey's demand. Live traffic from a
 map provider was asked for and declined on evidence: no provider gives
 density without a per-user key, and the import's demand is synthetic.
@@ -1385,7 +1385,7 @@ costs no height, and the density ladder has none to give). Five facts:
   timeouts), each tile failure degrades to a dark square, and
   `preview_view` computes the projection without any tiles at all, so
   an outage never blocks the pan or the picker.
-- **A missing basemap is fetched from the run screen.** The legend's
+- **A missing basemap is fetched from the run screen.** The toolbar's
   imagery controls live in `_basemap_box`, filled by
   `_fill_basemap_box`: the checkbox when imagery loaded, else — for a
   network `basemap.read_centre` can place — a **Fetch background map**
@@ -1546,9 +1546,36 @@ plain re-pack appends it below every section built later — collapse
 Vehicles, expand it, and it came back underneath Run settings. The Side
 friction section (its own header since 28 Aug, one hue per type — vivid
 yellow / sky blue / lavender / pale green, the old single yellow family was
-indistinguishable) is built only when `Parameters.OBJECT_MODE` is on, and
-the report drops its side-friction key under the same test: a key for
-objects the run never generated is a lie on Miami and Riyadh.
+indistinguishable; two abreast since 12 Oct 2026, because four rows of
+key were two rows of the height the run settings needed) is built only
+when `Parameters.OBJECT_MODE` is on, and the report drops its
+side-friction key under the same test: a key for objects the run never
+generated is a lie on Miami and Riyadh.
+
+**The legend's type is a ladder, measured against the window** (12 Oct
+2026: the owner could not see the run settings without collapsing the
+vehicle counts, and asked for larger type while at it).  `_fit_legend`
+builds the panel at each of `LEGEND_SIZES` (12 down to 8 pt), largest
+first, and keeps the first whose `winfo_reqheight` stands in the
+container less the toolbar and the bottom bars; on a window shorter than
+even 8 pt it is built again *as the child of* a scrolling canvas
+(`_scrolled`) -- a canvas window item whose widget is a child of an
+ancestor stacks under the canvas and never shows, which is why the
+legend is rebuilt there rather than re-parented.  The container's
+`<Configure>` refits after idle when the height changes; `_teardown`
+unbinds it.  What made the larger type affordable: the zoom and traffic
+sliders and the map toggle left the legend for the toolbar
+(`_build_view_controls`, beside the view button, where the owner asked
+for them), the pixels-per-metre row went (not a setting the run was set
+up with since the Scale row left the form), and the section gap is 8.
+This laptop (1536x793) gets 10 pt, 725 of 737 px; 1366x688 and 1280x640
+get 8 pt; 1280x540 scrolls.  Every settings row carries its start-screen
+glyph (`LEGEND_ICONS`; `_Icon` grew `ppm` and `settings`), and the
+Frame-delay spinner is the start screen's `_SpeedSlider` under a
+"Playback speed" label (`DELAY_LABEL`), full width on its own line
+because the words under the ticks need it.  The sentence under the
+Background map checkbox is gone (owner); the toast on a toggle says the
+zoom snaps.  The fetch button's note is a toast too.
 
 **Start is in a footer outside the scroller.** An earlier version put it at the
 top of the form for the same reason — the settings were taller than a short
@@ -1648,11 +1675,34 @@ was paid for by the **Scale row leaving the form**: a pixels-per-metre
 drawing resolution the picture is zoomed to fit anyway meant nothing to a
 reader, so `PixelPerMeter` is a defaults.txt and `--set` parameter only
 (`fields["ppm"]` is still applied). Frame delay became **Playback speed**,
-a worded strip (`SPEED_CHOICES`: Step/Slow/Normal/Fast/Fastest over the
+a worded strip (`SPEED_CHOICES`: Step/Slow/Normal/Fast/Max over the
 same milliseconds); it was six numbered cells plus a live "50 ms" unit at
 first, which widened the right column 15 px past what two columns can
 have beside the pane at 1366 -- five words and no unit fit. Short labels
-and a one-line caption are load-bearing, not style. The rows are trimmed
+and a one-line caption are load-bearing, not style.  **The strip is a
+slider since 12 Oct 2026** (owner: "make it a slider with the 5 values
+... like volume slider"): `_SpeedSlider`, a canvas with five detents,
+the words under the ticks, the stretch up to the handle lit, and the
+milliseconds in a readout beside it.  Like `_Segmented` it renders from
+its `StringVar` and gives its trace back on `<Destroy>`; unlike it, a
+value off the ladder is *not* snapped -- the handle parks at the nearest
+detent by ratio (250 is a Slow) and the variable is written only when
+the handle moves, which is what keeps `test_the_run_screen_shows_the_
+frame_delay_the_start_screen_set` true.  Its length grows to keep
+neighbouring words apart (at 130 px they overlapped), and the whole row
+is shorter than the strip was: cosy's tray went from 663 to 645 px.
+The preview for that row is no picture at all but a **sheet** of the
+five speeds and their milliseconds (`_spec_for` returns `("sheet",
+rows, value)`, drawn by `_slot_sheet`, never queued for a build): a
+pace changes nothing on the road.  Same day: **Randomise** draws a
+fresh seed on every click (`_randomise_seed`, `random.SystemRandom`,
+never `Parameters.random`) -- it wrote -1, so a second click changed
+nothing and the box read -1 whatever was pressed -- and is a `small`
+`_button` (unit type, a third of the padding); and every "Java parity"
+in the form's own words became what it means to a reader: Off is the
+plain roads of the original Java program, no medians, a roundabout's
+arms meeting at a point (`SETTING_INFO`, `PREVIEW_NOTES`,
+`PREVIEW_CELL_NOTES` and the row caption). The rows are trimmed
 like their neighbours: `_trimmed_rows` is a **three**-tuple (time,
 pedestrians, side friction), hidden where defaults.txt pins `ObjectMode`
 (miami, riyadh).

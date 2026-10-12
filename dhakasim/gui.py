@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import re
 import threading
 import time
@@ -22,6 +23,7 @@ import shutil
 import tempfile
 import webbrowser
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, messagebox
 
 from .constants import Constants
@@ -1311,7 +1313,8 @@ class _Icon(tk.Canvas):
 
     KINDS = ("network", "time", "end_time", "max_speed", "seed", "accident",
              "trace", "signal", "geometry", "pedestrians", "friction",
-             "strip", "footpath", "render3d", "speed", "traffic")
+             "strip", "footpath", "render3d", "speed", "traffic", "ppm",
+             "settings")
 
     def __init__(self, parent, kind, size, colour=None, background=None):
         super().__init__(parent, width=size, height=size,
@@ -1418,6 +1421,15 @@ class _Icon(tk.Canvas):
             for x in (2, 8, 14):
                 self.create_rectangle(x * u, 7 * u, (x + 4.5) * u, 13 * u,
                                       fill=c, outline="")
+        elif kind == "ppm":            # a ruler
+            self.create_rectangle(2.5 * u, 7 * u, 17.5 * u, 13 * u,
+                                  fill=back, **edge)
+            for x in (6, 9.5, 13):
+                L(x, 7, x, 10)
+        elif kind == "settings":       # three sliders
+            for y, x in ((5, 7), (10, 13), (15, 9)):
+                L(2.5, y, 17.5, y)
+                O(x - 1.8, y - 1.8, x + 1.8, y + 1.8, filled=True)
 
 
 class _ToolButton(tk.Label):
@@ -1680,6 +1692,147 @@ class _Segmented(tk.Frame):
             self._command()
 
 
+class _SpeedSlider(tk.Frame):
+    """A slider over the playback speeds, the way a volume control is one.
+
+    Five detents, one per ``SPEED_CHOICES`` entry, slowest on the left;
+    the words under the ticks and the milliseconds behind the handle in
+    the readout beside it.  The owner asked for this in place of the
+    five-cell strip (12 Oct 2026): a pace is one quantity on a scale,
+    not five unrelated choices.
+
+    Rendered *from* its ``StringVar`` like ``_Segmented``, and giving its
+    trace back on ``<Destroy>`` for the same reason.  A value off the
+    ladder -- 250 ms from a defaults.txt, say -- parks the handle at the
+    nearest detent and the readout shows its own milliseconds; the
+    variable is written only when the handle is moved, so a run keeps
+    what it was given until the reader changes it.
+    """
+
+    def __init__(self, parent, variable, font=("Segoe UI Semibold", 11),
+                 small=("Segoe UI", 9), length=130, words=True,
+                 background=None):
+        bg = background or _UI["panel"]
+        super().__init__(parent, background=bg)
+        self._var = variable
+        self._choices = SPEED_CHOICES
+        self._words = words
+        self._length = length
+        self._small = small
+        self._handle = max(5, int(font[1] * 0.55))
+        # Room either side of the trough for the end words, which are
+        # centred on the end ticks, else for the handle alone.
+        if words:
+            widest = max(tkfont.Font(font=small).measure(label)
+                         for _v, label in self._choices)
+            self._pad = widest // 2 + 3
+            # Neighbouring words must not touch: the ticks are at least
+            # the widest word and a gap apart, whatever length was asked.
+            self._length = length = max(
+                length, (len(self._choices) - 1) * (widest + 8))
+        else:
+            self._pad = self._handle + 2
+        self._trough_y = self._handle + 3
+        word_h = (int(small[1] * 1.6) + 4) if words else 0
+        height = self._trough_y + self._handle + 2 + word_h
+        self._canvas = tk.Canvas(self, width=length + 2 * self._pad,
+                                 height=height, background=bg,
+                                 highlightthickness=0, bd=0, cursor="hand2",
+                                 takefocus=True)
+        self._canvas.pack(side="left")
+        self._readout = tk.Label(self, font=font, background=bg,
+                                 foreground=_UI["text"], anchor="w")
+        self._readout.pack(side="left", padx=(8, 0))
+        for sequence in ("<Button-1>", "<B1-Motion>"):
+            self._canvas.bind(sequence, self._drag)
+        self._canvas.bind("<Left>", lambda _e: self._step(-1))
+        self._canvas.bind("<Right>", lambda _e: self._step(1))
+        self._canvas.bind("<FocusIn>", lambda _e: self._render())
+        self._canvas.bind("<FocusOut>", lambda _e: self._render())
+        self._render()
+        self._trace = variable.trace_add("write", lambda *_a: self._render())
+        self.bind("<Destroy>", self._forget)
+
+    def _forget(self, event):
+        if event.widget is self and self._trace is not None:
+            self._var.trace_remove("write", self._trace)
+            self._trace = None
+
+    def _x(self, index):
+        return self._pad + index * self._length / (len(self._choices) - 1)
+
+    def nearest(self):
+        """(the detent nearest the variable's value, whether it is on it)."""
+        try:
+            value = float(self._var.get())
+        except (TypeError, ValueError):
+            return len(self._choices) // 2, False
+        value = max(value, 0.5)
+        # Nearest by ratio: the detents are 1-20-50-100-500 ms, and 250
+        # is a Slow, not a Step.
+        best = min(range(len(self._choices)),
+                   key=lambda i: abs(math.log(value)
+                                     - math.log(float(self._choices[i][0]))))
+        return best, _Segmented._same(self._choices[best][0], value)
+
+    def _drag(self, event):
+        n = len(self._choices)
+        index = int(round((event.x - self._pad) / self._length * (n - 1)))
+        self._choose(max(0, min(n - 1, index)))
+        self._canvas.focus_set()
+
+    def _step(self, delta):
+        index, _on = self.nearest()
+        self._choose(max(0, min(len(self._choices) - 1, index + delta)))
+
+    def _choose(self, index):
+        value = self._choices[index][0]
+        if not _Segmented._same(value, self._var.get()):
+            self._var.set(value)
+
+    def _render(self):
+        canvas = self._canvas
+        try:
+            canvas.delete("all")
+        except tk.TclError:
+            return
+        index, on = self.nearest()
+        n, y, r = len(self._choices), self._trough_y, self._handle
+        x0, x1, xh = self._x(0), self._x(n - 1), self._x(index)
+        try:
+            focused = canvas.focus_get() is canvas
+        except (tk.TclError, KeyError):
+            focused = False
+        lit = _UI["accent_hover"] if focused else _UI["accent"]
+        canvas.create_line(x0, y, x1, y, fill=_UI["seg_off"], width=4,
+                           capstyle="round")
+        # The filled stretch up to the handle, as a volume slider shows
+        # how much of the scale is on.
+        canvas.create_line(x0, y, xh, y, fill=lit, width=4, capstyle="round")
+        for k in range(n):
+            x = self._x(k)
+            canvas.create_oval(x - 2, y - 2, x + 2, y + 2, outline="",
+                               fill=_UI["edge"] if x > xh
+                               else _mix(lit, "#FFFFFF", 0.4))
+            if self._words:
+                canvas.create_text(x, y + r + 3, text=self._choices[k][1],
+                                   anchor="n", font=self._small,
+                                   fill=_UI["accent_text"] if k == index
+                                   else _UI["muted"])
+        canvas.create_oval(xh - r, y - r, xh + r, y + r, fill=lit,
+                           outline=_mix(lit, "#FFFFFF", 0.35), width=1)
+        shown = self._var.get()
+        try:
+            ms = f"{int(float(shown))} ms"
+        except (TypeError, ValueError):
+            ms = str(shown)
+        if self._words:
+            text = ms
+        else:
+            text = f"{self._choices[index][1]} \u00b7 {ms}" if on else ms
+        self._readout.configure(text=text)
+
+
 #: Four ways to draw the same seventeen settings, roomiest first.
 #:
 #: The screen picks one by *measuring*, not by asking how big the monitor is:
@@ -1796,8 +1949,8 @@ SETTING_INFO = {
     "signal": ("Signal control", "", "how the junction's greens are decided"),
     "signal_green": ("Green per approach", "s", "how long each leg stays "
                      "green under fixed time"),
-    "geometry": ("Real geometry", "", "surveyed medians and roundabouts; Off "
-                 "is Java parity"),
+    "geometry": ("Real geometry", "", "the surveyed medians and roundabouts; "
+                 "Off is the plain roads of the Java original"),
     "pedestrians": ("Crossing pedestrians", "", "pedestrians crossing the "
                     "carriageway"),
     "friction": ("Parked vehicles", "", "parked cars, rickshaws and CNGs on "
@@ -1916,9 +2069,14 @@ PREVIEW_NOTES = {
               "lines show the state.",
     "signal_green": "Each approach stays green for {v} s before the next "
                     "takes over.",
-    "geometry": {"On": "Surveyed medians and roundabouts, drawn and "
-                       "driven.",
-                 "Off": "Java parity: no medians and no roundabout ring."},
+    "geometry": {"On": "Surveyed medians and roundabouts, drawn and driven: "
+                       "a divided road is two carriageways with a solid "
+                       "median, and a roundabout is a ring the traffic "
+                       "circulates on.",
+                 "Off": "Plain roads, as the original Java DhakaSim models "
+                        "them: no medians, and a roundabout's arms meet at "
+                        "a point.  Choose it to reproduce the Java program's "
+                        "results exactly."},
     "pedestrians": {"On": "Pedestrians cross the carriageway -- the black "
                           "dots on the road.",
                     "Off": "Nobody crosses the carriageway."},
@@ -1983,8 +2141,10 @@ PREVIEW_CELL_NOTES = {
                                      "vehicle counts alike",
                "Multi-objective v2": "Greens planned every cycle; the "
                                      "vehicle classes priced apart"},
-    "geometry": {"Off": "Java parity: no medians, no roundabout ring",
-                 "On": "Surveyed medians and roundabouts, drawn and driven"},
+    "geometry": {"Off": "Plain roads as the Java original models them: no "
+                        "medians, arms meeting at a point",
+                 "On": "Surveyed medians and roundabout ring, drawn and "
+                       "driven"},
     "pedestrians": {"Off": "Nobody crosses the carriageway",
                     "On": "Pedestrians cross the carriageway (the black dots)"},
     "friction": {"Off": "The kerbside strips are clear",
@@ -2646,6 +2806,12 @@ class _SettingsPreview:
         rows (a junction with bars to show), else "junction"."""
         if key == "network":
             return ("map", value)
+        if key == "speed":
+            # A pace changes nothing on the road, so a picture of the
+            # road would show nothing: the speeds and their milliseconds
+            # instead (owner, 12 Oct 2026).
+            return ("sheet", tuple((label, f"{v} ms")
+                                   for v, label in SPEED_CHOICES), value)
         strips = key in ("strip", "footpath")
         zoom = ("arm" if strips else "signal" if key in ("signal", "signal_green")
                 else "junction")
@@ -2705,6 +2871,8 @@ class _SettingsPreview:
                 self._describe_cell(cell, key, current)
                 if isinstance(spec, str):
                     self._slot_text(cell["holder"], spec)
+                elif spec[0] == "sheet":
+                    self._slot_sheet(cell["holder"], spec[1], spec[2])
                 else:
                     self._slot_text(cell["holder"], "Building…")
             # The form's own value first, so self.panel exists soonest.
@@ -2713,7 +2881,8 @@ class _SettingsPreview:
                                self.cells[i]["value"],
                                network if key == "network" else current))
             self._queue = [i for i in order
-                           if not isinstance(self.cells[i]["spec"], str)]
+                           if not isinstance(self.cells[i]["spec"], str)
+                           and self.cells[i]["spec"][0] != "sheet"]
             self._pump()
         self._say(key, current, hovered)
 
@@ -3039,6 +3208,38 @@ class _SettingsPreview:
                  justify="center", font=("Segoe UI", 9),
                  background=_UI["seg_off"], foreground=_UI["muted"]
                  ).place(relx=0.5, rely=0.5, anchor="center")
+
+    def _slot_sheet(self, holder, rows, current) -> None:
+        """A table in a picture's place: the playback speeds and the
+        milliseconds behind each, the form's own in the accent colour."""
+        for child in holder.winfo_children():
+            child.destroy()
+        bg = _UI["seg_off"]
+        sheet = tk.Frame(holder, background=bg)
+        sheet.place(relx=0.5, rely=0.5, anchor="center")
+        rows = list(rows)
+        if not any(_Segmented._same(ms.split()[0], current)
+                   for _label, ms in rows):
+            rows.append(("As set", f"{current} ms"))   # off the ladder
+        for r, (label, ms) in enumerate(rows):
+            chosen = _Segmented._same(ms.split()[0], current)
+            fg = _UI["accent_text"] if chosen else _UI["muted"]
+            tk.Label(sheet, text=label, font=("Segoe UI Semibold", 10),
+                     background=bg, foreground=fg, anchor="w").grid(
+                row=r, column=0, sticky="w", padx=(0, 14), pady=1)
+            tk.Label(sheet, text=ms, font=("Consolas", 10, "bold"),
+                     background=bg, foreground=fg, anchor="e").grid(
+                row=r, column=1, sticky="e", pady=1)
+            tk.Label(sheet, text="selected" if chosen else "",
+                     font=("Segoe UI", 9), background=bg,
+                     foreground=_UI["accent_text"], width=8, anchor="w").grid(
+                row=r, column=2, sticky="w", padx=(10, 0))
+        tk.Label(sheet, text="between frames; the results are the same at "
+                             "every speed",
+                 font=("Segoe UI", 9), background=bg, foreground=_UI["muted"],
+                 wraplength=max(120, holder.winfo_width() - 40),
+                 justify="center").grid(row=len(rows), column=0, columnspan=3,
+                                        pady=(8, 0))
 
     def _say(self, key, current, hovered) -> None:
         """The caption under the pictures: what the setting shows, for
@@ -3866,13 +4067,37 @@ class OptionPanel:
                           pad=level["cell_pad"][index],
                           wheel=self._bind_wheel, **kwargs)
 
-    def _button(self, parent, text, command, primary=False):
+    def _randomise_seed(self) -> None:
+        """A fresh seed in the box on every click.
+
+        It used to write -1 -- a seed drawn at Start and never shown --
+        so a second click changed nothing and the box read -1 whatever
+        had been pressed (owner, 12 Oct 2026).  A number in the box is a
+        run that can be repeated by typing it again, which -1 never was.
+        Drawn from the system's randomness, never from
+        ``Parameters.random``: that stream is the run's own.
+        """
+        draw = random.SystemRandom()
+        was = self.fields["seed"].get()
+        seed = str(draw.randrange(1, 100000))
+        while seed == was:
+            seed = str(draw.randrange(1, 100000))
+        self.fields["seed"].set(seed)
+
+    def _button(self, parent, text, command, primary=False, small=False):
+        """A push button; ``small`` is the size of a unit label, for a
+        button that sits beside an entry rather than in the footer."""
         level = self._d
+        pad = level["button_pad"]
+        if small:
+            pad = (max(6, pad[0] // 3), max(1, pad[1] // 4))
         button = tk.Label(
-            parent, text=text, font=("Segoe UI Semibold", level["button"]),
+            parent, text=text,
+            font=("Segoe UI Semibold", max(8, level["unit"] - 1) if small
+                  else level["button"]),
             background=_UI["accent"] if primary else _UI["seg_off"],
             foreground=_UI["on_accent"] if primary else _UI["text"],
-            padx=level["button_pad"][0], pady=level["button_pad"][1],
+            padx=pad[0], pady=pad[1],
             cursor="hand2", takefocus=True,
             highlightthickness=2, highlightbackground=_UI["band"],
             highlightcolor=_UI["accent_hover"])
@@ -4230,9 +4455,8 @@ class OptionPanel:
         holder = self._row("Random seed",
                            "The same number twice gives the same run twice.")
         self._entry(holder, self.fields["seed"])
-        self._button(holder, "Randomise",
-                     lambda: self.fields["seed"].set("-1")).pack(
-            side="left", padx=(10, 0))
+        self._button(holder, "Randomise", self._randomise_seed,
+                     small=True).pack(side="left", padx=(8, 0))
 
         holder = self._row("Accidents",
                            "Close encounters before one becomes an accident. "
@@ -4269,8 +4493,9 @@ class OptionPanel:
         self._unit(timing, "s green per approach")
 
         holder = self._row("Real geometry",
-                           "The surveyed layout: solid medians and real "
-                           "roundabouts. Off is Java parity.")
+                           "On drives the surveyed medians and roundabout "
+                           "ring. Off is the plain roads of the original "
+                           "Java program.")
         self._seg(holder, ["Off", "On"], self.geometry_var,
                   hover=lambda v: self._preview.peek("geometry", v)).pack(
             anchor="w")
@@ -4332,8 +4557,10 @@ class OptionPanel:
         # still a parameter: defaults.txt and --set PixelPerMeter.
         holder = self._row("Playback speed",
                            "Playback pace only; the results never change.")
-        self._seg(holder, list(SPEED_CHOICES),
-                  self.fields["speed"]).pack(anchor="w")
+        _SpeedSlider(holder, self.fields["speed"],
+                     font=("Segoe UI Semibold", level["cell"][1]),
+                     small=("Segoe UI", max(8, level["unit"] - 1)),
+                     length=130).pack(anchor="w")
 
         for index, column in enumerate(self._columns):
             self._rows[index] += 1
@@ -5636,6 +5863,13 @@ class DhakaSimFrame:
         self._view_button = None
         self._pause_button = None
         self._status = None
+        self._top_bar = None
+        self._bottom_bars = ()
+        self._legend = None
+        self._legend_room = None
+        self._legend_size = None
+        self._legend_job = None
+        self._basemap_box = None
         self.show_options()
 
     # Legend rows: label -> the vehicle type indices it covers.
@@ -5655,12 +5889,7 @@ class DhakaSimFrame:
 
     #: The one row of Run settings that is a control rather than a reading.
     #: Named so the renderer can pick it out without matching a bare string.
-    DELAY_LABEL = "Frame delay"
-
-    #: Delays the spinner steps through, in milliseconds.  Roughly 1-2-5 per
-    #: decade: playback speed is judged by eye, so equal ratios are the useful
-    #: steps rather than equal differences.
-    DELAY_CHOICES = (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
+    DELAY_LABEL = "Playback speed"
 
     @staticmethod
     def _run_settings():
@@ -5671,8 +5900,8 @@ class DhakaSimFrame:
         the setup form, so they should not drift if something later writes to
         the same fields, and the run's own step counter lives in there too.
 
-        The frame delay is the exception, and is rendered as a control rather
-        than as text: it only sets how long the picture pauses between frames,
+        The playback speed is the exception, and is rendered as a control
+        rather than as text: it only sets how long the picture pauses between frames,
         so it can be changed mid-run without making the run mean anything
         different.  Everything else here would.
 
@@ -5696,50 +5925,62 @@ class DhakaSimFrame:
             ("Max speed", f"{Parameters.maximum_speed * 3.6:.0f}", "km/h"),
             ("Strip width", f"{Parameters.strip_width:g}", "m"),
             ("Footpath strip", f"{Parameters.footpath_strip_width:g}", "m"),
-            ("Pixels per metre", f"{Parameters.pixel_per_meter:g}", ""),
+            # Pixels per metre is not here: it left the start screen on
+            # 11 Oct 2026 (a drawing resolution the picture is zoomed to
+            # fit anyway), so it is not a setting the run was set up with.
             ("Pedestrians", on_off(Parameters.across_pedestrian_mode), ""),
             ("Side friction", on_off(Parameters.OBJECT_MODE), ""),
             ("Real geometry", on_off(Parameters.GEOMETRY_MODE), ""),
             ("Trace replay", on_off(Parameters.TRACE_MODE), ""),
         ]
 
-    def _build_legend(self, parent):
-        """A collapsible panel: colour key plus a live count per type.
+    #: The legend's type sizes, largest first: the row size, with the
+    #: headings a point up and the units a point down.  The panel is
+    #: built at the largest size whose whole height stands beside the
+    #: picture (``_fit_legend``): the owner could not see the run
+    #: settings without collapsing the vehicle counts (12 Oct 2026), and
+    #: the panel does not scroll.
+    LEGEND_SIZES = (12, 11, 10, 9, 8)
 
-        Dressed in the start screen's palette (``_UI``), because the run view
-        and the form it came from are one application and should read as one.
-        Plain ``tk`` widgets throughout for the same reason the start screen
-        uses them: ttk takes its colours from the Windows theme and would
-        punch a light grey panel through the dark chrome.
+    #: The glyph beside each run setting and heading (``_Icon.KINDS``).
+    LEGEND_ICONS = {
+        "Vehicles on network": "traffic", "Side friction": "friction",
+        "Run settings": "settings",
+        "Time of day": "time", "End time": "end_time",
+        "Playback speed": "speed", "Random seed": "seed",
+        "Max speed": "max_speed", "Strip width": "strip",
+        "Footpath strip": "footpath", "Pixels per metre": "ppm",
+        "Pedestrians": "pedestrians", "Real geometry": "geometry",
+        "Trace replay": "trace",
+    }
+
+    def _dark_button(self, parent, text, command, width=None, size=10):
+        """A plain ``tk.Button`` in the panel's dress (ttk would take the
+        Windows theme's light grey)."""
+        button = tk.Button(
+            parent, text=text, command=command, cursor="hand2",
+            font=("Segoe UI Semibold", size), bd=0, relief="flat",
+            background=_UI["seg_off"], foreground=_UI["text"],
+            activebackground=_UI["seg_hover"],
+            activeforeground=_UI["text"],
+            highlightthickness=1, highlightbackground=_UI["edge"])
+        if width is not None:
+            button.configure(width=width)
+        return button
+
+    def _build_view_controls(self, bar) -> None:
+        """Zoom, traffic and the map toggle, in the toolbar beside the
+        view button (owner, 12 Oct 2026: "move the Zoom slider, traffic
+        density slider and background map toggle to the top of the
+        screen, beside Plan view").  They are about the picture and the
+        run as it plays, which is what the toolbar holds; the legend is
+        left to what the run is made of.
         """
-        bg = _UI["panel"]
-        legend = tk.Frame(parent, bg=bg, padx=10, pady=8,
-                          highlightthickness=1,
-                          highlightbackground=_UI["edge"])
-
-        def dark_button(parent_, text, command, width=None, size=10):
-            button = tk.Button(
-                parent_, text=text, command=command, cursor="hand2",
-                font=("Segoe UI Semibold", size), bd=0, relief="flat",
-                background=_UI["seg_off"], foreground=_UI["text"],
-                activebackground=_UI["seg_hover"],
-                activeforeground=_UI["text"],
-                highlightthickness=1, highlightbackground=_UI["edge"])
-            if width is not None:
-                button.configure(width=width)
-            return button
-
-        if Parameters.PLACE_NAME:
-            tk.Label(legend, text=Parameters.PLACE_NAME,
-                     font=("Segoe UI", 11, "bold"), bg=bg, fg=_UI["text"],
-                     anchor="w", justify="left", wraplength=170).pack(
-                         anchor="w", fill="x", pady=(0, 6))
-
-        zoom_row = tk.Frame(legend, bg=bg)
-        zoom_row.pack(anchor="w", fill="x", pady=(0, 8))
-        tk.Label(zoom_row, text="Zoom", font=("Segoe UI", 9), bg=bg,
+        bg = _UI["band"]
+        tk.Frame(bar, width=1, bg=_UI["edge"]).pack(side="left", fill="y",
+                                                    padx=(14, 12), pady=2)
+        tk.Label(bar, text="Zoom", font=("Segoe UI", 10), bg=bg,
                  fg=_UI["muted"]).pack(side="left", padx=(0, 6))
-
         # A slider, not +/- buttons: with imagery on, the zoom snaps to the
         # ladder of scales the picture can be drawn at exactly, and a fixed
         # button step smaller than the next rung snapped straight back --
@@ -5748,10 +5989,10 @@ class DhakaSimFrame:
         # logarithmic (see _slider_to_scale): zoom is a ratio, and a linear
         # slider crams every whole-network framing into its bottom few pixels.
         self._scale_slider = tk.Scale(
-            zoom_row, from_=0, to=100, orient="horizontal", showvalue=False,
+            bar, from_=0, to=100, orient="horizontal", showvalue=False,
             borderwidth=0, highlightthickness=0, sliderrelief="flat",
             sliderlength=18, width=10, length=110, background=_UI["seg_off"],
-            troughcolor=_UI["band"], activebackground=_UI["accent"],
+            troughcolor=_UI["panel"], activebackground=_UI["accent"],
             command=self._on_zoom_slider)
         self._scale_slider.pack(side="left", padx=(0, 6))
         # With imagery on, set_scale snaps to the picture's ladder and stops
@@ -5762,6 +6003,8 @@ class DhakaSimFrame:
             "<ButtonRelease-1>",
             lambda _e: self.panel is not None
             and self.sync_zoom_slider(self.panel.scale))
+        self._dark_button(bar, "Reset", self.reset_zoom, size=9).pack(
+            side="left", padx=(0, 14))
 
         # Traffic level, live (owner request, 6 Oct 2026: "increase traffic
         # density while the simulation is running").  A multiplier on every
@@ -5769,86 +6012,112 @@ class DhakaSimFrame:
         # headway, so a change takes hold on the next arrival of each stream
         # and the run never has to restart.  x1 is the surveyed (or
         # imported) demand; the same multiplier is set on the start screen.
-        traffic_row = tk.Frame(legend, bg=bg)
-        traffic_row.pack(anchor="w", fill="x", pady=(0, 8), after=zoom_row)
-        tk.Label(traffic_row, text="Traffic", font=("Segoe UI", 9), bg=bg,
+        tk.Label(bar, text="Traffic", font=("Segoe UI", 10), bg=bg,
                  fg=_UI["muted"]).pack(side="left", padx=(0, 6))
         self._traffic_slider = tk.Scale(
-            traffic_row, from_=25, to=300, orient="horizontal",
+            bar, from_=25, to=300, orient="horizontal",
             showvalue=False, borderwidth=0, highlightthickness=0,
             sliderrelief="flat", sliderlength=18, width=10, length=110,
-            background=_UI["seg_off"], troughcolor=_UI["band"],
+            background=_UI["seg_off"], troughcolor=_UI["panel"],
             activebackground=_UI["accent"], command=self._on_traffic_slider)
         self._traffic_slider.set(int(round(Parameters.DEMAND_SCALE * 100)))
         self._traffic_slider.pack(side="left", padx=(0, 6))
         self._traffic_label = tk.Label(
-            traffic_row, text=f"x{Parameters.DEMAND_SCALE:.2g}",
-            font=("Consolas", 9, "bold"), bg=bg, fg=_UI["text"], width=5,
+            bar, text=f"x{Parameters.DEMAND_SCALE:.2g}",
+            font=("Consolas", 10, "bold"), bg=bg, fg=_UI["text"], width=5,
             anchor="w")
-        self._traffic_label.pack(side="left")
-        dark_button(zoom_row, "Reset", self.reset_zoom,
-                    size=8).pack(side="left")
+        self._traffic_label.pack(side="left", padx=(0, 10))
 
         # The imagery controls live in a box of their own, because what
         # goes in it can change mid-run: a network with no map on disk
         # offers to fetch one, and once that lands the box is refilled with
         # the ordinary checkbox.
-        self._basemap_box = tk.Frame(legend, bg=bg)
-        self._basemap_box.pack(anchor="w", fill="x")
-        self._basemap_dark_button = dark_button
+        self._basemap_box = tk.Frame(bar, bg=bg)
+        self._basemap_box.pack(side="left")
         self._fill_basemap_box()
 
-        header = tk.Frame(legend, bg=bg)
-        header.pack(anchor="w", fill="x")
-        body = tk.Frame(legend, bg=bg)
-        state = {"open": True}
+    def _build_legend(self, parent, size=11):
+        """A collapsible panel: colour key plus a live count per type, and
+        what the run was set up with.
 
-        def toggle():
-            state["open"] = not state["open"]
-            if state["open"]:
-                # after=: re-packing lands the body straight under its own
-                # header; without it Tk appends it below whatever sections
-                # were built later.
-                body.pack(anchor="w", fill="x", pady=(6, 0), after=header)
-                toggle_btn.configure(text="−")
-            else:
-                body.forget()
-                toggle_btn.configure(text="+")
+        Dressed in the start screen's palette (``_UI``), because the run view
+        and the form it came from are one application and should read as one.
+        Plain ``tk`` widgets throughout for the same reason the start screen
+        uses them: ttk takes its colours from the Windows theme and would
+        punch a light grey panel through the dark chrome.  ``size`` is the
+        row type in points; ``_fit_legend`` picks it.
+        """
+        bg = _UI["panel"]
+        row_font = ("Segoe UI", size)
+        head_font = ("Segoe UI Semibold", size + 1)
+        mono = ("Consolas", size, "bold")
+        unit_font = ("Segoe UI", size - 1)
+        glyph = round(size * 1.5)
+        legend = tk.Frame(parent, bg=bg, padx=10, pady=8,
+                          highlightthickness=1,
+                          highlightbackground=_UI["edge"])
 
-        tk.Label(header, text="Vehicles on network",
-                 font=("Segoe UI Semibold", 10), bg=bg,
-                 fg=_UI["accent_text"]).pack(side="left")
-        toggle_btn = tk.Button(header, text="−", width=2, relief="flat",
+        if Parameters.PLACE_NAME:
+            tk.Label(legend, text=Parameters.PLACE_NAME,
+                     font=("Segoe UI", size + 2, "bold"), bg=bg,
+                     fg=_UI["text"], anchor="w", justify="left",
+                     wraplength=240).pack(anchor="w", fill="x", pady=(0, 6))
+
+        def section(title, first=False):
+            """A heading with its glyph and minimise button, and the body
+            under it.  A body expanded again is packed ``after=`` its own
+            header; without that Tk appends it below whatever sections
+            were built later."""
+            header = tk.Frame(legend, bg=bg)
+            header.pack(anchor="w", fill="x", pady=(0 if first else 8, 0))
+            body = tk.Frame(legend, bg=bg)
+            state = {"open": True}
+
+            def toggle():
+                state["open"] = not state["open"]
+                if state["open"]:
+                    body.pack(anchor="w", fill="x", pady=(4, 0), after=header)
+                    button.configure(text="\u2212")
+                else:
+                    body.forget()
+                    button.configure(text="+")
+
+            _Icon(header, self.LEGEND_ICONS[title], glyph,
+                  background=bg).pack(side="left", padx=(0, 6))
+            tk.Label(header, text=title, font=head_font, bg=bg,
+                     fg=_UI["accent_text"]).pack(side="left")
+            button = tk.Button(header, text="\u2212", width=2, relief="flat",
                                bg=bg, fg=_UI["muted"], activebackground=bg,
                                activeforeground=_UI["text"],
-                               font=("Segoe UI", 10, "bold"), bd=0,
+                               font=("Segoe UI", size, "bold"), bd=0,
                                command=toggle, cursor="hand2")
-        toggle_btn.pack(side="right")
+            button.pack(side="right")
+            body.pack(anchor="w", fill="x", pady=(4, 0))
+            return body
 
+        body = section("Vehicles on network", first=True)
         self.legend_counts = {}
         for name, idxs in self.LEGEND_CATEGORIES:
             r, g, b = Constants.VEHICLE_TYPE_COLORS[idxs[0]]
             row = tk.Frame(body, bg=bg)
-            row.pack(anchor="w", fill="x", pady=1)
+            row.pack(anchor="w", fill="x")
             tk.Label(row, text="  ", bg="#%02x%02x%02x" % (r, g, b), width=2,
                      relief="solid", borderwidth=1).pack(side="left")
             tk.Label(row, text="  " + name, bg=bg, fg=_UI["muted"], width=12,
-                     anchor="w", font=("Segoe UI", 9)).pack(side="left")
+                     anchor="w", font=row_font).pack(side="left")
             var = tk.StringVar(value="0")
             tk.Label(row, textvariable=var, bg=bg, fg=_UI["text"], width=5,
-                     anchor="e", font=("Consolas", 9, "bold")).pack(side="left")
+                     anchor="e", font=mono).pack(side="left")
             self.legend_counts[name] = var
 
         total_row = tk.Frame(body, bg=bg)
-        total_row.pack(anchor="w", fill="x", pady=(6, 0))
+        total_row.pack(anchor="w", fill="x", pady=(4, 0))
         tk.Label(total_row, text="Total", bg=bg, fg=_UI["text"], width=15,
-                 anchor="w", font=("Segoe UI", 9, "bold")).pack(side="left")
+                 anchor="w", font=("Segoe UI", size, "bold")).pack(side="left")
         self.legend_total = tk.StringVar(value="0")
         tk.Label(total_row, textvariable=self.legend_total, bg=bg,
                  fg=_UI["accent_text"], width=5, anchor="e",
-                 font=("Consolas", 9, "bold")).pack(side="left")
-
-        body.pack(anchor="w", fill="x", pady=(6, 0))
+                 font=mono).pack(side="left")
 
         # Side friction is drawn on the same canvas but never appears in the
         # counts above, because these are obstructions rather than trips.
@@ -5859,90 +6128,44 @@ class DhakaSimFrame:
         # are not in the picture would be a lie on Miami and Riyadh, whose
         # defaults pin ObjectMode Off.
         if Parameters.OBJECT_MODE:
-            friction_header = tk.Frame(legend, bg=bg)
-            friction_header.pack(anchor="w", fill="x", pady=(12, 0))
-            friction_body = tk.Frame(legend, bg=bg)
-            friction_state = {"open": True}
-
-            def toggle_friction():
-                friction_state["open"] = not friction_state["open"]
-                if friction_state["open"]:
-                    friction_body.pack(anchor="w", fill="x", pady=(4, 0),
-                                       after=friction_header)
-                    friction_btn.configure(text="−")
-                else:
-                    friction_body.forget()
-                    friction_btn.configure(text="+")
-
-            tk.Label(friction_header, text="Side friction",
-                     font=("Segoe UI Semibold", 10), bg=bg,
-                     fg=_UI["accent_text"]).pack(side="left")
-            friction_btn = tk.Button(friction_header, text="−", width=2,
-                                     relief="flat", bg=bg, fg=_UI["muted"],
-                                     activebackground=bg,
-                                     activeforeground=_UI["text"],
-                                     font=("Segoe UI", 10, "bold"), bd=0,
-                                     command=toggle_friction, cursor="hand2")
-            friction_btn.pack(side="right")
-
-            for name, colour in self.FRICTION_CATEGORIES:
-                row = tk.Frame(friction_body, bg=bg)
-                row.pack(anchor="w", fill="x", pady=1)
-                tk.Label(row, text="  ", bg=colour.to_hex(), width=2,
+            friction = section("Side friction")
+            # Two abreast: four rows of key were two rows of the height
+            # the run settings needed to stand in the window.
+            for index, (name, colour) in enumerate(self.FRICTION_CATEGORIES):
+                cell = tk.Frame(friction, bg=bg)
+                cell.grid(row=index // 2, column=index % 2, sticky="w",
+                          padx=(0, 8))
+                tk.Label(cell, text="  ", bg=colour.to_hex(), width=2,
                          relief="solid", borderwidth=1).pack(side="left")
-                tk.Label(row, text="  " + name, bg=bg, fg=_UI["muted"],
-                         width=20, anchor="w",
-                         font=("Segoe UI", 9)).pack(side="left")
-            friction_body.pack(anchor="w", fill="x", pady=(4, 0))
+                tk.Label(cell, text=" " + name, bg=bg, fg=_UI["muted"],
+                         anchor="w", font=row_font).pack(side="left")
 
         # What the run was set up with, kept in view for the whole run.  The
         # setup form is gone by now, and every one of these changes what the
         # numbers on screen mean, so reading a result without them beside it
         # invites comparing two runs that were never comparable.
-        settings_header = tk.Frame(legend, bg=bg)
-        settings_header.pack(anchor="w", fill="x", pady=(12, 0))
-        settings_body = tk.Frame(legend, bg=bg)
-        settings_state = {"open": True}
-
-        def toggle_settings():
-            settings_state["open"] = not settings_state["open"]
-            if settings_state["open"]:
-                settings_body.pack(anchor="w", fill="x", pady=(4, 0),
-                                   after=settings_header)
-                settings_btn.configure(text="\u2212")
-            else:
-                settings_body.forget()
-                settings_btn.configure(text="+")
-
-        tk.Label(settings_header, text="Run settings",
-                 font=("Segoe UI Semibold", 10), bg=bg,
-                 fg=_UI["accent_text"]).pack(side="left")
-        settings_btn = tk.Button(settings_header, text="\u2212", width=2,
-                                 relief="flat", bg=bg, fg=_UI["muted"],
-                                 activebackground=bg,
-                                 activeforeground=_UI["text"],
-                                 font=("Segoe UI", 10, "bold"), bd=0,
-                                 command=toggle_settings, cursor="hand2")
-        settings_btn.pack(side="right")
-
+        settings = section("Run settings")
         for label, value, unit in self._run_settings():
-            row = tk.Frame(settings_body, bg=bg)
-            row.pack(anchor="w", fill="x", pady=1)
+            row = tk.Frame(settings, bg=bg)
+            row.pack(anchor="w", fill="x")
+            kind = self.LEGEND_ICONS.get(label)
+            if kind:
+                _Icon(row, kind, glyph, background=bg).pack(side="left",
+                                                           padx=(0, 6))
             tk.Label(row, text=label, bg=bg, width=14, anchor="w",
-                     fg=_UI["muted"], font=("Segoe UI", 9)).pack(side="left")
+                     fg=_UI["muted"], font=row_font).pack(side="left")
             if label == self.DELAY_LABEL:
-                self._build_delay_control(row, value, unit, bg)
+                self._build_delay_control(settings, value, bg, size,
+                                          indent=glyph + 6)
                 continue
             tk.Label(row, text=value, bg=bg, fg=_UI["text"], width=6,
-                     anchor="e", font=("Consolas", 9, "bold")).pack(side="left")
+                     anchor="e", font=mono).pack(side="left")
             tk.Label(row, text=" " + unit, bg=bg, width=6, anchor="w",
-                     fg=_UI["faint"], font=("Segoe UI", 8)).pack(side="left")
-
-        settings_body.pack(anchor="w", fill="x", pady=(4, 0))
+                     fg=_UI["faint"], font=unit_font).pack(side="left")
         return legend
 
-    def _build_delay_control(self, row, value, unit, bg) -> None:
-        """A spinner for the animation delay, live for the whole run.
+    def _build_delay_control(self, parent, value, bg, size, indent) -> None:
+        """The playback slider, live for the whole run, under its label.
 
         Nothing has to be restarted or rearmed: the panel's timer reads
         ``Parameters.simulation_speed`` each time it schedules the next frame,
@@ -5950,62 +6173,112 @@ class DhakaSimFrame:
         timer is still turning over, so a change made then takes effect the
         moment the run resumes.
 
-        Typed as well as stepped, since the useful range spans three orders of
-        magnitude and clicking from 500 down to 1 would be tedious.
+        The same ``_SpeedSlider`` the start screen has (12 Oct 2026; it was
+        a typed spinner over a 1-2-5 ladder).  A run started at a
+        milliseconds the slider does not offer keeps it: the slider only
+        writes its variable when the handle is moved, and the readout
+        shows the run's own value until then.
         """
         self._delay_var = tk.StringVar(value=value)
 
-        def apply(normalise):
-            """Push the box's value at the run, and optionally tidy the box.
-
-            *normalise* is off while typing.  Rewriting the text on every
-            keystroke fights the typist: a "0" on the way to "500" would be
-            clamped to "1" under their fingers.  So mid-edit the value is
-            applied if it parses and the text is left alone; it is only
-            written back once the edit is committed.
-            """
+        def apply(*_args):
             try:
                 wanted = int(float(self._delay_var.get()))
             except (TypeError, ValueError):
-                return                      # mid-edit, or nonsense
-            wanted = max(1, min(60000, wanted))
-            Parameters.simulation_speed = wanted
-            if normalise and str(wanted) != self._delay_var.get():
-                self._delay_var.set(str(wanted))
+                return
+            Parameters.simulation_speed = max(1, min(60000, wanted))
 
-        # tk.Spinbox rather than ttk: the Windows theme paints ttk fields
-        # white whatever colours they are given, and this row sits on the
-        # dark legend panel.
-        spin = tk.Spinbox(row, textvariable=self._delay_var, width=6,
-                          values=self.DELAY_CHOICES,
-                          command=lambda: apply(True),
-                          font=("Consolas", 9), justify="right",
-                          relief="flat", bd=0,
-                          background=_UI["seg_off"], foreground=_UI["text"],
-                          insertbackground=_UI["accent"],
-                          buttonbackground=_UI["seg_off"],
-                          readonlybackground=_UI["seg_off"],
-                          highlightthickness=1,
-                          highlightbackground=_UI["edge"],
-                          highlightcolor=_UI["accent"])
-        spin.pack(side="left")
-        # Building a Spinbox over a ``values`` list writes the *first* entry
-        # into its variable, whatever the variable held -- measured: a box
-        # built over "250" shows "1".  The run was still stepping at 250 ms
-        # (Parameters.simulation_speed is only written by apply, wired
-        # below), so the legend lied and the first arrow click stepped from
-        # 1.  Write the run's own delay back before the trace is attached.
-        self._delay_var.set(str(value))
-        # command= only fires for the arrows, so typing needs its own hooks.
-        spin.bind("<Return>", lambda _e: apply(True))
-        spin.bind("<FocusOut>", lambda _e: apply(True))
-        self._delay_var.trace_add("write", lambda *_a: apply(False))
-        # Kept as an attribute so the commit path can be exercised directly
-        # rather than through a synthetic key event, which needs focus to be
-        # where the test thinks it is.
-        self._commit_delay = lambda: apply(True)
-        tk.Label(row, text=" " + unit, bg=bg, width=4, anchor="w",
-                 fg=_UI["faint"], font=("Segoe UI", 8)).pack(side="left")
+        self._delay_var.trace_add("write", apply)
+        # Kept as an attribute so the commit path can be exercised directly.
+        self._commit_delay = apply
+        _SpeedSlider(parent, self._delay_var,
+                     font=("Segoe UI Semibold", size),
+                     small=("Segoe UI", max(8, size - 1)), length=120,
+                     background=bg).pack(anchor="w", padx=(indent, 0),
+                                         pady=(0, 2))
+
+    def _fit_legend(self) -> None:
+        """Build the legend at the largest type whose whole height stands
+        beside the picture.  Measured, not guessed: a maximised window is
+        the desktop less its taskbar, and the panel does not scroll.
+        Called once the window is laid out, and again when its height
+        changes."""
+        if self.panel is None or self._top_bar is None:
+            return
+        self.root.update_idletasks()
+        room = (self.container.winfo_height()
+                - self._top_bar.winfo_reqheight()
+                - sum(bar.winfo_reqheight() for bar in self._bottom_bars))
+        if room < 100:
+            room = 100000               # not laid out yet: the largest
+        if self._legend is not None and room == self._legend_room:
+            return
+        old = self._legend
+        for size in self.LEGEND_SIZES:
+            legend = self._build_legend(self.container, size)
+            legend.update_idletasks()
+            if (legend.winfo_reqheight() <= room
+                    or size == self.LEGEND_SIZES[-1]):
+                break
+            legend.destroy()
+        outer = legend
+        if legend.winfo_reqheight() > room:
+            legend.destroy()
+            outer = self._scrolled(size, room)
+        if old is not None:
+            outer.pack(side="right", fill="y", before=old)
+            old.destroy()
+        else:
+            outer.pack(side="right", fill="y")
+        self._legend, self._legend_room, self._legend_size = outer, room, size
+        if self.panel is not None:
+            self.update_legend_counts(self.panel.vehicle_list)
+
+    def _scrolled(self, size, room):
+        """The legend in a scrolling canvas, for a window shorter than
+        even its smallest type: the panel then scrolls rather than
+        losing its last rows.  Built again as the canvas's own child: a
+        window item whose widget is a child of an ancestor stacks under
+        the canvas and never shows."""
+        wrap = tk.Frame(self.container, bg=_UI["panel"])
+        canvas = tk.Canvas(wrap, bg=_UI["panel"], highlightthickness=0, bd=0,
+                           height=room)
+        legend = self._build_legend(canvas, size)
+        legend.update_idletasks()
+        canvas.configure(width=legend.winfo_reqwidth())
+        bar = tk.Scrollbar(wrap, orient="vertical", command=canvas.yview,
+                           background=_UI["seg_off"],
+                           activebackground=_UI["seg_hover"],
+                           troughcolor=_UI["ground"], borderwidth=0,
+                           highlightthickness=0, elementborderwidth=0,
+                           width=12)
+        canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.create_window(0, 0, window=legend, anchor="nw")
+        canvas.configure(scrollregion=(0, 0, legend.winfo_reqwidth(),
+                                       legend.winfo_reqheight()))
+
+        def wheel(widget):
+            widget.bind("<MouseWheel>", lambda e: canvas.yview_scroll(
+                -1 if e.delta > 0 else 1, "units"))
+            for child in widget.winfo_children():
+                wheel(child)
+
+        wheel(legend)
+        return wrap
+
+    def _on_container_resize(self, _event=None) -> None:
+        """The window changed size: the legend may now have more or less
+        height to stand in.  After idle, so one resize is one rebuild."""
+        if self.panel is None or self._legend is None:
+            return
+        if self._legend_job is None:
+            self._legend_job = self.root.after_idle(self._refit_legend)
+
+    def _refit_legend(self) -> None:
+        self._legend_job = None
+        self._fit_legend()
 
     def update_legend_counts(self, vehicle_list) -> None:
         """Refresh the live per-type counts shown beside the colour key."""
@@ -6039,9 +6312,11 @@ class DhakaSimFrame:
         something it cannot show.
         """
         box = self._basemap_box
+        if box is None:
+            return
         for child in box.winfo_children():
             child.destroy()
-        bg = _UI["panel"]
+        bg = box.cget("background")
         panel = self.panel
         if panel is None:
             return
@@ -6056,32 +6331,24 @@ class DhakaSimFrame:
             # "Background map", not "Satellite map": every network ships with
             # the OpenStreetMap street rendering now, and only says satellite
             # if someone re-fetches with --provider esri.
-            tk.Checkbutton(box, text="Background map", bg=bg,
-                           fg=_UI["text"], font=("Segoe UI", 9), anchor="w",
+            # No sentence under it (owner, 12 Oct 2026): the toast on a
+            # toggle says that the zoom snaps while the map is on.
+            tk.Checkbutton(box, text="Background map  (M)", bg=bg,
+                           fg=_UI["text"], font=("Segoe UI", 10), anchor="w",
                            variable=self._basemap_var, command=flip,
                            cursor="hand2", activebackground=bg,
                            activeforeground=_UI["text"],
                            selectcolor=_UI["seg_off"],
-                           highlightthickness=0).pack(anchor="w", pady=(0, 6))
-            tk.Label(box, text="Zoom steps are fixed while the map is on, "
-                               "so the imagery stays lined up with the "
-                               "roads.",
-                     bg=bg, fg=_UI["faint"], font=("Segoe UI", 8), anchor="w",
-                     justify="left", wraplength=170).pack(anchor="w",
-                                                          pady=(0, 6))
+                           highlightthickness=0).pack(side="left")
             return
         if basemap_module.read_centre(Parameters.NETWORK_DIR) is None:
             return                    # nowhere on Earth to fetch for
         self._basemap_var = None
-        self._fetch_map_btn = self._basemap_dark_button(
+        self._fetch_map_btn = self._dark_button(
             box, "Fetch background map", self._fetch_basemap, size=9)
-        self._fetch_map_btn.pack(anchor="w", pady=(0, 4))
-        self._fetch_map_note = tk.Label(
-            box, text="No map on disk for this network. Fetching takes a "
-                      "minute and needs the internet.",
-            bg=bg, fg=_UI["faint"], font=("Segoe UI", 8), anchor="w",
-            justify="left", wraplength=170)
-        self._fetch_map_note.pack(anchor="w", pady=(0, 6))
+        self._fetch_map_btn.pack(side="left")
+        panel.toast("No map on disk for this network -- Fetch background "
+                    "map takes a minute and needs the internet")
 
     def _fetch_basemap(self) -> None:
         """Fetch the imagery for the running network, then show it.
@@ -6096,8 +6363,7 @@ class DhakaSimFrame:
         self._fetching_map = True
         self._fetch_map_btn.configure(state="disabled",
                                       text="Fetching the map...")
-        self._fetch_map_note.configure(text="Downloading tiles from "
-                                            "OpenStreetMap...")
+        self.panel.toast("Downloading tiles from OpenStreetMap...")
         result = {}
 
         def work():
@@ -6126,11 +6392,10 @@ class DhakaSimFrame:
                 tail = result["lines"][-1] if result["lines"] else ""
                 self._fetch_map_btn.configure(state="normal",
                                               text="Fetch background map")
-                self._fetch_map_note.configure(
-                    text="The fetch did not succeed" + (f": {tail}" if tail
-                                                        else "") +
-                         " -- try again later, or run fetch_basemap.py "
-                         f"--network {network}.")
+                panel.toast("The fetch did not succeed" + (f": {tail}" if tail
+                                                           else "") +
+                            " -- try again later, or run fetch_basemap.py "
+                            f"--network {network}")
                 return
             # Imagery landed: refill the box with the checkbox, and re-snap
             # the zoom to a scale the picture can be drawn at exactly.
@@ -6172,11 +6437,22 @@ class DhakaSimFrame:
         self._view_button = None
         self._pause_button = None
         self._status = None
-        # Belong to the legend that is about to be destroyed, and the next
-        # run may not have imagery at all.
+        # Belong to the toolbar and legend about to be destroyed, and the
+        # next run may not have imagery at all.
         self._basemap_var = None
         self._basemap_box = None
         self._fetching_map = False
+        self._top_bar = None
+        self._bottom_bars = ()
+        self._legend = None
+        self._legend_room = None
+        if self._legend_job is not None:
+            try:
+                self.root.after_cancel(self._legend_job)
+            except tk.TclError:
+                pass
+            self._legend_job = None
+        self.container.unbind("<Configure>")
         self._delay_var = None
         self._commit_delay = None
         self._scale_slider = None
@@ -6217,13 +6493,17 @@ class DhakaSimFrame:
         self.root.bind("<KeyPress-v>", lambda _e: self.toggle_view())
         self.root.bind("<KeyPress-space>", lambda _e: self.toggle_pause())
         self.root.bind("<KeyPress-m>", lambda _e: self.toggle_basemap())
+        self._build_view_controls(top_bar)
 
+        # At the bar's right end, so the controls keep their places
+        # whatever the sentence says.
         self._status = tk.Label(top_bar, text="", background=_UI["band"],
                                 foreground=_UI["accent_text"],
                                 font=("Segoe UI", 10))
-        self._status.pack(side="left", padx=(12, 0))
+        self._status.pack(side="right", padx=(12, 4))
         top_bar.pack(side="top", fill="x")
         _glass(top_bar)
+        self._top_bar = top_bar
 
         show_progress_slider = ProgressSlider(self.container, 1,
                                              Parameters.simulation_end_time, 1)
@@ -6248,12 +6528,19 @@ class DhakaSimFrame:
 
         change_trace_slider.widget.configure(command=on_change_trace)
 
-        # The zoom slider lives in the legend panel (built here).
-        self._build_legend(self.container).pack(side="right", fill="y")
+        # The legend at the largest type that stands in the window's
+        # height; it is packed before the bottom bars, so a refit packs its
+        # successor ``before=`` it and keeps the order.
+        self._bottom_bars = ((show_progress_slider.widget,
+                              change_trace_slider.widget)
+                             if Parameters.TRACE_MODE
+                             else (show_progress_slider.widget,))
+        self._fit_legend()
         show_progress_slider.widget.pack(side="bottom", fill="x")
         if Parameters.TRACE_MODE:
             change_trace_slider.widget.pack(side="top", fill="x")
         panel.canvas.pack(side="left", fill="both", expand=True)
+        self.container.bind("<Configure>", self._on_container_resize)
         self.root.update_idletasks()
         # Open on the whole network.  A surveyed junction lands around a
         # 100 m scale bar; the BUET-DU-DMC demo lands on its full extent.

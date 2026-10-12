@@ -153,7 +153,7 @@ system status*, *recognition rather than recall*, *error prevention* and
   only partly repeatable. Start now does what `--seed` does headless
   (`Deterministic` on, the arrival generators rebuilt on the seeded
   stream); `-1` keeps the Java behaviour of a fresh run every time.
-- **Traffic level, live.** The legend's **Traffic** slider (x0.25 to x3)
+- **Traffic level, live.** The toolbar's **Traffic** slider (x0.25 to x3)
   multiplies every route's arrival rate from the next arrival on, so a
   junction can be loaded up or eased off while the run plays; the start
   screen's strip beside End time sets the same multiplier for a run from
@@ -206,12 +206,16 @@ display options](docs/images/start_screen.png)
 Once running the view opens on the whole network -- a surveyed junction lands
 around a 100 m scale bar, the BUET-DU-DMC demo on its full two kilometres.
 Drag to pan, and zoom with the mouse wheel or the **Zoom slider** in the
-legend panel (logarithmic, so every framing from whole-network to kerb-level
-gets its share of the slider's travel). **Reset** returns to the opening
-whole-network view. The bottom slider shows progress. While the background
-map is shown, zooming snaps to the scales the imagery can be drawn at
-exactly and stops at its sharpest step, so the picture never magnifies into
-blocks; the slider's handle settles on what the view actually did.
+toolbar, beside the view button (logarithmic, so every framing from
+whole-network to kerb-level gets its share of the slider's travel).
+**Reset** returns to the opening whole-network view. The **Traffic**
+slider and the **Background map** toggle sit beside it, since 12 Oct 2026:
+everything that changes the picture or the run as it plays is in the
+toolbar, and the panel on the right is left to what the run is made of.
+The bottom slider shows progress. While the background map is shown,
+zooming snaps to the scales the imagery can be drawn at exactly and stops
+at its sharpest step, so the picture never magnifies into blocks; the
+slider's handle settles on what the view actually did.
 
 ![The 2D plan view: the Kakrail corridor drawn over the OpenStreetMap
 rendering, with the live legend on the right](docs/images/plan_kakrail_corridor.png)
@@ -248,7 +252,7 @@ parked cars and the other roadside objects are modelled too.
 | --- | --- |
 | orbit | drag |
 | pan | right-drag, or Shift+drag |
-| zoom | mouse wheel, or the legend's Zoom slider |
+| zoom | mouse wheel, or the toolbar's Zoom slider |
 | reset the camera | double-click |
 | switch views | the toolbar button, or the `V` key |
 
@@ -297,19 +301,25 @@ The panel on the right shows the place, a live count per vehicle type, the
 side-friction key, and **Run settings**: the configuration the run was started
 with, since the setup form is gone by then and every one of those values changes
 what the numbers on screen mean. It is read from `Parameters` once when the run
-begins rather than bound live, so it stays a record of what was chosen. Both the
-vehicle counts and the settings collapse with the button beside their heading,
-which is worth knowing on a short screen, where the panel does not scroll.
+begins rather than bound live, so it stays a record of what was chosen. Every
+setting carries the glyph its row has on the start screen. The panel is built
+at the largest type whose whole height stands in the window, so all of it is
+in view without collapsing a section (12 Oct 2026; it used to be cut off
+below the vehicle counts on this laptop), and on a window shorter than even
+its smallest type it scrolls. Each section still collapses with the button
+beside its heading.
 
-**Frame delay** is the exception, and is a spinner rather than a reading. It
-only sets how long the picture pauses between frames, so changing it mid-run
-cannot make the run mean anything different; every other setting there would.
-Nothing is restarted when it changes: the panel's timer reads the value each
-time it schedules the next frame, so a new delay takes effect on the following
-tick, and one set while paused applies the moment the run resumes. The arrows
-step 1-2-5 per decade, because playback speed is judged by eye and equal ratios
-are the useful steps; any value from 1 to 60000 ms can be typed. Typing is not
-interrupted by clamping, which only happens once the edit is committed.
+**Playback speed** is the exception, and is a slider rather than a reading:
+the same five-detent slider the start screen has (Step 500 ms, Slow 100,
+Normal 50, Fast 20, Max 1 ms between frames). It only sets how long the
+picture pauses between frames, so changing it mid-run cannot make the run
+mean anything different; every other setting there would. Nothing is
+restarted when it changes: the panel's timer reads the value each time it
+schedules the next frame, so a new delay takes effect on the following tick,
+and one set while paused applies the moment the run resumes. A run started
+at a delay the slider does not offer (`SimulationSpeed 250` in a
+defaults.txt, say) keeps it until the handle is moved; the readout shows
+the run's own milliseconds.
 
 ## Layout
 
@@ -1122,7 +1132,7 @@ the dialog mid-pick discards the staged folder.
 (`basemap.png`, `basemap.txt`, `osm_roads.json`) are gitignored, so a
 checkout on another machine gets every imported network without its map,
 and a tile fetch that failed at import time only warned — the run
-screen's legend offers **Fetch background map** in place of the usual
+screen's toolbar offers **Fetch background map** in place of the usual
 checkbox. It runs `fetch_basemap.py` for that network in the background
 (a minute, needs the internet) and shows the map the moment it lands,
 mid-run. The button appears only for networks that record a centre
@@ -1231,7 +1241,7 @@ python fetch_basemap.py --network kakrail_corridor --zoom 19
 ```
 
 That writes `basemap.png` and `basemap.txt` into the network's folder. Start the
-GUI and a **Background map** box appears in the legend; `M` toggles it. Both files
+GUI and a **Background map** toggle appears in the toolbar; `M` toggles it. Both files
 are gitignored, being megabytes apiece and rebuildable from the same command.
 
 `--provider osm` gives the OpenStreetMap street rendering, © OpenStreetMap
