@@ -823,6 +823,39 @@ sentence is clipped rather than widening the form -- the columns stack at
 1280 px on width alone. The traffic strip shares the End time row for the
 height reason in `_init_components`; its caption is one line on purpose.
 
+**Undo is a history per setting** (15 Oct 2026, owner: "add undo for
+single settings"). `_setting_changed` calls `_remember(key, value)`, which
+compares the write with `_last[key]` -- the trace fires *after* the write,
+so the old value has to be kept -- and pushes it on `_history[key]` with
+the key appended to `_undo_order`; `undo(key=None)` pops the latest (Ctrl+Z
+on the toplevel, bound in `__init__` and unbound in `dispose`) or the
+given key's (a click on the row's name, bound where `_row_labels` is
+filled; a two-key row like Signal control undoes whichever changed last),
+writes the variable back under `_undoing` so the write is not recorded as
+a change, and says "Undone: ... back to ...".  Writes to one key within
+`UNDO_COALESCE_S` (1.5 s) are one change -- typing "777" is three writes
+-- and typing back to the value before the edit drops the entry, so
+nothing is left to undo.  A junction change records the previous network
+and *drops* the histories of the settings the place's defaults rewrote
+(their values belong to the other place); `_last` is seeded after the
+first `_on_network_change` so the launch records nothing.  **The help
+page** (`_HelpWindow`, F1 or the Help buttons, `DhakaSimFrame.show_help`,
+one window per application) is a read-only `tk.Text` filled from
+`help_sections()`, which lists the settings from `SETTING_INFO` in
+`HELP_SETTING_ORDER` with `HELP_SETTING_MORE` sentences after the meaning
+-- `test_feedback` checks every label is on the page, so a new setting
+needs an order entry or the test says so.
+
+**The four minor findings of the 15 Oct 2026 heuristic evaluation**
+(`docs/dhakasim-nielsen-evaluation.html`) were closed the same day:
+`_reset_to_defaults` asks (askyesno, naming the changed settings from
+`_snapshot`) before `show_options`; `_run_settings` and `LEGEND_ICONS`
+use the form's row names; the signal strip's keys are the plain names
+(every site that matched the old strings was renamed, `report.py`'s
+`SIGNAL_MODE_LABELS` keeps the paper's names in brackets); and
+`map_import.fetch_overpass` raises a sentence a reader can act on, with
+the last server's text logged rather than shown.
+
 **The run screen's toast** (`DhakaSimPanel.toast`) is drawn with the map
 furniture, so the static-layer reuse never keeps a stale one and the
 `furniture` delete clears it each frame; a timer drops it. The status line
@@ -989,7 +1022,9 @@ was width taken *out of the boxes*: the junction box is the tiles alone
 (`_wide_row`, no name column beside seven rows of tiles -- 180 px),
 Time of day moved under Run, the widest row ("End time & traffic", an
 entry beside a five-cell strip) became two rows, the signal cells say
-"Multi-obj. v1" (`SIGNAL_LABELS`; the values are unchanged), the
+"Planned, all alike" / "Planned, by class" (named by what they do since
+15 Oct 2026 -- the paper's v1 and v2 told a reader nothing; `SIGNAL_LABELS`
+is an empty hook now, and the values `moo-v1`/`moo-v2` are unchanged), the
 playback strip ends in "Max", and cosy's name column is 150.  With all
 thirteen networks the launch is cosy, tiles two abreast, 663 of 664 px
 tall beside a 512 px pane -- the last 39 px of height came out of cosy's

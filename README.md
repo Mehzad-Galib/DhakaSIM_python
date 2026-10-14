@@ -89,13 +89,35 @@ system status*, *recognition rather than recall*, *error prevention* and
 - **Start screen.** The footer line says what Start will run ("Start runs
   Banani Road 23 · peak hour · 300 s · traffic x1 · seed 65 · plan view").
   Change anything and it says what moved, to what, what that means and what
-  it was ("Maximum speed → 45 km/h: the speed limit on every link. Was
+  it was ("Speed limit → 45 km/h: the speed limit on every link. Was
   60 km/h."); the row's name gets a green dot while its value differs from
   the place's own defaults, and the summary counts the changed settings.
   Choosing a junction reports the defaults it brought with it. A value that
   cannot be used (an end time of "abc", a speed of 0) is named in red as it
   is typed, and Start refuses it with the same sentence instead of a
   traceback.
+- **Undo, one change at a time (15 Oct 2026).** Ctrl+Z takes back the
+  last change on the start screen and the footer says what came back
+  ("Undone: Speed limit back to 60 km/h"); clicking a row's name takes
+  back that setting's last change, and the name shows a hand while there
+  is one to take back. A typed value is one change however many
+  keystrokes it took, and choosing a junction is itself undoable. Reset
+  to defaults is still the way back to the place's own values.
+- **Help, in the window (15 Oct 2026).** F1, or the Help button on either
+  screen, opens a help page: what the simulator does, what every setting
+  means (built from the same table the footer reads, so a setting cannot
+  be on the form and missing from the page), the keys and controls of
+  the run screen, importing a map, and where the results go. Esc closes
+  it.
+- **Four minor findings of the heuristic evaluation, closed (15 Oct
+  2026).** Reset to defaults asks before discarding, naming how many
+  settings differ and which; the run screen's sidebar uses the form's
+  own names (Speed limit, Parked vehicles, Footpath strips); the two
+  multi-objective controllers are named by what they do, Planned, all
+  alike and Planned, by class, with the paper's v1 and v2 kept in the
+  help and the report; and a map fetch that every server turned away says
+  so in a sentence (try again in a minute, or a smaller radius) with the
+  server's own text left to the log.
 - **Run screen.** The toolbar carries a status line ("Step 120 of 300 ·
   plan view", "Paused at step 120 …") and every button names its key
   (Space pauses, V switches views, M hides the map). Each change of view
@@ -728,8 +750,8 @@ python run_dhakasim.py --headless --network banani_23 --set SignalMode=moo-v1
 | --- | --- |
 | `fixed` | the same green for every approach; the default and the baseline |
 | `biased-random` | a random green scaled by each approach's share of the traffic |
-| `moo-v1` | NSGA-II on Equations 1 and 2, which count every vehicle alike |
-| `moo-v2` | NSGA-II on Equations 3 and 4, which price the vehicle classes apart |
+| `moo-v1` | NSGA-II on Equations 1 and 2, which count every vehicle alike; **Planned, all alike** on the start screen |
+| `moo-v2` | NSGA-II on Equations 3 and 4, which price the vehicle classes apart; **Planned, by class** on the start screen |
 
 ### How it works
 

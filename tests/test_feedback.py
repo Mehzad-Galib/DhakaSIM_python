@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dhakasim.gui import (SETTING_INFO, ROW_KEYS, PREVIEW_NOTES,  # noqa: E402
                           OptionPanel, preview_note, setting_message,
                           PREVIEW_CHOICES, preview_cell_note,
-                          setting_problem)
+                          setting_problem, help_sections)
 
 
 class SettingProblemTest(unittest.TestCase):
@@ -38,7 +38,7 @@ class SettingProblemTest(unittest.TestCase):
 class SettingMessageTest(unittest.TestCase):
     def test_names_the_setting_its_unit_and_its_meaning(self):
         text = setting_message("max_speed", "45", "60")
-        self.assertTrue(text.startswith("Maximum speed → 45 km/h: "))
+        self.assertTrue(text.startswith("Speed limit → 45 km/h: "))
         self.assertIn("speed limit", text)
         self.assertTrue(text.endswith("Was 60 km/h."))
 
@@ -94,6 +94,28 @@ class PreviewNoteTest(unittest.TestCase):
                       preview_note("network", "kakrail_corridor",
                                    "Kakrail Corridor"))
         self.assertIn("seeded", preview_note("seed", "-1"))
+
+
+class HelpPageTest(unittest.TestCase):
+    """The in-app help (F1) is built from the same table the footer uses,
+    so every setting on the form is explained on the page."""
+
+    def test_every_setting_is_on_the_help_page(self):
+        text = "\n".join(p for _h, ps in help_sections() for p in ps)
+        for key, (label, _unit, meaning) in SETTING_INFO.items():
+            if key == "ppm":
+                continue                # not on the form since 11 Oct 2026
+            self.assertIn(label + ":", text, key)
+            self.assertIn(meaning[1:], text, key)
+
+    def test_the_page_names_the_keys_and_the_undo(self):
+        text = "\n".join(p for _h, ps in help_sections() for p in ps)
+        for phrase in ("Ctrl+Z", "Space", "F1", "Reset to defaults",
+                       "statistics/csv/", "--headless"):
+            self.assertIn(phrase, text, phrase)
+        headings = [h for h, _ps in help_sections()]
+        self.assertIn("The settings", headings)
+        self.assertIn("The run screen", headings)
 
 
 if __name__ == "__main__":

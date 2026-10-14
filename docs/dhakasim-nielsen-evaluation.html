@@ -1,0 +1,340 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>DhakaSim: heuristic evaluation against Nielsen's ten heuristics</title>
+<style>
+@page { size: A4; margin: 20mm 18mm; }
+body { font: 10.5pt/1.5 "Charter","Georgia",serif; color:#16150f; margin:0; }
+h1 { font-size:19pt; line-height:1.2; margin:0 0 4pt; }
+h2 { font-size:13pt; margin:20pt 0 6pt; padding-bottom:3pt;
+     border-bottom:1px solid #cfc8ba; page-break-after:avoid; }
+h3 { font-size:11pt; margin:14pt 0 3pt; page-break-after:avoid; }
+h4 { font-family:"Helvetica Neue",Arial,sans-serif; font-size:9.2pt;
+     text-transform:uppercase; letter-spacing:.04em; color:#6d6658;
+     margin:9pt 0 2pt; page-break-after:avoid; }
+p { margin:0 0 7pt; }
+.lead { color:#544e42; font-size:10pt; margin-bottom:14pt; }
+ul,ol { margin:0 0 8pt; padding-left:17pt; }
+li { margin-bottom:3pt; }
+table { border-collapse:collapse; width:100%; margin:8pt 0 10pt;
+        font-family:"Helvetica Neue",Arial,sans-serif; font-size:8.6pt; }
+tr { page-break-inside:avoid; }
+thead { display:table-header-group; }
+th,td { border:1px solid #cfc8ba; padding:4pt 6pt; text-align:left;
+        vertical-align:top; }
+th { background:#efeade; font-weight:600; }
+code { font-family:"Consolas",monospace; font-size:9.2pt; background:#f1ece1;
+       padding:0 3px; border-radius:2px; }
+.box { border:1px solid #cfc8ba; border-left:3px solid #8a7a58;
+       background:#faf7f0; padding:8pt 11pt; margin:10pt 0;
+       page-break-inside:avoid; }
+.box p:last-child { margin-bottom:0; }
+figure { margin:8pt 0 12pt; page-break-inside:avoid; }
+figure img { width:100%; border:1px solid #cfc8ba; }
+figcaption { font-family:"Helvetica Neue",Arial,sans-serif; font-size:8.6pt;
+             color:#544e42; margin-top:4pt; }
+.sev { font-family:"Helvetica Neue",Arial,sans-serif; font-size:8.4pt;
+       font-weight:600; padding:0 5px; border-radius:3px; white-space:nowrap; }
+.s0 { background:#e6e2d6; } .s1 { background:#e8ecd4; } .s2 { background:#f3e6c4; }
+.s3 { background:#f3d2b8; } .s4 { background:#efb8b8; }
+.rating { font-family:"Helvetica Neue",Arial,sans-serif; font-size:9pt;
+          font-weight:600; }
+.issues li { margin-bottom:4pt; }
+footer { margin-top:18pt; padding-top:6pt; border-top:1px solid #cfc8ba;
+         color:#6d6658; font-size:8.6pt; }
+h2.brk { page-break-before:always; }
+.small { font-size:9pt; color:#544e42; }
+</style></head><body>
+
+<h1>DhakaSim: heuristic evaluation against Nielsen's ten usability heuristics</h1>
+<p class="lead">An inspection of the DhakaSim Python build as it stands on
+15 October 2026: its start screen, run screen, map-import dialog, help page
+and run report, judged heuristic by heuristic, with every open issue rated
+on Nielsen's severity scale and a short list of what to fix first.
+ASM Nuruzzaman.</p>
+
+<h2>Method</h2>
+<p>The evaluation follows Nielsen's heuristic evaluation procedure: one
+evaluator walks the interface twice, first to learn its flow and then to
+inspect each element against the ten heuristics, recording every violation
+with the heuristic it breaks and a severity. The owner set these heuristics
+as the basis for judging the screens on 6 October 2026, and the build was
+reworked against them over the following nine days; this document records
+where it has reached.</p>
+<p>The walk covered six tasks: choose a junction and set up a run; change
+settings and take changes back; start, pause, zoom and switch views in a
+run; load the junction up while it plays; import a junction from a map; and
+find help. Three screens are reproduced below as they looked on the
+evaluation laptop (1536 by 793 pixels).</p>
+<table>
+<thead><tr><th style="width:14%">Severity</th><th>Meaning, after Nielsen</th></tr></thead>
+<tr><td><span class="sev s0">0</span></td><td>Not a usability problem.</td></tr>
+<tr><td><span class="sev s1">1</span></td><td>Cosmetic. Fix only if there is time.</td></tr>
+<tr><td><span class="sev s2">2</span></td><td>Minor. Low priority.</td></tr>
+<tr><td><span class="sev s3">3</span></td><td>Major. Important to fix.</td></tr>
+<tr><td><span class="sev s4">4</span></td><td>Catastrophic. Must fix before release.</td></tr>
+</table>
+<p class="small">One evaluator finds about a third of the problems a panel
+of five would, by Nielsen's own figures. Treat the issue list as a floor,
+not a census. No user study has been run.</p>
+
+<h2>The screens inspected</h2>
+<figure>
+<img src="images/nielsen-start.png" alt="The start screen">
+<figcaption>Figure 1. The start screen after the speed limit was changed
+to 45 km/h: the row carries a dot, the footer says what moved, what it
+was and that Ctrl+Z undoes, and the pictures beside the settings show the
+four signal controllers for the row under the pointer.</figcaption>
+</figure>
+<figure>
+<img src="images/nielsen-run.png" alt="The run screen">
+<figcaption>Figure 2. The run screen: the toolbar with the view, help,
+zoom, traffic and map controls and the step counter; the plan view over
+the map with a toast; the sidebar with the live counts, the side-friction
+key and the run's settings.</figcaption>
+</figure>
+<figure style="width:62%">
+<img src="images/nielsen-help.png" alt="The help page">
+<figcaption>Figure 3. The help page, opened with F1 from either
+screen.</figcaption>
+</figure>
+
+<h2>The ten heuristics</h2>
+
+<h3>1. Visibility of system status</h3>
+<p class="rating">Rating: strong.</p>
+<p>The start screen's footer always says what Start will run, counts the
+settings that differ from the place's defaults, and marks each changed row
+with a dot. Every change produces a sentence naming the setting, its new
+value, its meaning and its old value. On the run screen the toolbar shows
+the step, the end time and the view every simulation step; a toast on the
+picture reports every zoom, view change, map toggle, traffic change and
+undo; the bottom bar shows progress. The import dialog has a progress bar
+driven by the worker's own log lines, and the map-fetch button changes its
+caption while it works.</p>
+<ul class="issues">
+<li><span class="sev s1">1</span> A preview cell says "Building…" while a
+second run is built but gives no sense of how long; on the largest network
+that is about a second.</li>
+<li><span class="sev s1">1</span> The multi-objective scheduler re-plans
+every cycle at every junction, and nothing on screen shows a plan being
+made or what it chose.</li>
+<li><span class="sev s1">1</span> On a window under about 1400 pixels wide
+the step counter is clipped at its end; the step itself stays visible.</li>
+</ul>
+
+<h3>2. Match between system and the real world</h3>
+<p class="rating">Rating: adequate.</p>
+<p>Settings are worded as a reader thinks about them: playback speed as
+Step, Slow, Normal, Fast and Max rather than a frame delay in
+milliseconds; real geometry explained as medians and a roundabout ring
+rather than "Java parity"; places by name, each with a sentence about its
+surroundings; speeds in km/h, greens in seconds, traffic as a multiple of
+the surveyed rate. The signal controllers are named by what they do in the
+preview captions.</p>
+<ul class="issues">
+<li><span class="sev s0">0</span> Closed the same day: the two cells now
+read "Planned, all alike" and "Planned, by class"; the paper's v1 and v2
+stay in the help and the report.</li>
+<li><span class="sev s1">1</span> "Strip width" is the model's own
+vocabulary. The picture beside it shows the grid, but the name does not
+say that a strip wider than any vehicle is a lane.</li>
+<li><span class="sev s1">1</span> "Accidents" is set as close encounters
+per accident, so a larger number means fewer accidents. The caption says
+so; the direction is still the reverse of what the name suggests.</li>
+</ul>
+
+<h3>3. User control and freedom</h3>
+<p class="rating">Rating: adequate.</p>
+<p>Ctrl+Z takes back the last change on the start screen, one change at a
+time, and the footer names what came back; clicking a row's name takes back
+that row's last change, and the name shows a hand while there is one. A
+typed value is one change however many keystrokes it took, and choosing a
+different junction is itself undoable. Reset to defaults reloads the
+place's own values. New simulation leaves a run at any point, asking first
+if it is unfinished; a view change reverses with the same key; the import
+picker has Close and Rebuild; imported networks can be removed and shipped
+ones cannot.</p>
+<ul class="issues">
+<li><span class="sev s0">0</span> Closed the same day: Reset to defaults
+now asks when anything differs from the place's defaults, naming how many
+settings and which.</li>
+<li><span class="sev s1">1</span> There is no redo. An undo too many has to
+be re-typed.</li>
+<li><span class="sev s1">1</span> Choosing a junction drops the undo
+history of the settings that junction's defaults rewrote (speed limit,
+green time, the two switches). This is deliberate, since the old values
+belonged to the other place, but nothing says so.</li>
+<li><span class="sev s1">1</span> The run screen's live controls (zoom,
+traffic, playback speed) have no undo; Reset covers the zoom only.</li>
+</ul>
+
+<h3>4. Consistency and standards</h3>
+<p class="rating">Rating: adequate.</p>
+<p>One palette and one set of controls across the start screen, the run
+screen, the import dialog, the help page and the HTML report. The same
+five-detent slider sets playback speed on both screens; the same row icons
+appear in the form and the sidebar; every choice is a row of cells with
+one filled and every switch an Off/On pair; keys are named on their
+buttons; Esc closes the help as it closes the import dialog.</p>
+<ul class="issues">
+<li><span class="sev s0">0</span> Closed the same day: the sidebar's Run
+settings use the form's names, Speed limit, Parked vehicles and Footpath
+strips.</li>
+<li><span class="sev s1">1</span> The zoom and traffic sliders are standard
+Tk scales and the playback slider is a drawn one; they look alike but the
+drawn one moves in detents and answers the arrow keys, the scales move
+continuously.</li>
+</ul>
+
+<h3>5. Error prevention</h3>
+<p class="rating">Rating: strong.</p>
+<p>A value that cannot be used is named in red as it is typed, and Start
+refuses it with the same sentence, so a traceback never reaches the
+reader. The junction picker turns its status red when a chosen junction has
+fewer than three legs and refuses a set of junctions that is not connected
+before anything is fetched. The map fetch refuses to overwrite hand-placed
+imagery. A playback value the slider does not offer is kept rather than
+snapped. Nothing the preview runs can leak into the run: a seeded run after
+previewing is byte for byte the run a fresh screen gives, and a test pins
+it.</p>
+<ul class="issues">
+<li><span class="sev s1">1</span> Trace replay can be switched on with a
+recording of another place; the preview explains it instead of preventing
+it, and the run then shows an empty road.</li>
+<li><span class="sev s1">1</span> A seed of -1 is accepted and draws a seed
+that is never shown, so that run cannot be repeated; the caption says so.</li>
+</ul>
+
+<h3>6. Recognition rather than recall</h3>
+<p class="rating">Rating: strong.</p>
+<p>Every choice of every setting has a picture beside it: the four signal
+controllers side by side with a line each, the two geometry modes, the
+strip grid at three widths, the map of each junction with a sentence on its
+surroundings, the five playback speeds with their milliseconds. The footer
+shows a row's explanation while the pointer is on it. The sidebar keeps the
+run's settings in view for the whole run, with the same icons as the form,
+and the report repeats them.</p>
+<ul class="issues">
+<li><span class="sev s1">1</span> The pictures need width. At 1280 pixels
+the form scrolls beside a narrower column and the pictures shrink to a size
+where the strip grid is hard to read.</li>
+<li><span class="sev s1">1</span> On a 720p window the sidebar drops to 8
+point type to stay in view, and on anything shorter it scrolls.</li>
+</ul>
+
+<h3>7. Flexibility and efficiency of use</h3>
+<p class="rating">Rating: adequate.</p>
+<p>Keyboard shortcuts for pause, view, map, help and undo; wheel zoom and
+drag pan; Return in the import dialog's Where box previews the place. For
+anyone who does not need the window, a per-network defaults file, a
+command-line override for any parameter, a headless mode and a sweep
+harness. Randomise draws a fresh seed in one click.</p>
+<ul class="issues">
+<li><span class="sev s1">1</span> No saved presets: a form set up for a
+particular study has to be set up again next time, or written into the
+network's defaults file by hand.</li>
+<li><span class="sev s1">1</span> No recent-places list in the import
+dialog; a place imported last week is typed again.</li>
+</ul>
+
+<h3>8. Aesthetic and minimalist design</h3>
+<p class="rating">Rating: strong.</p>
+<p>The form chooses its density by measurement, so nothing is clipped and
+nothing is wasted; captions move to the footer when they do not fit; the
+Scale row left the form because it meant nothing to a reader, and the
+sentence under the map toggle went for the same reason; the picture column
+takes a third of the window and no more; the sidebar is built at the
+largest type that fits.</p>
+<ul class="issues">
+<li><span class="sev s1">1</span> Thirteen junction tiles on this laptop
+push the form to a tight rung, with 2 pixels of width to spare.</li>
+<li><span class="sev s0">0</span> On a large monitor every row carries a
+two-line caption; the help page now says the same, so the captions could
+be shorter there.</li>
+</ul>
+
+<h3>9. Help users recognise, diagnose and recover from errors</h3>
+<p class="rating">Rating: adequate.</p>
+<p>Error sentences name the setting and the rule ("End time must be a
+whole number of 1 or more") in the same place the status is shown. The
+import dialog reports which stage failed and leaves the network runnable
+when only the map or the road fit failed. A trace recording of another
+place is explained in the preview rather than shown as an empty road. A
+failed map fetch says so in a toast and leaves the button ready to try
+again.</p>
+<ul class="issues">
+<li><span class="sev s0">0</span> Closed the same day: when every
+Overpass server turns the request away the dialog says the servers are
+busy and to try again in a minute or with a smaller radius; the server's
+own text goes to the log.</li>
+<li><span class="sev s1">1</span> A failed import's reason sits in the
+dialog's log pane; the status line says only that it failed.</li>
+</ul>
+
+<h3>10. Help and documentation</h3>
+<p class="rating">Rating: adequate.</p>
+<p>F1, or a Help button on either screen, opens a help page in the window:
+what the simulator does, the start screen and its undo, every setting with
+its meaning and unit, the run screen's keys and controls, importing a map,
+and where results go. The settings section is generated from the same table
+the footer reads, and a test checks every label is on the page. The README
+documents every parameter and quirk, and each run's report explains every
+result and term.</p>
+<ul class="issues">
+<li><span class="sev s1">1</span> The help page is text only. A picture of
+each screen with its parts named would answer most first questions
+faster.</li>
+<li><span class="sev s1">1</span> There is no link from a row to its help
+entry; a reader opens the page and scrolls to the setting.</li>
+</ul>
+
+<h2 class="brk">Summary</h2>
+<table>
+<thead><tr><th style="width:36%">Heuristic</th><th style="width:12%">Rating</th><th style="width:12%">Open issues</th><th style="width:12%">Worst severity</th><th>Headline</th></tr></thead>
+<tr><td>1. Visibility of system status</td><td>strong</td><td>3</td><td><span class="sev s1">1</span></td><td>Status everywhere; the scheduler's planning is the one silent process.</td></tr>
+<tr><td>2. Match with the real world</td><td>adequate</td><td>2</td><td><span class="sev s1">1</span></td><td>The controllers are named by what they do; strip width is still the model's word.</td></tr>
+<tr><td>3. User control and freedom</td><td>adequate</td><td>3</td><td><span class="sev s1">1</span></td><td>Undo and a confirmed Reset arrived on 15 October; no redo yet.</td></tr>
+<tr><td>4. Consistency and standards</td><td>strong</td><td>1</td><td><span class="sev s1">1</span></td><td>One vocabulary on both screens; two kinds of slider remain.</td></tr>
+<tr><td>5. Error prevention</td><td>strong</td><td>2</td><td><span class="sev s1">1</span></td><td>Bad values are refused in a sentence, never a traceback.</td></tr>
+<tr><td>6. Recognition rather than recall</td><td>strong</td><td>2</td><td><span class="sev s1">1</span></td><td>A picture for every choice; needs a wide window.</td></tr>
+<tr><td>7. Flexibility and efficiency</td><td>adequate</td><td>2</td><td><span class="sev s1">1</span></td><td>Keys, wheel, headless and sweeps; no presets.</td></tr>
+<tr><td>8. Aesthetic and minimalist design</td><td>strong</td><td>2</td><td><span class="sev s1">1</span></td><td>Density by measurement; the laptop rung is tight.</td></tr>
+<tr><td>9. Error recognition and recovery</td><td>adequate</td><td>1</td><td><span class="sev s1">1</span></td><td>Clear sentences for settings and for a failed fetch alike.</td></tr>
+<tr><td>10. Help and documentation</td><td>adequate</td><td>2</td><td><span class="sev s1">1</span></td><td>Help arrived on 15 October; it has no pictures yet.</td></tr>
+</table>
+<p>Twenty-four issues were found, none above severity 2. The four minor
+ones were fixed the same day and are marked closed above; the twenty that
+remain are cosmetic. The build has no major or catastrophic usability
+problem that this inspection could find.</p>
+
+<h2>What to fix first</h2>
+<p>The four minor findings were fixed on the day of the evaluation: Reset
+to defaults asks first, the sidebar uses the form's names, the planned
+controllers are named by what they do, and a failed map fetch says what to
+do. Of the cosmetic findings, these are worth the next hour:</p>
+<ol>
+<li><b>Add pictures to the help page</b>, one per screen with its parts
+named, and a link from each row's footer hint to its entry. (Heuristic 10,
+severity 1.)</li>
+<li><b>Add redo</b> beside undo, and a sentence in the footer when a
+junction change clears part of the history. (Heuristic 3, severity 1.)</li>
+<li><b>Show the scheduler's decision</b> as a toast when a planned
+controller sets a new cycle, so the one silent process has a voice.
+(Heuristic 1, severity 1.)</li>
+<li><b>Move the two Tk scales to the drawn slider</b>, so zoom, traffic and
+playback behave alike under the keyboard. (Heuristic 4, severity 1.)</li>
+</ol>
+
+<div class="box">
+<p><b>What this evaluation does not cover.</b> It is one evaluator's
+inspection, not a test with users, and it says nothing about whether a
+transport engineer reaches the right conclusions from the numbers the
+screens show. It covers the Python build's own screens; the HTML report was
+read but not inspected element by element.</p>
+</div>
+
+<footer>Heuristic evaluation of the DhakaSim Python build, 15 October 2026,
+against Jakob Nielsen's ten usability heuristics (1994) and his 0 to 4
+severity scale. Screenshots taken on the evaluation laptop on the same
+day.</footer>
+</body></html>

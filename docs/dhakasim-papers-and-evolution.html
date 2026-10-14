@@ -726,6 +726,55 @@ network over 30 minutes. It measures speed, waiting time and flow, as every
 paper does, and not safety or emissions.</p>
 </div>
 
+<h2 class="brk">The build against Nielsen's ten usability heuristics</h2>
+<p>The owner set Nielsen's heuristics as the basis for judging the screens
+on 6 October 2026, and the start screen and run screen were rebuilt against
+them over the following week. The table takes each heuristic in turn, names
+what in the build answers it, and names the gap that remains. The judgement
+is mine, from the code and from driving both screens; nobody has run a user
+study. The papers' own simulator had a Swing window with configuration
+files and JMathPlot graphs, so most rows below describe things no earlier
+version had.</p>
+<table>
+<thead><tr><th style="width:21%">Heuristic</th><th style="width:48%">What the build does</th><th>Gap</th></tr></thead>
+<tr><td>1. Visibility of system status</td>
+<td>The start screen's footer says what Start will run, counts the settings changed from the place's defaults, and marks each changed row with a dot. The run screen's toolbar shows the step, the end time and the view every step; a toast on the picture names every zoom, view change, map toggle and traffic change; the bottom bar shows progress. The import dialog has a progress bar fed by the worker's own log lines, and the Fetch map button says it is fetching.</td>
+<td>A long preview build shows "Building…" in the cell but no estimate. The scheduler's per-cycle re-planning is invisible while a run plays.</td></tr>
+<tr><td>2. Match between system and the real world</td>
+<td>Settings are worded as a reader thinks: Playback speed in Step, Slow, Normal, Fast and Max rather than a frame delay in milliseconds; Real geometry explained as medians and a roundabout ring, not "Java parity"; places by name with a sentence on their surroundings; the signal controllers named by what they do. Speeds in km/h, greens in seconds, traffic as a multiple of the survey.</td>
+<td>Strip width is still a modelling term; the preview picture explains it, the name does not. "Multi-obj. v1" and "v2" are the paper's labels, not a reader's.</td></tr>
+<tr><td>3. User control and freedom</td>
+<td>Reset to defaults on the start screen; Reset on the zoom; New simulation returns to the form at any point in a run, asking first if the run is unfinished; a view change can be reversed with the same key; the import picker has Close and Rebuild; an imported network can be removed, a shipped one cannot. Typed values are never rewritten under the typist.</td>
+<td>Closed on 15 October 2026: Ctrl+Z takes back the last change, a click on a row's name takes back that row's, and the footer names what came back. Still no redo.</td></tr>
+<tr><td>4. Consistency and standards</td>
+<td>One palette and one set of controls across the start screen, the run screen and the HTML report; the same five-detent slider sets playback speed on both screens; the same row icons appear in the form and in the run-screen sidebar; every strip is a <code>_Segmented</code> row of cells and every switch an Off/On pair; Space, V and M are named on their buttons.</td>
+<td>The zoom and traffic sliders are Tk scales while playback speed is a drawn slider; they look alike but behave differently under the keyboard.</td></tr>
+<tr><td>5. Error prevention</td>
+<td>A bad value is named in red as it is typed and Start refuses with the same sentence, so a traceback never reaches the reader. The junction picker turns its status red when a chosen junction has fewer than three legs, and refuses a set of junctions that is not connected before anything is fetched. The map fetch refuses to overwrite hand-placed imagery. A value the slider does not offer is kept, not snapped.</td>
+<td>A seed of -1 and a trace replay of another place's recording are allowed; both are explained in the preview rather than prevented.</td></tr>
+<tr><td>6. Recognition rather than recall</td>
+<td>Every choice of every setting has a picture beside it: the four signal controllers side by side, the two geometry modes, the strip grid at three widths, the map of each junction. The footer shows a row's explanation while the pointer is on it. The run-screen sidebar keeps the run's settings in view for the whole run, with the same icons as the form.</td>
+<td>The pictures need a wide window; at 1280 px the form scrolls beside a narrower column and the pictures shrink.</td></tr>
+<tr><td>7. Flexibility and efficiency of use</td>
+<td>Keyboard shortcuts for pause, view and map; wheel zoom and drag pan; a per-network defaults file, a <code>--set</code> override and a headless command line for everyone who does not need the window; a sweep harness for experiments; the Randomise button for a fresh seed.</td>
+<td>No saved presets of a whole form, and no recent-places list.</td></tr>
+<tr><td>8. Aesthetic and minimalist design</td>
+<td>The form chooses its density by measurement so nothing is clipped and nothing is wasted; captions move to the footer when they do not fit; the Scale row left the form because it meant nothing to a reader; the sidebar sentence under the map toggle went for the same reason; the picture column takes a third of the window and no more.</td>
+<td>Thirteen junction tiles on a laptop push the form to a tight rung; the sections still carry two-line captions on a large monitor.</td></tr>
+<tr><td>9. Help users recognise, diagnose and recover from errors</td>
+<td>Error sentences name the setting and the rule ("End time must be a whole number of 1 or more"), in the same place the status is shown. The import dialog reports which stage failed and leaves the network runnable when only the map or the road fit failed. A trace recording of another place is explained in the slot rather than shown as an empty road.</td>
+<td>A failed Overpass fetch reports the last mirror's error text, which is a server's sentence, not a reader's.</td></tr>
+<tr><td>10. Help and documentation</td>
+<td>Row explanations in the form, a sentence on each place's surroundings, toasts that say how to move in each view, a README that documents every parameter and quirk, and a per-run report that explains every result and term.</td>
+<td>Closed on 15 October 2026: F1 and a Help button on both screens open a page built from the same table the footer reads. The page is text; it has no pictures of the screens yet.</td></tr>
+</table>
+<p>Four heuristics were the ones the owner named in October, and they are
+the four the build answers best: status, recognition, error prevention and
+control. The two weakest rows were undo and in-window help; both were
+closed on 15 October 2026 with a per-setting history behind Ctrl+Z and a
+help page behind F1, and the gaps that remain in those rows are a redo and
+pictures on the help page.</p>
+
 <h2>Where it stands apart</h2>
 <ol>
 <li><b>Parity as a contract.</b> This is the only version of the simulator
