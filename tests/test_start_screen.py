@@ -216,6 +216,76 @@ def test_a_rebuild_keeps_what_the_reader_typed():
         end, seed, network)
 
 
+def test_a_change_can_be_taken_back_one_at_a_time():
+    """Ctrl+Z (``undo``) returns the last changed setting to what it was;
+    a typed value is one change however many keystrokes it took; a row's
+    name undoes that row; and a junction change is itself undoable."""
+    frame = panel(1920, 1000)
+    option = frame.option_panel
+    speed_was = option.fields["max_speed"].get()
+    end_was = option.fields["end_time"].get()
+    place_was = option.network_var.get()
+    assert not option.can_undo()
+    option.fields["max_speed"].set("45")
+    for typed in ("", "7", "77", "777"):   # keystrokes, one edit
+        option.fields["end_time"].set(typed)
+    assert option.can_undo() and option.can_undo("end_time")
+    assert option.undo()                   # the end time, typed last
+    assert option.fields["end_time"].get() == end_was
+    assert option.fields["max_speed"].get() == "45"
+    assert option.undo(("max_speed",))     # the row's name
+    assert option.fields["max_speed"].get() == speed_was
+    assert not option.undo()
+    other = next(n for n in gui.Processor.available_networks()
+                 if n != place_was)
+    option.network_var.set(other)
+    frame.root.update_idletasks()
+    assert option.can_undo("network")
+    assert option.undo()
+    network = option.network_var.get()
+    frame.root.destroy()
+    assert network == place_was, network
+
+
+def test_reset_to_defaults_asks_before_discarding_a_change():
+    """The one control that throws edits away asks first, naming how
+    many; with nothing changed it asks nothing."""
+    from tkinter import messagebox
+    frame = panel(1920, 1000)
+    option = frame.option_panel
+    asked = []
+    real = messagebox.askyesno
+    messagebox.askyesno = lambda title, text, **k: asked.append(text) or False
+    try:
+        option._reset_to_defaults()           # nothing changed: no question
+        option = first = frame.option_panel   # a fresh form, as Reset gives
+        option.fields["max_speed"].set("45")
+        option._reset_to_defaults()           # declined: the form stays
+        kept = frame.option_panel is first
+        speed = option.fields["max_speed"].get()
+    finally:
+        messagebox.askyesno = real
+        frame.root.destroy()
+    assert len(asked) == 1 and "1 setting" in asked[0] and "Speed limit" in asked[0], asked
+    assert kept and speed == "45"
+
+
+def test_the_help_page_opens_from_either_screen():
+    frame = panel(1920, 1000)
+    frame.show_help()
+    frame.root.update_idletasks()
+    first = frame._help
+    frame.show_help()                      # a second F1 fronts the first
+    same = frame._help is first and first.top.winfo_exists()
+    text = first.content()
+    first.close()
+    frame.root.destroy()
+    assert same
+    for phrase in ("The settings", "The run screen", "Ctrl+Z",
+                   "Speed limit:"):
+        assert phrase in text, phrase
+
+
 def test_a_rebuilt_strip_stops_watching_its_variable():
     """A choice strip renders from its variable, so it holds a trace.  Left
     behind by a rebuild, that trace fires into a destroyed widget the next

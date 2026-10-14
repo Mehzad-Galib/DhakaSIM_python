@@ -36,8 +36,8 @@ _NON_MOTORISED = {0, 1, 2}
 _SIGNAL_MODE_NAMES = {
     "fixed": "Fixed time",
     "biased-random": "Biased random",
-    "moo-v1": "Multi-objective v1 (Equations 1 and 2)",
-    "moo-v2": "Multi-objective v2 (Equations 3 and 4)",
+    "moo-v1": "Planned, all alike (multi-objective v1, Equations 1 and 2)",
+    "moo-v2": "Planned, by class (multi-objective v2, Equations 3 and 4)",
 }
 
 

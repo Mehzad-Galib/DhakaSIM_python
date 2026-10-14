@@ -1939,7 +1939,7 @@ SETTING_INFO = {
     "traffic": ("Traffic level", "x", "every route's arrival rate, as a "
                 "multiple of the surveyed demand; also adjustable while the "
                 "run plays"),
-    "max_speed": ("Maximum speed", "km/h", "the speed limit on every link"),
+    "max_speed": ("Speed limit", "km/h", "the speed limit on every link"),
     "seed": ("Random seed", "", "the same seed gives the same run; -1 draws "
              "a fresh one"),
     "accident": ("Accidents", "", "close encounters per accident; lower "
@@ -2032,6 +2032,138 @@ def setting_problem(key: str, value: str):
     return None
 
 
+#: The order the help page lists the settings in: the form's own.
+HELP_SETTING_ORDER = ("network", "time", "end_time", "traffic", "max_speed",
+                      "seed", "accident", "trace", "signal", "signal_green",
+                      "geometry", "pedestrians", "friction", "strip",
+                      "footpath", "render3d", "speed")
+
+#: A sentence more than SETTING_INFO's meaning for the settings a reader
+#: asks about; the help page prints it after the meaning.
+HELP_SETTING_MORE = {
+    "network": "A surveyed junction carries 24-hour turning counts, an "
+               "hourly demand profile and an hourly vehicle mix; an "
+               "imported one carries synthetic demand at a uniform rate.",
+    "time": "Only a surveyed junction has an hourly profile, so the row "
+            "appears for those alone.",
+    "seed": "Type a number to repeat a run exactly, objects and "
+            "pedestrians included; Randomise draws a fresh one each click; "
+            "-1 draws one at Start and never shows it.",
+    "trace": "A run records trace.txt as it plays; On replays that file "
+             "instead of simulating, and the recording must be of this "
+             "place.",
+    "signal": "Fixed time gives each approach the same green in turn. "
+              "Biased random weights random greens by each approach's "
+              "share of the traffic. The two Planned controllers plan "
+              "every cycle with NSGA-II (the multi-objective v1 and v2 of "
+              "Rahaman et al., 2025): all alike counts every vehicle the "
+              "same, by class prices motorised and non-motorised apart.",
+    "geometry": "Off reproduces the original Java program's results "
+                "exactly.",
+    "strip": "The model has no lanes: a carriageway is a row of strips "
+             "and a vehicle takes as many as its width needs. 0.5 m is "
+             "the surveyed non-lane traffic; a strip wider than any "
+             "vehicle, 2.5 m say, is a lane.",
+    "render3d": "Line art draws one silhouette per part and is the "
+                "lighter of the two; the view can be switched while the "
+                "run plays.",
+    "speed": "Step, Slow, Normal, Fast and Max are 500, 100, 50, 20 and "
+             "1 ms between frames; the run-screen sidebar has the same "
+             "slider, live.",
+}
+
+
+def help_sections():
+    """The help page, as (heading, paragraphs) pairs.  Built from the
+    same table the footer reads (SETTING_INFO), so a setting cannot be
+    on the form and missing from the help."""
+    settings = []
+    for key in HELP_SETTING_ORDER:
+        label, unit, meaning = SETTING_INFO[key]
+        line = f"{label}: {meaning[0].upper()}{meaning[1:]}"
+        if unit and unit != "x":
+            line += f" ({unit})"
+        line += "."
+        more = HELP_SETTING_MORE.get(key)
+        if more:
+            line += " " + more
+        settings.append(line)
+    return [
+        ("What DhakaSim does",
+         ["DhakaSim is a microscopic simulator for traffic that keeps to "
+          "no lanes: a carriageway is a row of half-metre strips, and a "
+          "rickshaw, a bus and a motorbike share it by taking the strips "
+          "their width needs. A run generates vehicles from surveyed "
+          "demand, moves them with a car-following model, holds them at "
+          "signals, and writes per-link and per-type statistics with an "
+          "HTML report at the end.",
+          "This Python build is a port of the Java original and gives "
+          "the same numbers under a matched seed. Everything added since "
+          "-- real junction geometry, stop lines, the keep-clear rule, "
+          "turning discipline -- carries an Off setting that restores "
+          "the Java behaviour."]),
+        ("The start screen",
+         ["Choose a junction, set the run, press Start simulation. The "
+          "footer line says what Start will run and counts the settings "
+          "that differ from the place's own defaults; a changed row "
+          "carries a dot before its name. A value that cannot be used is "
+          "named in red as it is typed, and Start refuses it with the "
+          "same sentence.",
+          "Undo: Ctrl+Z takes back the last change, one change at a time; "
+          "clicking a row's name takes back that setting's last change. "
+          "Reset to defaults reloads every setting from the place's own "
+          "values. Choosing a junction loads that place's speed limit, "
+          "green time and switches.",
+          "The pictures beside the settings show the setting under the "
+          "pointer, one picture per choice: the four signal controllers "
+          "side by side, the two geometry modes, the strip grid at three "
+          "widths, a map of each junction. Each is a seeded run a few "
+          "dozen steps in, drawn by the run screen's own panel; drag to "
+          "pan and wheel to zoom in any of them."]),
+        ("The settings", settings),
+        ("The run screen",
+         ["Space pauses and resumes. V switches between the plan view and "
+          "the 3D view, with the camera tilting between them; M hides and "
+          "shows the background map; F1 opens this page. Drag to pan and "
+          "wheel to zoom in the plan view; in 3D, drag orbits, right-drag "
+          "or Shift+drag pans, and a double-click resets the camera.",
+          "The toolbar's Zoom slider and Reset frame the network; the "
+          "Traffic slider multiplies every route's arrivals from the next "
+          "arrival on, so a junction can be loaded up while the run plays; "
+          "the Background map toggle hides the imagery. While the map is "
+          "shown the zoom snaps to the steps the imagery can be drawn at.",
+          "The sidebar names the place, counts the vehicles on the "
+          "network by type, keys the side-friction colours, and keeps the "
+          "run's settings in view. Playback speed is the one setting that "
+          "can be changed mid-run; it changes nothing but the pace. New "
+          "simulation returns to the start screen, asking first if the "
+          "run is unfinished; Open report opens the finished run's "
+          "report."]),
+        ("Importing a map",
+         ["Import map... on the start screen takes a place name, a "
+          "\"lat, lon\" pair or a pasted Google Maps or OpenStreetMap "
+          "link, fetches the roads, and shows them over the map. Click "
+          "the junction to simulate, choose which legs to keep, say "
+          "whether it is signalised or a roundabout, and Import builds a "
+          "runnable network with its imagery and its links bent onto the "
+          "real streets. The demand is synthetic until real counts are "
+          "supplied. An imported junction appears as a tile under "
+          "Imported, and only those tiles can be removed."]),
+        ("Results and files",
+         ["Every run appends per-link speed, waiting and flow and per-type "
+          "speed, waiting, trip time, fuel and accident rows under "
+          "statistics/csv/, and writes a self-contained HTML report with "
+          "animated plan and 3D replays under statistics/. A seed typed "
+          "on the start screen reproduces a run to the byte.",
+          "Each network's defaults.txt pins the settings the place is "
+          "studied with; a run without the window is "
+          "run_dhakasim.py --headless --network <name>, with "
+          "--set NAME=VALUE for any parameter and --seed for a "
+          "repeatable one. README.md beside the program documents every "
+          "parameter, file and quirk."]),
+    ]
+
+
 def setting_message(key: str, value: str, default=None) -> str:
     """The footer's sentence for a change: what moved, to what, what that
     means, and what it was -- so the reader never has to recall it."""
@@ -2117,8 +2249,8 @@ def preview_note(key: str, value: str, place: str = "") -> str:
 PREVIEW_CHOICES = {
     "traffic": ("0.5", "1", "1.5", "2", "3"),
     "trace": ("Off", "On"),
-    "signal": ("Fixed time", "Biased random", "Multi-objective v1",
-               "Multi-objective v2"),
+    "signal": ("Fixed time", "Biased random", "Planned, all alike",
+               "Planned, by class"),
     "geometry": ("Off", "On"),
     "pedestrians": ("Off", "On"),
     "friction": ("Off", "On"),
@@ -2137,9 +2269,9 @@ PREVIEW_CELL_NOTES = {
     "signal": {"Fixed time": "Each approach green in turn, {green} s each",
                "Biased random": "Random greens, weighted by each approach's "
                                 "share of the traffic",
-               "Multi-objective v1": "Greens planned every cycle; every "
+               "Planned, all alike": "Greens planned every cycle; every "
                                      "vehicle counts alike",
-               "Multi-objective v2": "Greens planned every cycle; the "
+               "Planned, by class": "Greens planned every cycle; the "
                                      "vehicle classes priced apart"},
     "geometry": {"Off": "Plain roads as the Java original models them: no "
                         "medians, arms meeting at a point",
@@ -2190,7 +2322,7 @@ def preview_alternative(key: str, value: str):
             return "0.5"
         return ladder[(index + 1) % len(ladder)]
     if key == "signal":
-        return "Multi-objective v1" if value == "Fixed time" else "Fixed time"
+        return "Planned, all alike" if value == "Fixed time" else "Fixed time"
     if key == "traffic":
         return "1" if value == "3" else "3"
     return None
@@ -3349,19 +3481,20 @@ class OptionPanel:
     """
 
     #: How green time is shared out.  Values are what ``Parameters.SIGNAL_MODE``
-    #: takes; the labels are what a reader of the paper would call them.
+    #: takes; the labels say what each does (the paper's "multi-objective
+    #: v1" and "v2" are named in the help and the report, not on the
+    #: strip -- a reader could not tell them apart by version number).
     SIGNAL_CHOICES = {
         "Fixed time": "fixed",
         "Biased random": "biased-random",
-        "Multi-objective v1": "moo-v1",
-        "Multi-objective v2": "moo-v2",
+        "Planned, all alike": "moo-v1",
+        "Planned, by class": "moo-v2",
     }
-    #: What the strip's cells say; the full names stay the values the
-    #: run, the footer and the preview use.  "Multi-objective v1" twice
-    #: abreast set the right column's width, and that width is what the
-    #: picture pane gets back.
-    SIGNAL_LABELS = {"Multi-objective v1": "Multi-obj. v1",
-                     "Multi-objective v2": "Multi-obj. v2"}
+    #: What the strip's cells say when a name is too long for a cell
+    #: (two abreast set the right column's width, which comes off the
+    #: picture pane).  Empty since the controllers were named by what
+    #: they do; kept as the hook.
+    SIGNAL_LABELS = {}
 
     #: Whether the 3D view is on and how it draws are one decision to anyone
     #: standing in front of the form, so they are one control.
@@ -3397,6 +3530,9 @@ class OptionPanel:
         self.form = self._build_shell()
         self._build_form()
         self.frame.bind("<Configure>", lambda _e: self._fit_to_window())
+        # Undo for the whole form; the run screen unbinds it in dispose.
+        self.frame.winfo_toplevel().bind("<Control-z>",
+                                         lambda _e: self.undo())
         self.frame.update_idletasks()
         self._fit_to_window(force=True)
 
@@ -4004,6 +4140,10 @@ class OptionPanel:
         name.pack(side="left")
         if keys:
             self._row_labels.append((name, label, keys))
+            # A click on the name takes back that setting's last change
+            # (the footer says "Ctrl+Z undoes" after every change; the
+            # name is the per-row way).
+            name.bind("<Button-1>", lambda _e, k=keys: self.undo(k))
         if level["caption"]:
             tk.Label(cell, text=caption, font=("Segoe UI", level["caption"]),
                      background=_UI["panel"], foreground=_UI["muted"],
@@ -4203,9 +4343,21 @@ class OptionPanel:
         self._snapshot = {}
         self._row_labels = []
         self._status_job = None
+        # Undo: the values each setting had before each change, newest
+        # last, and the order the changes came in (Ctrl+Z takes the
+        # latest).  ``_last`` is what every variable held a moment ago --
+        # a trace fires after the write, so the old value has to be
+        # remembered.  A run of writes to one setting within
+        # UNDO_COALESCE_S is one change (typing "480" is three writes).
+        self._history = {}
+        self._undo_order = []
+        self._last = {}
+        self._undoing = False
+        self._last_change = (None, 0.0)
         self.network_var.trace_add("write",
                                    lambda *_a: self._on_network_change())
         self._on_network_change()
+        self._last = self._values()
         # One watcher per setting, made once with the variables -- a form
         # rebuild must not add a second (test_start_screen counts them).
         for key, var in self._watched().items():
@@ -4234,20 +4386,100 @@ class OptionPanel:
 
     # ---- feedback: the footer says what every change does ------------------
 
+    #: Writes to one setting closer together than this are one change
+    #: for undo: the keystrokes of a typed value, or a dragged slider.
+    UNDO_COALESCE_S = 1.5
+
+    def _remember(self, key: str, value: str) -> None:
+        """Note the value a setting held before this write, so the write
+        can be taken back."""
+        was = self._last.get(key)
+        self._last[key] = value
+        if self._undoing or was is None or was == value:
+            return
+        now = time.monotonic()
+        last_key, last_at = self._last_change
+        if last_key == key and now - last_at < self.UNDO_COALESCE_S:
+            # The same edit still going on: keep the value from before it.
+            self._last_change = (key, now)
+            if self._history.get(key) and self._history[key][-1] == value:
+                self._history[key].pop()        # typed back to where it was
+                for index in range(len(self._undo_order) - 1, -1, -1):
+                    if self._undo_order[index] == key:
+                        del self._undo_order[index]
+                        break
+            return
+        self._history.setdefault(key, []).append(was)
+        self._undo_order.append(key)
+        self._last_change = (key, now)
+
+    def can_undo(self, key=None) -> bool:
+        if key is None:
+            return any(self._history.get(k) for k in self._undo_order)
+        return bool(self._history.get(key))
+
+    def undo(self, key=None) -> bool:
+        """Take back the last change -- of ``key``, or of any setting.
+        Returns whether there was one.  The variable is written back, so
+        the strip, the picture and the footer follow as for any change."""
+        if key is None:
+            while self._undo_order and not self._history.get(
+                    self._undo_order[-1]):
+                self._undo_order.pop()
+            if not self._undo_order:
+                return False
+            key = self._undo_order[-1]
+        elif isinstance(key, (tuple, list)):
+            # A row with two settings: the one changed most recently.
+            keys = [k for k in reversed(self._undo_order) if k in key]
+            if not keys:
+                return False
+            key = keys[0]
+        history = self._history.get(key)
+        if not history:
+            return False
+        value = history.pop()
+        for index in range(len(self._undo_order) - 1, -1, -1):
+            if self._undo_order[index] == key:
+                del self._undo_order[index]
+                break
+        self._undoing = True
+        try:
+            self._watched()[key].set(value)
+        finally:
+            self._undoing = False
+        self._last[key] = value
+        self._last_change = (None, 0.0)
+        label, unit, _meaning = SETTING_INFO[key]
+        shown = (value if not unit else f"x{value}" if unit == "x"
+                 else f"{value} {unit}")
+        if key == "network":
+            shown = _place_name(value)
+        self._show_status(f"Undone: {label} back to {shown}.")
+        if self._status_job is not None:
+            self.frame.after_cancel(self._status_job)
+        self._status_job = self.frame.after(7000, self._idle_status)
+        self._refresh_changed_marks()
+        return True
+
     def _setting_changed(self, key: str) -> None:
         """A setting's variable was written.  Say what that means in the
         footer, mark the row if it now differs from the place's default,
         and warn at once if the value cannot be used."""
         if self._applying_defaults or key == "network":
             return                      # the network summary covers it
-        self._preview.request(key)
         value = self._watched()[key].get()
+        self._remember(key, value)
+        self._preview.request(key)
+        if self._undoing:
+            return                      # undo says its own sentence
         problem = setting_problem(key, value)
         if problem:
             self._show_status(problem, error=True)
         else:
             self._show_status(setting_message(key, value,
-                                              self._snapshot.get(key)))
+                                              self._snapshot.get(key))
+                              + "  Ctrl+Z undoes.")
             if self._status_job is not None:
                 self.frame.after_cancel(self._status_job)
             self._status_job = self.frame.after(7000, self._idle_status)
@@ -4310,10 +4542,12 @@ class OptionPanel:
         for widget, label, keys in self._row_labels:
             changed = any(k in self._snapshot and self._snapshot[k] != values[k]
                           for k in keys)
+            undoable = any(self._history.get(k) for k in keys)
             try:
                 widget.configure(
                     text=("\u25cf " + label) if changed else label,
-                    foreground=_UI["accent_text"] if changed else _UI["text"])
+                    foreground=_UI["accent_text"] if changed else _UI["text"],
+                    cursor="hand2" if undoable else "")
             except tk.TclError:
                 pass
 
@@ -4572,11 +4806,13 @@ class OptionPanel:
         inner = tk.Frame(self._footer, background=_UI["band"])
         inner.pack(fill="x", padx=level["pad"][0] * 2, pady=level["foot_pad"])
         self._button(inner, "Reset to defaults",
-                     self.dhaka_sim_frame.show_options).pack(side="left")
+                     self._reset_to_defaults).pack(side="left")
         # In the footer, not the form: a footer button costs no height, and
         # the density ladder has none to give (see CLAUDE.md).
         self._button(inner, "Import map…", self._open_import).pack(
             side="left", padx=(10, 0))
+        self._button(inner, "Help  (F1)", self.dhaka_sim_frame.show_help,
+                     small=True).pack(side="left", padx=(10, 0))
         start = self._button(inner, "Start simulation", self.start_simulation,
                              primary=True)
         start.pack(side="right")
@@ -4592,6 +4828,25 @@ class OptionPanel:
             background=_UI["band"], foreground=_UI["muted"], anchor="w",
             width=1)
         self._hint.pack(side="left", fill="x", expand=True, padx=16)
+
+    def _reset_to_defaults(self) -> None:
+        """Put every setting back to the place's own values -- after
+        asking, when any of them has been changed.  The one control on
+        the form that throws edits away, and it used to do so silently
+        (heuristic evaluation, 15 Oct 2026)."""
+        values = self._values()
+        changed = [SETTING_INFO[k][0] for k, v in values.items()
+                   if k in self._snapshot and self._snapshot[k] != v]
+        if changed:
+            named = ", ".join(changed[:4]) + (", ..." if len(changed) > 4
+                                              else "")
+            if not messagebox.askyesno(
+                    "Reset to defaults",
+                    f"{len(changed)} setting{'s' if len(changed) > 1 else ''} "
+                    f"differ from {_place_name(values['network'])}'s own "
+                    f"defaults: {named}.\n\nPut them all back?"):
+                return
+        self.dhaka_sim_frame.show_options()
 
     def _open_import(self):
         """Open the map-import dialog; a second click fronts the first one."""
@@ -4676,6 +4931,17 @@ class OptionPanel:
         # against; the footer names what it set.
         self._applying_defaults = False
         self._snapshot = self._values()
+        if self._last:
+            # The junction itself is a change to take back; the settings
+            # its defaults rewrote lose their histories, since the values
+            # in them belong to the other place.
+            self._remember("network", self.network_var.get())
+            for key, value in self._snapshot.items():
+                if key != "network" and self._last.get(key) != value:
+                    self._history.pop(key, None)
+                    self._undo_order = [k for k in self._undo_order
+                                        if k != key]
+                    self._last[key] = value
         self._refresh_changed_marks()
         self._show_status(self._network_summary(applied))
         if self._status_job is not None:
@@ -4694,6 +4960,10 @@ class OptionPanel:
     def dispose(self) -> None:
         """Stop the preview's runs and put Parameters back, and drop the
         footer timer so it cannot fire into a destroyed form."""
+        try:
+            self.frame.winfo_toplevel().unbind("<Control-z>")
+        except tk.TclError:
+            pass
         if self._status_job is not None:
             try:
                 self.frame.after_cancel(self._status_job)
@@ -4829,6 +5099,73 @@ def next_import_floor(floor):
         if next_floor > floor:
             return next_floor
     return 1.0
+
+
+class _HelpWindow:
+    """The in-app help page, opened by F1 or a Help button on either screen.
+
+    A read-only ``tk.Text`` in the application's palette, filled from
+    ``help_sections`` so the text is one table and not two.  One window
+    per application: a second request fronts the first.
+    """
+
+    def __init__(self, parent):
+        top = self.top = tk.Toplevel(parent)
+        top.title("DhakaSim help")
+        top.configure(background=_UI["ground"])
+        top.geometry("760x640")
+        top.minsize(480, 320)
+        panel = tk.Frame(top, background=_UI["panel"], padx=4, pady=4,
+                         highlightthickness=1, highlightbackground=_UI["edge"])
+        panel.pack(fill="both", expand=True, padx=12, pady=(12, 6))
+        text = self.text = tk.Text(
+            panel, wrap="word", background=_UI["panel"],
+            foreground=_UI["text"], insertbackground=_UI["panel"],
+            font=("Segoe UI", 10), relief="flat", bd=0, padx=16, pady=12,
+            highlightthickness=0, cursor="arrow",
+            selectbackground=_UI["glow"], selectforeground=_UI["text"])
+        bar = tk.Scrollbar(panel, orient="vertical", command=text.yview,
+                           background=_UI["seg_off"],
+                           activebackground=_UI["seg_hover"],
+                           troughcolor=_UI["ground"], borderwidth=0,
+                           highlightthickness=0, elementborderwidth=0,
+                           width=12)
+        text.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        text.pack(side="left", fill="both", expand=True)
+        text.tag_configure("h1", font=("Segoe UI Semibold", 15),
+                           foreground=_UI["accent_text"], spacing3=6)
+        text.tag_configure("h2", font=("Segoe UI Semibold", 12),
+                           foreground=_UI["accent_text"], spacing1=14,
+                           spacing3=4)
+        text.tag_configure("p", spacing3=7, lmargin1=0, lmargin2=0)
+        text.tag_configure("li", spacing3=5, lmargin1=14, lmargin2=14)
+        text.insert("end", "DhakaSim\n", "h1")
+        for heading, paragraphs in help_sections():
+            text.insert("end", heading + "\n", "h2")
+            tag = "li" if heading == "The settings" else "p"
+            for paragraph in paragraphs:
+                text.insert("end", paragraph + "\n", tag)
+        text.configure(state="disabled")
+        foot = tk.Frame(top, background=_UI["ground"])
+        foot.pack(fill="x", padx=12, pady=(0, 12))
+        _ToolButton(foot, text="Close  (Esc)", command=self.close).pack(
+            side="right")
+        top.bind("<Escape>", lambda _e: self.close())
+        top.bind("<F1>", lambda _e: self.close())
+        text.bind("<MouseWheel>", lambda e: text.yview_scroll(
+            -1 if e.delta > 0 else 1, "units"))
+        top.protocol("WM_DELETE_WINDOW", self.close)
+        text.focus_set()
+
+    def content(self) -> str:
+        return self.text.get("1.0", "end")
+
+    def close(self) -> None:
+        try:
+            self.top.destroy()
+        except tk.TclError:
+            pass
 
 
 class _ImportDialog:
@@ -5870,6 +6207,8 @@ class DhakaSimFrame:
         self._legend_size = None
         self._legend_job = None
         self._basemap_box = None
+        self._help = None
+        self.root.bind("<F1>", lambda _e: self.show_help())
         self.show_options()
 
     # Legend rows: label -> the vehicle type indices it covers.
@@ -5922,14 +6261,14 @@ class DhakaSimFrame:
             (DhakaSimFrame.DELAY_LABEL,
              str(Parameters.simulation_speed), "ms"),
             ("Random seed", str(Parameters.seed), ""),
-            ("Max speed", f"{Parameters.maximum_speed * 3.6:.0f}", "km/h"),
+            ("Speed limit", f"{Parameters.maximum_speed * 3.6:.0f}", "km/h"),
             ("Strip width", f"{Parameters.strip_width:g}", "m"),
-            ("Footpath strip", f"{Parameters.footpath_strip_width:g}", "m"),
+            ("Footpath strips", f"{Parameters.footpath_strip_width:g}", "m"),
             # Pixels per metre is not here: it left the start screen on
             # 11 Oct 2026 (a drawing resolution the picture is zoomed to
             # fit anyway), so it is not a setting the run was set up with.
             ("Pedestrians", on_off(Parameters.across_pedestrian_mode), ""),
-            ("Side friction", on_off(Parameters.OBJECT_MODE), ""),
+            ("Parked vehicles", on_off(Parameters.OBJECT_MODE), ""),
             ("Real geometry", on_off(Parameters.GEOMETRY_MODE), ""),
             ("Trace replay", on_off(Parameters.TRACE_MODE), ""),
         ]
@@ -5948,10 +6287,10 @@ class DhakaSimFrame:
         "Run settings": "settings",
         "Time of day": "time", "End time": "end_time",
         "Playback speed": "speed", "Random seed": "seed",
-        "Max speed": "max_speed", "Strip width": "strip",
-        "Footpath strip": "footpath", "Pixels per metre": "ppm",
-        "Pedestrians": "pedestrians", "Real geometry": "geometry",
-        "Trace replay": "trace",
+        "Speed limit": "max_speed", "Strip width": "strip",
+        "Footpath strips": "footpath", "Pixels per metre": "ppm",
+        "Pedestrians": "pedestrians", "Parked vehicles": "friction",
+        "Real geometry": "geometry", "Trace replay": "trace",
     }
 
     def _dark_button(self, parent, text, command, width=None, size=10):
@@ -5978,7 +6317,7 @@ class DhakaSimFrame:
         """
         bg = _UI["band"]
         tk.Frame(bar, width=1, bg=_UI["edge"]).pack(side="left", fill="y",
-                                                    padx=(14, 12), pady=2)
+                                                    padx=(10, 8), pady=2)
         tk.Label(bar, text="Zoom", font=("Segoe UI", 10), bg=bg,
                  fg=_UI["muted"]).pack(side="left", padx=(0, 6))
         # A slider, not +/- buttons: with imagery on, the zoom snaps to the
@@ -5991,7 +6330,7 @@ class DhakaSimFrame:
         self._scale_slider = tk.Scale(
             bar, from_=0, to=100, orient="horizontal", showvalue=False,
             borderwidth=0, highlightthickness=0, sliderrelief="flat",
-            sliderlength=18, width=10, length=110, background=_UI["seg_off"],
+            sliderlength=18, width=10, length=90, background=_UI["seg_off"],
             troughcolor=_UI["panel"], activebackground=_UI["accent"],
             command=self._on_zoom_slider)
         self._scale_slider.pack(side="left", padx=(0, 6))
@@ -6004,7 +6343,7 @@ class DhakaSimFrame:
             lambda _e: self.panel is not None
             and self.sync_zoom_slider(self.panel.scale))
         self._dark_button(bar, "Reset", self.reset_zoom, size=9).pack(
-            side="left", padx=(0, 14))
+            side="left", padx=(0, 10))
 
         # Traffic level, live (owner request, 6 Oct 2026: "increase traffic
         # density while the simulation is running").  A multiplier on every
@@ -6017,7 +6356,7 @@ class DhakaSimFrame:
         self._traffic_slider = tk.Scale(
             bar, from_=25, to=300, orient="horizontal",
             showvalue=False, borderwidth=0, highlightthickness=0,
-            sliderrelief="flat", sliderlength=18, width=10, length=110,
+            sliderrelief="flat", sliderlength=18, width=10, length=90,
             background=_UI["seg_off"], troughcolor=_UI["panel"],
             activebackground=_UI["accent"], command=self._on_traffic_slider)
         self._traffic_slider.set(int(round(Parameters.DEMAND_SCALE * 100)))
@@ -6026,7 +6365,7 @@ class DhakaSimFrame:
             bar, text=f"x{Parameters.DEMAND_SCALE:.2g}",
             font=("Consolas", 10, "bold"), bg=bg, fg=_UI["text"], width=5,
             anchor="w")
-        self._traffic_label.pack(side="left", padx=(0, 10))
+        self._traffic_label.pack(side="left", padx=(0, 6))
 
         # The imagery controls live in a box of their own, because what
         # goes in it can change mid-run: a network with no map on disk
@@ -6406,6 +6745,15 @@ class DhakaSimFrame:
 
         self.root.after(300, poll)
 
+    def show_help(self) -> None:
+        """Open the help page, or front the one already open."""
+        help_window = self._help
+        if help_window is not None and help_window.top.winfo_exists():
+            help_window.top.lift()
+            help_window.top.focus_set()
+            return
+        self._help = _HelpWindow(self.root)
+
     def show_options(self) -> None:
         """Return to the start form, ready for another run."""
         self._teardown()
@@ -6490,17 +6838,22 @@ class DhakaSimFrame:
         self._view_button = _ToolButton(top_bar, command=self.toggle_view)
         self._view_button.pack(side="left", padx=(8, 0))
         self._sync_view_button()
+        _ToolButton(top_bar, text="Help  (F1)", command=self.show_help).pack(
+            side="left", padx=(8, 0))
         self.root.bind("<KeyPress-v>", lambda _e: self.toggle_view())
         self.root.bind("<KeyPress-space>", lambda _e: self.toggle_pause())
         self.root.bind("<KeyPress-m>", lambda _e: self.toggle_basemap())
         self._build_view_controls(top_bar)
 
-        # At the bar's right end, so the controls keep their places
-        # whatever the sentence says.
+        # After the controls, taking whatever width the bar has left:
+        # ``width=1`` with fill, so on a narrow window the sentence is
+        # clipped at its end ("Step 61 of 480 ...") instead of the
+        # controls losing their places -- and the step is the part that
+        # matters.
         self._status = tk.Label(top_bar, text="", background=_UI["band"],
                                 foreground=_UI["accent_text"],
-                                font=("Segoe UI", 10))
-        self._status.pack(side="right", padx=(12, 4))
+                                font=("Segoe UI", 10), anchor="w", width=1)
+        self._status.pack(side="left", fill="x", expand=True, padx=(12, 4))
         top_bar.pack(side="top", fill="x")
         _glass(top_bar)
         self._top_bar = top_bar

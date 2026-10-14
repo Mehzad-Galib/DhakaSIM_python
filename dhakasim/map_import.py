@@ -922,12 +922,17 @@ def fetch_roads(bbox, classes, log=print, cancelled=lambda: False) -> dict:
             last_error = f"{host}: {exc}"
             log(f"  {host} did not answer ({code or exc}); trying the next")
             if code not in (429, 504, None):
+                # The server's own text went to the log above; the
+                # sentence the reader sees says what to do.
                 raise RuntimeError(
-                    f"the map server refused the request ({exc})") from exc
+                    f"the map server refused the request (HTTP {code}). "
+                    "A smaller radius or fewer road classes usually "
+                    "helps") from exc
             time.sleep(2)
+    log(f"  last answer: {last_error}")
     raise RuntimeError(
-        "every map server is overloaded right now -- try again in a few "
-        f"minutes ({last_error})")
+        "the OpenStreetMap servers are all busy right now. Try again in a "
+        "minute, or import a smaller radius")
 
 
 def _to_geojson(data: dict) -> dict:
