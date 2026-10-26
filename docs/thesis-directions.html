@@ -1,0 +1,305 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Four thesis directions: DhakaSim</title>
+<style>
+@page { size: A4; margin: 19mm 17mm; }
+body { font: 10.4pt/1.5 "Charter","Georgia",serif; color:#16150f; margin:0; }
+h1 { font-size:19pt; line-height:1.2; margin:0 0 4pt; }
+h2 { font-size:12.5pt; margin:18pt 0 6pt; padding-bottom:3pt;
+     border-bottom:1px solid #cfc8ba; page-break-after:avoid; }
+h3 { font-size:10.4pt; margin:11pt 0 3pt; page-break-after:avoid;
+     font-family:"Helvetica Neue",Arial,sans-serif; }
+p { margin:0 0 7pt; }
+.lead { color:#544e42; font-size:10pt; margin-bottom:14pt; }
+ul,ol { margin:0 0 8pt; padding-left:17pt; }
+li { margin-bottom:3pt; }
+table { border-collapse:collapse; width:100%; margin:8pt 0 10pt;
+        font-family:"Helvetica Neue",Arial,sans-serif; font-size:8.4pt;
+        page-break-inside:avoid; }
+th,td { border:1px solid #cfc8ba; padding:4pt 6pt; text-align:left;
+        vertical-align:top; }
+th { background:#efeade; font-weight:600; }
+code { font-family:"Consolas",monospace; font-size:9pt; background:#f1ece1;
+       padding:0 3px; border-radius:2px; }
+.prop { border:1px solid #c6bfae; border-top:3px solid #7c6a44;
+        background:#fcfaf5; padding:11pt 14pt 8pt; margin:14pt 0;
+        page-break-inside:avoid; }
+.prop h2 { margin-top:0; border:none; padding:0; font-size:13pt; }
+.tag { font-family:"Helvetica Neue",Arial,sans-serif; font-size:8pt;
+       letter-spacing:.06em; text-transform:uppercase; color:#7c6a44;
+       margin-bottom:3pt; }
+.note { border-left:3px solid #8a7a58; background:#f6f2e8; padding:7pt 11pt;
+        margin:9pt 0 3pt; font-size:9.6pt; page-break-inside:avoid; }
+.note p:last-child { margin-bottom:0; }
+footer { margin-top:16pt; padding-top:6pt; border-top:1px solid #cfc8ba;
+         color:#6d6658; font-size:8.5pt; }
+.brk { page-break-before:always; }
+</style></head><body>
+
+<h1>Four thesis directions</h1>
+<p class="lead">Each one extends the published DhakaSim and RoadBird work, carries
+a real machine learning component, and connects back to your earlier study of
+lane diversion and intersection blocking at a four-legged junction. They are
+ordered by how much risk they carry, lowest first.</p>
+
+<p>The expected findings in each proposal are hypotheses, not promises. Two of
+them are set up so that a negative result is still publishable, which matters
+when you have a fixed submission date.</p>
+
+<div class="prop">
+<p class="tag">Direction 1</p>
+<h2>A learned surrogate of the simulator, and what it reveals about diversion</h2>
+
+<h3>Objective</h3>
+<p>Build a graph neural network that predicts per-link speed, waiting time and
+flow from a network, a demand pattern and a diversion configuration, without
+running the simulator. Then use it to answer which links, under which demand,
+most determine how the whole network performs.</p>
+
+<h3>Methodology</h3>
+<ol>
+<li>Make strip width, diversion and intersection blocking per-link properties
+rather than one global setting, so a configuration becomes a vector over the
+network rather than a single switch.</li>
+<li>Instrument the simulator to log link state at fixed intervals instead of only
+writing an average at the end of a run.</li>
+<li>Generate training data by sweeping configurations, demand levels and
+topologies, using the parallel harness already in the repository.</li>
+<li>Train a message-passing network over the road graph, with links as nodes and
+junctions as edges. Compare against ridge regression and gradient boosting on
+hand-built features.</li>
+<li>Apply permutation importance and a graph-specific attribution method to find
+which links dominate the prediction, and cluster links by their response
+profile.</li>
+</ol>
+
+<h3>Expected findings</h3>
+<ul>
+<li>A surrogate accurate enough to replace the simulator for screening, with
+error reported using the same measures the 2024 paper uses in its Table IV, so
+the numbers are directly comparable to published ones.</li>
+<li>A small subset of links that account for most of the network's performance.
+This is the practically useful output, because it says where intervention is
+worth paying for.</li>
+<li>A typology of link behaviour: links that saturate early, links that only
+matter once diversion is applied, and links that never bind.</li>
+</ul>
+
+<h3>Novelty</h3>
+<p>No paper in this line builds any model of the simulator. The 2025 scheduling
+paper searches with NSGA-II, which explores a space without learning its shape.
+A surrogate is a different object and enables work none of these papers could
+attempt.</p>
+
+<div class="note"><p>Lowest risk of the four. The data is generated, so nothing
+depends on fieldwork or on an external release. If the surrogate turns out to be
+inaccurate, that is itself a reportable finding about how much of this traffic
+is predictable from network structure.</p></div>
+</div>
+
+<div class="prop brk">
+<p class="tag">Direction 2</p>
+<h2>Forecasting congestion and diverting before it forms</h2>
+
+<h3>Objective</h3>
+<p>Predict where congestion will appear several minutes ahead from the network's
+current state, and use that forecast to trigger diversion in advance rather than
+in response. Your earlier work applied diversion as a fixed condition. This makes
+it a decision taken at a moment in time.</p>
+
+<h3>Methodology</h3>
+<ol>
+<li>Log per-link time series from the simulator, giving speed, occupancy and
+queue state at regular intervals.</li>
+<li>Train a spatio-temporal graph model, combining message passing over the road
+graph with a recurrent or temporal convolution component, to forecast link state
+at several horizons.</li>
+<li>Define a trigger policy on top of the forecast: when predicted congestion on
+a link exceeds a threshold, divert the affected route.</li>
+<li>Compare three regimes in the simulator: no diversion, reactive diversion once
+congestion has formed, and predictive diversion driven by the forecast.</li>
+<li>Sweep the forecast horizon to find how far ahead the prediction has to reach
+before acting early is better than acting late.</li>
+</ol>
+
+<h3>Expected findings</h3>
+<ul>
+<li>A horizon beyond which forecasting stops helping, because the prediction
+degrades faster than the extra warning time is worth. Locating that point is the
+headline result.</li>
+<li>Predictive diversion outperforming reactive diversion on waiting time, with
+the gap widening as demand rises.</li>
+<li>Evidence about how far congestion propagates between adjacent links in
+non-lane traffic, which is not documented anywhere in the existing papers.</li>
+</ul>
+
+<h3>Novelty</h3>
+<p>Spatio-temporal traffic forecasting is a large field, but it is almost
+entirely lane-based and trained on loop detector or probe data from developed
+cities. Doing it for non-lane heterogeneous traffic, with side friction modelled,
+and then closing the loop by acting on the forecast, is not something these
+papers or the wider forecasting literature covers.</p>
+
+<div class="note"><p>Moderate risk. The forecasting model is standard enough that
+it will train, and the control loop is simple. The main uncertainty is whether
+the simulator produces congestion dynamics rich enough to be worth forecasting at
+all, which you can check cheaply before committing.</p></div>
+</div>
+
+<div class="prop">
+<p class="tag">Direction 3</p>
+<h2>Does faster traffic mean more dangerous traffic?</h2>
+
+<h3>Objective</h3>
+<p>Measure the safety consequences of the interventions the existing papers
+recommend for throughput, and test whether the two objectives conflict. Every
+paper in this line measures speed, waiting time and flow. None measures safety,
+even though the simulator already counts vehicle and pedestrian encounters and
+carries a time-to-collision threshold.</p>
+
+<h3>Methodology</h3>
+<ol>
+<li>Extract surrogate safety measures from the simulator, using encounter counts
+and time-to-collision below threshold, separated by whether a pedestrian is
+involved.</li>
+<li>Build a classifier that predicts conflict risk per link from traffic state and
+configuration. The positive class will be rare, so this is an imbalanced learning
+problem and should be treated as one, with precision-recall reporting rather than
+accuracy.</li>
+<li>Re-run the interventions the published papers recommend, including lane
+conversion, diversion and the optimised signal schedules, and measure safety
+alongside throughput.</li>
+<li>Map the trade-off surface between average speed and conflict rate, and
+identify configurations that improve one without harming the other.</li>
+<li>Use attribution over the classifier to identify which conditions drive
+pedestrian conflict specifically.</li>
+</ol>
+
+<h3>Expected findings</h3>
+<ul>
+<li>A speed and safety trade-off, where configurations that raise average speed
+also raise conflict rate. If that holds, several recommendations in the existing
+literature look different once safety is priced in.</li>
+<li>Pedestrian conflict concentrated in a small number of conditions rather than
+spread evenly, which would make it addressable.</li>
+<li>Some configurations that improve both. Those are the valuable ones and the
+reason to map the surface rather than assume the trade-off is strict.</li>
+</ul>
+
+<h3>Novelty</h3>
+<p>This is the clearest gap in the six papers. The 2025 side friction paper
+establishes that road-crossing pedestrians are the largest single source of
+congestion in Dhaka, which sets the question up directly, and then measures only
+congestion.</p>
+
+<div class="note"><p>Moderate risk, concentrated in one place. The simulator's
+conflict counts are a surrogate for real safety, not a measurement of it, and you
+would need to argue that case carefully rather than assert it. Check early how
+the encounter model actually behaves, because the whole direction rests on
+it.</p></div>
+</div>
+
+<div class="prop brk">
+<p class="tag">Direction 4</p>
+<h2>Automatic calibration, and whether a model of one city transfers to another</h2>
+
+<h3>Objective</h3>
+<p>Replace hand calibration with a systematic procedure that fits simulator
+parameters to observed data, then test whether parameters fitted for one city
+carry over to another. The published work calibrates by hand in every paper and
+reports the accuracy achieved, but nobody has made the procedure repeatable.</p>
+
+<h3>Methodology</h3>
+<ol>
+<li>Treat calibration as an inverse problem: given observed link speeds or travel
+times, recover the parameter set most likely to have produced them.</li>
+<li>Use Bayesian optimisation over the parameter space, with the simulator as the
+expensive objective, and the error measures already implemented in
+<code>experiments/stats.py</code> as the loss.</li>
+<li>Train a surrogate as in Direction 1 to make the inner loop affordable, since
+each simulator evaluation costs several minutes.</li>
+<li>Quantify which parameters the data actually identifies. Some will be pinned
+tightly by the observations and others will be unconstrained, and knowing which
+is which is a result in itself.</li>
+<li>Fit on one city's network and evaluate on another, using the Dhaka, Miami and
+Riyadh topologies, to measure how far a calibration transfers.</li>
+</ol>
+
+<h3>Expected findings</h3>
+<ul>
+<li>Calibration accuracy matching or exceeding the hand-tuned figures in the
+published papers, but produced by a procedure someone else can rerun.</li>
+<li>A subset of parameters that the observations cannot identify at all. This
+would be an uncomfortable but valuable finding, because it means published
+hand-calibrated values for those parameters are not evidence of anything.</li>
+<li>Partial transfer between cities, with the parameters governing driver
+behaviour transferring less well than those governing geometry.</li>
+</ul>
+
+<h3>Novelty</h3>
+<p>Methodological rather than applied, and it addresses the standard criticism of
+simulator-based transport papers, which is that the calibration is bespoke and
+unrepeatable. It also strengthens every other result in the group's line of work,
+which makes it easy to justify.</p>
+
+<div class="note"><p>Highest risk, for one reason. Fitting to observed data
+requires observed data. If you cannot obtain real travel times, you can still run
+the whole thing as recovery of known parameters from synthetic data, which tests
+the method but weakens the applied claim. Decide this before you commit.</p></div>
+</div>
+
+<h2 class="brk">Choosing between them</h2>
+
+<table>
+<thead><tr><th>Direction</th><th>Machine learning content</th><th>Needs field data</th><th>Compute load</th><th>Main risk</th></tr></thead>
+<tbody>
+<tr><td>1. Surrogate and diversion</td><td>Graph networks, attribution, clustering</td><td>No</td><td>High, front-loaded</td><td>Low</td></tr>
+<tr><td>2. Forecast and pre-empt</td><td>Spatio-temporal graph models</td><td>No</td><td>Moderate</td><td>Dynamics may be too simple to forecast</td></tr>
+<tr><td>3. Safety trade-off</td><td>Imbalanced classification, attribution</td><td>No</td><td>Moderate</td><td>Conflict counts are a surrogate for safety</td></tr>
+<tr><td>4. Calibration and transfer</td><td>Bayesian optimisation, sensitivity analysis</td><td>Yes, for the strong version</td><td>High</td><td>Data availability</td></tr>
+</tbody></table>
+
+<h3>What I would pick</h3>
+
+<p>Direction 1 as the spine, with Direction 3 as the second half. The surrogate
+gives you the machine learning contribution your programme requires and makes
+everything after it cheap to evaluate. The safety analysis then gives you a
+finding that people outside this research group will care about, and it uses the
+same generated data, so the marginal cost is small.</p>
+
+<p>That pairing also survives failure gracefully. If the safety half does not
+produce a clean result, the surrogate and the link importance analysis are
+already a complete thesis on their own.</p>
+
+<p>Direction 2 is the one to choose if you would rather work on control than on
+analysis, and it has the most natural continuity with what you did before, since
+it turns your fixed diversion into a timed decision. Direction 4 is the strongest
+methodological contribution and the one most likely to be cited by the group
+itself, but do not start it until you know whether you can get observed data.</p>
+
+<h3>How your earlier work fits in</h3>
+
+<p>All four can use the four-legged intersection as a validation case. In
+Direction 1, the attribution method should identify the links you already know
+matter. In Direction 2, the predictive controller should recover the diversion you
+applied by hand, and ideally apply it sooner. In Direction 3, that intersection
+gives you a known configuration to measure safety on first. Starting there gives
+you an early result and shows examiners the continuity between your previous work
+and the thesis.</p>
+
+<h3>One thing to do before choosing</h3>
+
+<p>Run a sweep with per-link logging enabled on the Dhaka network and look at the
+time series. Three of these four directions depend on the simulator producing
+congestion dynamics with enough structure to model, and an afternoon spent
+checking that will tell you more than any amount of further reading. If the link
+states turn out to be nearly constant once the network fills, Direction 2 is not
+viable and Direction 1 becomes a static regression problem rather than a temporal
+one.</p>
+
+<footer>Prepared from the seven PDFs in DhakaSIM Papers and from measured runs of
+the Python port in this repository. Expected findings are hypotheses to be
+tested, not results. Accuracy and impact figures attributed to published papers
+are theirs.</footer>
+
+</body></html>
