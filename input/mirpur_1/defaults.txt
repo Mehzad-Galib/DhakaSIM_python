@@ -1,0 +1,3 @@
+# Place-not-run settings (see defaults.txt handling in
+# utilities.apply_network_defaults).
+SignalChangeDuration 20     # s of green per approach -- VISSIM-style fixed timing
