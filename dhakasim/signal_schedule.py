@@ -160,7 +160,8 @@ def objectives_v2(demands, greens, motorised_weight):
     four Dhaka networks; the arriving count is better on all four, and the
     remaining count turns out to be degenerate -- a schedule that clears every
     approach scores zero on both objectives, so the entire population ties and
-    the vehicle-class weight stops having any effect at all.  See README.
+    the vehicle-class weight stops having any effect at all.  See
+    docs/REFERENCE.md.
     """
     remaining, reds = run_cycle(demands, greens)
     f1 = sum(motorised_weight * left.motorised

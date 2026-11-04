@@ -138,6 +138,12 @@ class Parameters:
     # (the default) measures it from the loaded network; a value pins it, which
     # is what reproducing the Java original needs -- it always used 1.01.
     NETWORK_ROAD_LENGTH = -1.0
+    # Share of non-motorised vehicles (bicycle, rickshaw, van/cart) to give a
+    # network's surveyed mix, 0 to 1, the motorised types keeping their
+    # proportions among themselves.  Negative (the default) leaves the survey
+    # as measured.  A study of what the mix does has to move it continuously,
+    # and the survey files only hold the one hour that was counted.
+    NMV_SHARE = -1.0
     # Root for this run's outputs. Every CSV is appended to, never truncated,
     # so a batch of runs sharing one directory produces files whose rows cannot
     # be told apart; the experiment harness gives each run its own.

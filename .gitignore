@@ -39,3 +39,13 @@ input/*/osm_extract.geojson
 # Knowledge graph: ~5 MB of generated artefacts, rebuilt from source by
 # `graphify update .`, so there is nothing in it worth versioning.
 graphify-out/
+
+# Reports and write-ups: kept on this machine, not in the repository. The
+# README needs its pictures and the reference, so those two stay tracked.
+docs/*
+!docs/images/
+!docs/REFERENCE.md
+
+# Local tool hooks. They name this machine's home folder, and nobody else can
+# use them.
+.claude/settings.json

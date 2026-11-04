@@ -1404,10 +1404,23 @@ SIGNAL_CASING_COLOUR = Color(24, 26, 28)
 
 #: Plain traffic-light colours, deliberately not the vehicle palette: the CNG
 #: is already green and a signal must never be mistaken for a vehicle.
+#:
+#: Red and green differ in lightness as well as hue, because several men
+#: in every hundred do not see the hue.  A real signal head says which
+#: light is lit by its position; a bar has no position to say it with.  The
+#: first pair measured 1.53:1 in relative luminance once simulated for
+#: deuteranopia (Machado et al. 2009), red and green two shades of olive.
+#: This pair is at least 3.46:1 for normal vision and for protan, deutan
+#: and tritan vision alike, keeps the red at 3:1 or better on its casing,
+#: and moves both further from every vehicle colour than they were (green
+#: from dE 19 to 36, away from the CNG).  Yellow is unchanged: it cannot
+#: also be 3:1 from green without a red too dark to read on the casing,
+#: and amber is the briefest phase.  ``tests/test_colour.py`` pins all of
+#: it.
 SIGNAL_COLOURS = {
-    "GREEN": Color(52, 200, 82),
+    "GREEN": Color(115, 255, 129),
     "YELLOW": Color(240, 195, 45),
-    "RED": Color(232, 48, 38),
+    "RED": Color(205, 20, 15),
 }
 
 

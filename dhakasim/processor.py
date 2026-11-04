@@ -19,6 +19,7 @@ from .path import Path
 from .pedestrian import Pedestrian
 from .point2d import Point2D
 from .roadside_object import Object
+from . import run_data
 from .segment import Segment
 from .signal import SIGNAL
 from .statistics import Statistics
@@ -78,6 +79,43 @@ def _rebuild_segments(link, points, widths) -> None:
             link.get_index(), i, i, points[i][0], points[i][1],
             points[i + 1][0], points[i + 1][1], widths[i],
             i == count - 1, i == 0, link.get_id()))
+
+
+#: Bicycle, rickshaw and van/cart: the human-powered types.
+NON_MOTORISED_TYPES = (0, 1, 2)
+
+
+def with_non_motorised_share(shares, target):
+    """``shares`` (type, share) rescaled so the non-motorised types make up
+    ``target`` of the total, each class keeping its internal proportions.
+
+    A negative target returns the survey untouched, which is the default and
+    what keeps a run bit-identical to one without the setting.  A survey with
+    no non-motorised traffic at all (Miami, Riyadh) has nothing to scale up,
+    so rickshaws, Dhaka's dominant human-powered type, stand in for them; one
+    with no motorised traffic is left as it is.
+    """
+    if target < 0 or not shares:
+        return shares
+    target = min(float(target), 1.0)
+    total = sum(s for _, s in shares)
+    if total <= 0:
+        return shares
+    if target > 0 and not any(t in NON_MOTORISED_TYPES and s > 0
+                              for t, s in shares):
+        shares = sorted(list(shares) + [(1, 1.0)], key=lambda ts: ts[0])
+    nmv = sum(s for t, s in shares if t in NON_MOTORISED_TYPES)
+    motorised = sum(s for t, s in shares if t not in NON_MOTORISED_TYPES)
+    if motorised <= 0 and target < 1:
+        return shares
+    out = []
+    for t, s in shares:
+        if t in NON_MOTORISED_TYPES:
+            out.append((t, s / nmv * target * total if nmv > 0 else 0.0))
+        else:
+            out.append((t, s / motorised * (1 - target) * total
+                        if motorised > 0 else 0.0))
+    return out
 
 
 class Processor:
@@ -144,6 +182,11 @@ class Processor:
                 self.number_of_vehicles_to_generate.append(1)
             else:
                 self.number_of_vehicles_to_generate.append(jint(jround(jdiv(1, demand_ratio))))
+
+        # The run's record for the machine-readable files (run_data.py): its
+        # run_id and where its rows start in the shared accident log.  It
+        # only reads, so it cannot move the run it describes.
+        self._run_record = run_data.RunRecord(self)
 
     def get_mid_point(self):
         return self.mid_point
@@ -349,29 +392,10 @@ class Processor:
         non_motorized_waiting_time = jdiv(non_motorized_waiting_time,
                                           non_motorized_vehicle_count)
 
-        shankar_palashi_car = 0.0
-        palashi_shankar_car = 0.0
-
-        # cnt is an int in Java, so accumulating the double
-        # noOfVehiclesCompletingTrip entries truncates each time
-        cnt = 0
-        for i in range(4, 7):
-            shankar_palashi_car += Statistics.trip_time[1][i]
-            cnt = jint(cnt + Statistics.no_of_vehicles_completing_trip[1][i])
-        shankar_palashi_car = jdiv(shankar_palashi_car, cnt)
-        # only used by print statements that are commented out in the Java
-        shankar_palashi_bike = jdiv(  # noqa: F841
-            Statistics.trip_time[1][3],
-            Statistics.no_of_vehicles_completing_trip[1][3])
-
-        cnt = 0
-        for i in range(4, 7):
-            palashi_shankar_car += Statistics.trip_time[0][i]
-            cnt = jint(cnt + Statistics.no_of_vehicles_completing_trip[0][i])
-        palashi_shankar_car = jdiv(palashi_shankar_car, cnt)
-        palashi_shankar_bike = jdiv(  # noqa: F841
-            Statistics.trip_time[0][3],
-            Statistics.no_of_vehicles_completing_trip[0][3])
+        # The Java works out Shankar-Palashi trip times here, from routes 0 and 1
+        # by number, for print statements it has commented out.  Nothing reads
+        # them, and route 1 does not exist on a one-route network such as drmc,
+        # so porting them only cost that network its report at the end of a run.
 
         print("speed: " + jstr(overall_avg_speed * 3.6) + " km/h")
         print("waiting time: " + jstr(overall_waiting_time) + " s (avg per vehicle)")
@@ -471,6 +495,10 @@ class Processor:
         # flow rate statistics
         self._print_data(Statistics.flow, "statistics/flow.csv")
 
+        # The same numbers again, keyed by run and with the run's settings,
+        # plus the per-minute link log and the near-crash episodes.
+        self._run_record.finish(Statistics.flow_series)
+
         # human-readable HTML report (see dhakasim/report.py)
         try:
             from .report import write_html_report
@@ -533,6 +561,7 @@ class Processor:
 
     @staticmethod
     def _print_data(data, filename: str) -> None:
+        run_data.record(filename, data)
         # Keep raw CSVs out of the run's root, which holds only the
         # human-readable HTML reports; write them under <StatsDir>/csv/.
         if filename.startswith("statistics/") and filename.endswith(".csv"):
@@ -1667,6 +1696,8 @@ class Processor:
             if 0 <= minute < len(Statistics.flow_series):
                 Statistics.flow_series[minute] = Statistics.flow_series_count
             Statistics.flow_series_count = 0
+            if minute >= 0:
+                self._run_record.sample_minute(minute)
 
     def _control_signal(self) -> None:
         # A roundabout has no phases at all -- it gives way to circulating
@@ -1911,6 +1942,7 @@ class Processor:
                         parts = line.split()
                         if len(parts) == 2:
                             shares.append((int(parts[0]), float(parts[1])))
+            shares = with_non_motorised_share(shares, Parameters.NMV_SHARE)
             total = sum(s for _, s in shares)
             if shares and total > 0:
                 running = 0.0

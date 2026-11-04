@@ -56,7 +56,7 @@ DEMANDS = {"low": 100, "medium": 400, "high": 800}
 
 # Speed-class split, slow/medium/fast.  Heterogeneous is Dhaka's, dominated by
 # rickshaws; homogeneous is the motorised mix of a developed city.  These reach
-# the simulator only with VehicleMixOverride Off -- see the README.
+# the simulator only with VehicleMixOverride Off -- see docs/REFERENCE.md.
 MIXES = {"heterogeneous": (55, 40, 5), "homogeneous": (9, 75, 16)}
 
 PEDESTRIANS = {"peds": True, "no_peds": False}

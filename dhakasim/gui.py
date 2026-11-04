@@ -1174,9 +1174,11 @@ class DhakaSimPanel:
         if self.view_3d:
             self.scene3d.camera.zoom(notches)
             camera = self.scene3d.camera
-            self.toast("Camera %s -- x%.1f of the whole-network distance"
+            self.toast("Camera %s -- zoom %d%%, where 100%% fits the whole "
+                       "network"
                        % ("closer" if notches < 0 else "further",
-                          camera.home_distance / max(camera.distance, 1.0)))
+                          round(100.0 * camera.home_distance
+                                / max(camera.distance, 1.0))))
             self.repaint()
             return
         # Multiplicative, not additive: a fixed 0.004 step was a whole zoom
@@ -1190,8 +1192,7 @@ class DhakaSimPanel:
         self.set_scale(min(self.ZOOM_MAX,
                            max(self.ZOOM_MIN, self.scale * factor)))
         self.frame.sync_zoom_slider(self.scale)
-        self.toast("Zoom x%.2g of the whole-network framing"
-                   % (self.scale / max(self.home_scale, 1e-9)))
+        self.toast(zoom_message(self.scale / max(self.home_scale, 1e-9)))
 
 
 #: The start screen's palette.  Warm charcoal rather than the usual near-black:
@@ -1228,6 +1229,12 @@ _UI = {
     "text": "#F1F4F8",
     "muted": "#BAC5D1",
     "faint": "#8C99A8",
+    # The keyboard focus ring, in the text colour.  Every button and choice
+    # here is a label, which Tk never rings (see _ring), so most controls
+    # showed no focus at all; the playback handle showed it by turning from
+    # accent to accent_hover, 1.21:1.  This is at least 3.68:1 against every
+    # fill and ground on both screens (WCAG 2.2: 2.4.7, 1.4.11).
+    "focus": "#F1F4F8",
 }
 
 
@@ -1432,6 +1439,70 @@ class _Icon(tk.Canvas):
                 O(x - 1.8, y - 1.8, x + 1.8, y + 1.8, filled=True)
 
 
+def zoom_message(ratio):
+    """The toast for a zoom, as a percentage of the whole-network fit.
+
+    It said "x0.92 of the whole-network framing", which is the code's own
+    vocabulary; a percentage with its reference named is the reader's.
+    """
+    return "Zoom %d%%, where 100%% fits the whole network" % round(100 * ratio)
+
+
+def _takes_focus(widget):
+    """Whether ``widget`` can ever hold the keyboard focus.
+
+    Asked *before* binding focus events to it, because the binding is
+    itself what Tk goes by: a widget left at the default ``takefocus``
+    counts as focusable as soon as it has any Key or Focus binding, so
+    binding <FocusIn> down a whole row put every icon and picture on the
+    Tab order -- 24 of them on the start screen.  What really takes focus
+    either says so -- the buttons, the playback slider, and the choice
+    cells, whose ``takefocus`` is set even where it is 0 because an arrow
+    key can still land there -- or is a class that types (an entry).
+    """
+    if str(widget.cget("takefocus")) != "":
+        return True
+    events = widget.tk.splitlist(widget.tk.call("bind", widget.winfo_class()))
+    return any("Key" in event for event in events)
+
+
+def _ring(widget, rest, holder=None):
+    """Draw ``widget``'s focus ring by hand: a border in the focus colour
+    while it holds the focus, in ``rest`` otherwise.
+
+    Tk 8.6 on Windows never paints a label in its ``highlightcolor``.
+    Measured: a label given the focus with ``focus_force``, its window in
+    front, drew no ring at all, where a scale beside it drew one.  Every
+    button and choice on both screens is a label, so none of them ever
+    showed the focus.  A label does always paint its border in
+    ``highlightbackground``, so the ring is that colour, switched.
+
+    A checkbox paints no border at all, in either colour, so it is given a
+    ``holder``: a frame around it whose border carries the ring instead.
+    """
+    target = holder if holder is not None else widget
+    widget.bind("<FocusIn>",
+                lambda _e: target.configure(highlightbackground=_UI["focus"]),
+                add="+")
+    widget.bind("<FocusOut>",
+                lambda _e: target.configure(highlightbackground=rest),
+                add="+")
+
+
+def _consume(callback):
+    """A key binding that runs ``callback`` and stops there.
+
+    The run screen binds Space on the window to pause.  A key that has
+    already pressed a focused button must not travel on to the window too,
+    or Space on the Pause button paused and resumed in one keystroke and
+    did nothing.  Tk stops only for a handler that returns "break".
+    """
+    def handler(_event):
+        callback()
+        return "break"
+    return handler
+
+
 class _ToolButton(tk.Label):
     """A push button in the start screen's dress, for the run toolbar.
 
@@ -1454,14 +1525,16 @@ class _ToolButton(tk.Label):
             disabledforeground=_UI["faint"],
             padx=14, pady=5, cursor="hand2", takefocus=True,
             highlightthickness=2, highlightbackground=_UI["band"],
-            highlightcolor=_UI["accent_hover"])
+            highlightcolor=_UI["focus"])
         self._primary = primary
         self._command = command
         self._gloss = tk.Frame(self, height=1, borderwidth=0,
                                highlightthickness=0)
         self._gloss.place(x=0, y=0, relwidth=1)
-        for sequence in ("<Button-1>", "<Return>", "<space>"):
-            self.bind(sequence, self._fire)
+        self.bind("<Button-1>", self._fire)
+        for sequence in ("<Return>", "<space>"):
+            self.bind(sequence, _consume(lambda: self._fire(None)))
+        _ring(self, _UI["band"])
         self.bind("<Enter>", lambda _e: self._paint(True))
         self.bind("<Leave>", lambda _e: self._paint(False))
         self._paint(False)
@@ -1485,6 +1558,9 @@ class _ToolButton(tk.Label):
         if "state" in kw:
             # The fills are painted, not themed, so a state change has to
             # repaint them; the foreground follows from disabledforeground.
+            # Tab skips a disabled button as well: Open report is disabled
+            # for the whole run, and focus parked on it does nothing.
+            super().configure(takefocus=str(kw["state"]) != "disabled")
             self._paint(False)
         return result
 
@@ -1510,8 +1586,9 @@ class _Dropdown(tk.Frame):
             anchor="w", padx=pad[0], pady=pad[1], cursor="hand2",
             takefocus=True, background=_UI["seg_off"], foreground=_UI["text"],
             highlightthickness=2, highlightbackground=_UI["edge"],
-            highlightcolor=_UI["accent"])
+            highlightcolor=_UI["focus"])
         self._button.pack(side="left")
+        _ring(self._button, _UI["edge"])
         _glass(self._button, top=_mix(_UI["seg_off"], "#FFFFFF", 0.24))
         caret = tk.Label(self, text="\u25be",
                          font=(font[0], max(8, font[1] - 2)),
@@ -1533,8 +1610,9 @@ class _Dropdown(tk.Frame):
                 command=lambda o=option: variable.set(o))
 
         for widget in (self._button, caret):
-            for sequence in ("<Button-1>", "<Return>", "<space>"):
-                widget.bind(sequence, self._open)
+            widget.bind("<Button-1>", self._open)
+            for sequence in ("<Return>", "<space>"):
+                widget.bind(sequence, _consume(self._open))
             widget.bind("<Enter>", lambda _e: self._paint(True))
             widget.bind("<Leave>", lambda _e: self._paint(False))
         self._caret = caret
@@ -1645,7 +1723,7 @@ class _Segmented(tk.Frame):
                                 cursor="hand2", takefocus=True,
                                 highlightthickness=2,
                                 highlightbackground=_UI["panel"],
-                                highlightcolor=_UI["accent_hover"])
+                                highlightcolor=_UI["focus"])
                 cell.grid(row=index // width, column=index % width,
                           padx=(0, 3), pady=(0, 3), sticky="ew")
                 # One lit pixel along the top edge, which is the whole
@@ -1654,17 +1732,39 @@ class _Segmented(tk.Frame):
                 cell.gloss = tk.Frame(cell, height=1, borderwidth=0,
                                       highlightthickness=0)
                 cell.gloss.place(x=0, y=0, relwidth=1)
-                for sequence in ("<Button-1>", "<Return>", "<space>"):
-                    cell.bind(sequence, lambda _e, v=value: self._choose(v))
+                cell.bind("<Button-1>", lambda _e, v=value: self._choose(v))
+                for sequence in ("<Return>", "<space>"):
+                    cell.bind(sequence,
+                              _consume(lambda v=value: self._choose(v)))
+                # The arrows walk the strip and Tab leaves it, the way a row
+                # of radio buttons works everywhere else.  Down is a row's
+                # width, so on the junction grid it goes to the tile below.
+                for sequence, step in (("<Left>", -1), ("<Right>", 1),
+                                       ("<Up>", -width), ("<Down>", width)):
+                    cell.bind(sequence,
+                              lambda _e, c=cell, s=step: self._move(c, s))
+                # Shift+Tab by its physical name as well as Tk's virtual one:
+                # a physical binding beats a virtual one on the same widget,
+                # and <Tab> also matches a Tab with Shift held, so without
+                # this Shift+Tab went forwards.
+                cell.bind("<Tab>", lambda _e: self._leave(True))
+                for sequence in ("<Shift-Tab>", "<<PrevWindow>>"):
+                    cell.bind(sequence, lambda _e: self._leave(False))
                 cell.bind("<Enter>", lambda _e, c=cell: self._paint(c, True))
                 cell.bind("<Leave>", lambda _e, c=cell: self._paint(c, False))
-                if self._hover is not None:
-                    cell.bind("<Enter>", lambda _e, v=value: self._hover(v),
-                              add="+")
-                    cell.bind("<Leave>", lambda _e: self._hover(None),
-                              add="+")
                 cell.bind("<FocusIn>", lambda _e, c=cell: self._paint(c, False))
                 cell.bind("<FocusOut>", lambda _e, c=cell: self._paint(c, False))
+                _ring(cell, _UI["panel"])
+                if self._hover is not None:
+                    # Focus previews a choice exactly as the pointer does.  A
+                    # reader on the keyboard never sends <Enter>, so until
+                    # this the pictures beside the form were mouse-only.
+                    for show, hide in (("<Enter>", "<Leave>"),
+                                       ("<FocusIn>", "<FocusOut>")):
+                        cell.bind(show, lambda _e, v=value: self._hover(v),
+                                  add="+")
+                        cell.bind(hide, lambda _e: self._hover(None),
+                                  add="+")
                 if self._wheel is not None:
                     self._wheel(cell)
                 self._cells.append((value, label, cell))
@@ -1674,6 +1774,18 @@ class _Segmented(tk.Frame):
 
         for _value, _label, cell in self._cells:
             self._paint(cell, False)
+
+        # One Tab stop per strip: the chosen cell, or the first in a strip
+        # that shares its variable and holds none of it (the other junction
+        # groups).  A stop per cell was 39 of the start screen's 51 with the
+        # shipped networks alone, and put Playback speed some forty presses
+        # down the form.
+        if self._cells:
+            chosen = [c for v, _l, c in self._cells
+                      if self._same(v, self._var.get())]
+            stop = chosen[0] if chosen else self._cells[0][2]
+            for _value, _label, cell in self._cells:
+                cell.configure(takefocus=cell is stop)
 
     def _paint(self, cell, hovering):
         value = next(v for v, _l, c in self._cells if c is cell)
@@ -1690,6 +1802,33 @@ class _Segmented(tk.Frame):
         self._var.set(value)
         if self._command is not None:
             self._command()
+
+    def _move(self, cell, step):
+        """An arrow key: focus the cell ``step`` along the grid.
+
+        Moving does not choose.  Radio buttons elsewhere choose as the focus
+        moves, but a choice here can be expensive and has consequences -- a
+        junction rewrites the place's defaults and drops part of the undo
+        history -- so walking past four junctions to reach a fifth must not
+        load the four.  The focused cell is previewed and explained as it is
+        reached, which is what browsing is for; Space or Return takes it.
+        """
+        cells = [c for _v, _l, c in self._cells]
+        index = cells.index(cell) + step
+        if 0 <= index < len(cells):
+            cells[index].focus_set()
+        return "break"
+
+    def _leave(self, forward):
+        """Tab out of the strip rather than along it; the arrows go along."""
+        cells = [c for _v, _l, c in self._cells]
+        edge = cells[-1] if forward else cells[0]
+        target = edge.tk_focusNext() if forward else edge.tk_focusPrev()
+        if target is not None:
+            # Tk's own traversal step, so an entry arrived at is selected
+            # whole, exactly as an ordinary Tab would leave it.
+            self.tk.call("tk::TabToWindow", target)
+        return "break"
 
 
 class _SpeedSlider(tk.Frame):
@@ -1819,8 +1958,13 @@ class _SpeedSlider(tk.Frame):
                                    anchor="n", font=self._small,
                                    fill=_UI["accent_text"] if k == index
                                    else _UI["muted"])
+        # Focus is a ring in the focus colour.  Lightening the handle from
+        # accent to accent_hover was the only sign before, and the two
+        # measure 1.21:1 -- a slider with the focus looked like one without.
         canvas.create_oval(xh - r, y - r, xh + r, y + r, fill=lit,
-                           outline=_mix(lit, "#FFFFFF", 0.35), width=1)
+                           outline=_UI["focus"] if focused
+                           else _mix(lit, "#FFFFFF", 0.35),
+                           width=2 if focused else 1)
         shown = self._var.get()
         try:
             ms = f"{int(float(shown))} ms"
@@ -2119,7 +2263,11 @@ def help_sections():
           "side by side, the two geometry modes, the strip grid at three "
           "widths, a map of each junction. Each is a seeded run a few "
           "dozen steps in, drawn by the run screen's own panel; drag to "
-          "pan and wheel to zoom in any of them."]),
+          "pan and wheel to zoom in any of them.",
+          "By keyboard: Tab moves from setting to setting and the arrow "
+          "keys move along a setting's choices, each one pictured and "
+          "explained as it is reached; Space or Return chooses it. A row "
+          "scrolled out of sight is brought into view as it is reached."]),
         ("The settings", settings),
         ("The run screen",
          ["Space pauses and resumes. V switches between the plan view and "
@@ -2131,9 +2279,13 @@ def help_sections():
           "Traffic slider multiplies every route's arrivals from the next "
           "arrival on, so a junction can be loaded up while the run plays; "
           "the Background map toggle hides the imagery. While the map is "
-          "shown the zoom snaps to the steps the imagery can be drawn at.",
+          "shown the zoom snaps to the steps the imagery can be drawn at. "
+          "Tab reaches every toolbar control, the two sliders included, "
+          "and the arrow keys move a slider.",
           "The sidebar names the place, counts the vehicles on the "
-          "network by type, keys the side-friction colours, and keeps the "
+          "network by type, says how it is coping -- the mean speed of "
+          "the vehicles on it against the speed limit, and how many are "
+          "standing still -- keys the side-friction colours, and keeps the "
           "run's settings in view. Playback speed is the one setting that "
           "can be changed mid-run; it changes nothing but the pace. New "
           "simulation returns to the start screen, asking first if the "
@@ -2159,7 +2311,7 @@ def help_sections():
           "studied with; a run without the window is "
           "run_dhakasim.py --headless --network <name>, with "
           "--set NAME=VALUE for any parameter and --seed for a "
-          "repeatable one. README.md beside the program documents every "
+          "repeatable one. docs/REFERENCE.md documents every "
           "parameter, file and quirk."]),
     ]
 
@@ -3903,19 +4055,32 @@ class OptionPanel:
         self._idle_status()
 
     def _bind_focus(self, widget, key) -> None:
-        widget.bind("<Enter>", lambda _e: self._preview.focus(key), add="+")
-        widget.bind("<Leave>", lambda _e: self._preview.focus(None), add="+")
+        # Keyboard focus as well as the pointer, as for the hint below.
+        pairs = [("<Enter>", "<Leave>")]
+        if _takes_focus(widget):
+            pairs.append(("<FocusIn>", "<FocusOut>"))
+        for show, hide in pairs:
+            widget.bind(show, lambda _e: self._preview.focus(key), add="+")
+            widget.bind(hide, lambda _e: self._preview.focus(None), add="+")
         for child in widget.winfo_children():
             self._bind_focus(child, key)
 
     def _bind_hint(self, widget, text) -> None:
-        """Show one row's explanation in the footer while the pointer is on
-        it.  Added to whatever is already bound, never in place of it: the
-        cells paint their own hover state on the same event."""
-        widget.bind("<Enter>",
-                    lambda _e: self._show_status(text), add="+")
-        widget.bind("<Leave>",
-                    lambda _e: self._idle_status(), add="+")
+        """Show one row's explanation in the footer while the pointer or the
+        keyboard focus is on it.  Added to whatever is already bound, never
+        in place of it: the cells paint their own hover state on the same
+        event.
+
+        Focus matters most where the captions have gone to the footer: at
+        the captionless densities this line is the only place a row is
+        explained, and a reader working by keyboard used to get none of it.
+        """
+        pairs = [("<Enter>", "<Leave>")]
+        if _takes_focus(widget):
+            pairs.append(("<FocusIn>", "<FocusOut>"))
+        for show, hide in pairs:
+            widget.bind(show, lambda _e: self._show_status(text), add="+")
+            widget.bind(hide, lambda _e: self._idle_status(), add="+")
         for child in widget.winfo_children():
             self._bind_hint(child, text)
 
@@ -3986,18 +4151,46 @@ class OptionPanel:
                            padx=(0, 18 if index == 0 else 0))
 
     def _bind_wheel(self, widget) -> None:
-        """Let the wheel scroll the settings from anywhere over them.
+        """Let the wheel scroll the settings from anywhere over them, and
+        keep whatever has the keyboard focus in view.
 
         Tk delivers a wheel event to the widget under the pointer and walks
         that widget's own bindtags, so a binding on the containing frame never
         fires once the pointer is over an entry box.  Binding each descendant
         covers the whole form without reaching for ``bind_all``, which would
         still be in force during the run and fight the canvas's own zoom.
+
+        Focus rides on the same pass because it is the same problem the
+        other way round: Tab walks into rows the scroller has hidden, and a
+        focus ring below the bottom of the canvas is no focus ring at all.
+        Choice strips re-run this on every cell they rebuild (``wheel=``),
+        which is the other reason it lives here.
         """
         widget.bind("<MouseWheel>", lambda e: self._canvas.yview_scroll(
             -1 if e.delta > 0 else 1, "units"))
+        if _takes_focus(widget):
+            widget.bind("<FocusIn>", lambda _e, w=widget: self._reveal(w),
+                        add="+")
         for child in widget.winfo_children():
             self._bind_wheel(child)
+
+    def _reveal(self, widget) -> None:
+        """Scroll the form just far enough that ``widget`` is on screen."""
+        canvas, tray = self._canvas, self._tray
+        try:
+            total, view = tray.winfo_height(), canvas.winfo_height()
+            if total <= view:
+                return                  # the form fits; nothing scrolls
+            top = widget.winfo_rooty() - tray.winfo_rooty()
+            bottom = top + widget.winfo_height()
+            shown, margin = canvas.canvasy(0), 12
+            if top < shown:
+                canvas.yview_moveto(max(0.0, (top - margin) / total))
+            elif bottom > shown + view:
+                canvas.yview_moveto(
+                    min(1.0, (bottom + margin - view) / total))
+        except tk.TclError:
+            pass
 
     # ---- the pieces a settings screen is made of -------------------------
 
@@ -4194,7 +4387,7 @@ class OptionPanel:
                        background=_UI["seg_off"], foreground=_UI["text"],
                        insertbackground=_UI["accent"],
                        highlightthickness=2, highlightbackground=_UI["edge"],
-                       highlightcolor=_UI["accent"])
+                       highlightcolor=_UI["focus"])
         box.pack(side="left", ipady=max(2, self._d["row_pad"] - 1), ipadx=6)
         return box
 
@@ -4240,7 +4433,7 @@ class OptionPanel:
             padx=pad[0], pady=pad[1],
             cursor="hand2", takefocus=True,
             highlightthickness=2, highlightbackground=_UI["band"],
-            highlightcolor=_UI["accent_hover"])
+            highlightcolor=_UI["focus"])
         gloss = tk.Frame(button, height=1, borderwidth=0,
                          highlightthickness=0)
         gloss.place(x=0, y=0, relwidth=1)
@@ -4253,8 +4446,10 @@ class OptionPanel:
             button.configure(background=colour)
             gloss.configure(background=_mix(colour, "#FFFFFF", 0.24))
 
-        for sequence in ("<Button-1>", "<Return>", "<space>"):
-            button.bind(sequence, lambda _e: command())
+        button.bind("<Button-1>", lambda _e: command())
+        for sequence in ("<Return>", "<space>"):
+            button.bind(sequence, _consume(command))
+        _ring(button, _UI["band"])
         button.bind("<Enter>", lambda _e: paint(True))
         button.bind("<Leave>", lambda _e: paint(False))
         paint(False)
@@ -4608,10 +4803,17 @@ class OptionPanel:
                     head, text="remove selected…",
                     font=("Segoe UI", level["group"], "underline"),
                     background=_UI["panel"], foreground=_UI["muted"],
-                    cursor="hand2")
+                    cursor="hand2", takefocus=True, highlightthickness=1,
+                    highlightbackground=_UI["panel"],
+                    highlightcolor=_UI["focus"])
                 remover.pack(side="left", padx=(12, 0))
                 remover.bind("<Button-1>",
                              lambda _e: self._remove_import())
+                # Reachable by Tab like every other action on the screen;
+                # it was the one that only a mouse could reach.
+                for sequence in ("<Return>", "<space>"):
+                    remover.bind(sequence, _consume(self._remove_import))
+                _ring(remover, _UI["panel"])
                 remover.bind("<Enter>", lambda _e, w=remover:
                              w.configure(foreground=_UI["muted"]))
                 remover.bind("<Leave>", lambda _e, w=remover:
@@ -5398,7 +5600,7 @@ class _ImportDialog:
                        background=_UI["seg_off"], foreground=_UI["text"],
                        insertbackground=_UI["accent"], highlightthickness=2,
                        highlightbackground=_UI["edge"],
-                       highlightcolor=_UI["accent"])
+                       highlightcolor=_UI["focus"])
         box.pack(side="left", ipady=3, ipadx=6)
         return box
 
@@ -6327,12 +6529,25 @@ class DhakaSimFrame:
         # absolutely, so it always lands somewhere new.  The mapping is
         # logarithmic (see _slider_to_scale): zoom is a ratio, and a linear
         # slider crams every whole-network framing into its bottom few pixels.
+        # Both toolbar sliders are dressed alike.  The handle is the muted
+        # text colour: it was seg_off on a panel trough, 1.39:1, and on the
+        # band toolbar the whole control all but vanished.  It is 9.16:1 now.
+        # And both are in the Tab order with a focus ring -- Tk left them
+        # out of it, so zoom and traffic could not be reached without a
+        # mouse.  The arrow keys move a focused slider.  The zoom is not
+        # settled onto the imagery's ladder after a key the way it is after
+        # a drag: a one-step press that snapped back would read as broken,
+        # and held down the handle crosses the rungs one by one.
+        slider_dress = dict(
+            orient="horizontal", showvalue=False, borderwidth=0,
+            sliderrelief="flat", sliderlength=18, width=10, length=90,
+            background=_UI["muted"], troughcolor=_UI["panel"],
+            activebackground=_UI["text"], takefocus=True,
+            highlightthickness=2, highlightbackground=bg,
+            highlightcolor=_UI["focus"])
         self._scale_slider = tk.Scale(
-            bar, from_=0, to=100, orient="horizontal", showvalue=False,
-            borderwidth=0, highlightthickness=0, sliderrelief="flat",
-            sliderlength=18, width=10, length=90, background=_UI["seg_off"],
-            troughcolor=_UI["panel"], activebackground=_UI["accent"],
-            command=self._on_zoom_slider)
+            bar, from_=0, to=100, command=self._on_zoom_slider,
+            **slider_dress)
         self._scale_slider.pack(side="left", padx=(0, 6))
         # With imagery on, set_scale snaps to the picture's ladder and stops
         # at its top rung; settle the handle on what the view actually did,
@@ -6354,11 +6569,8 @@ class DhakaSimFrame:
         tk.Label(bar, text="Traffic", font=("Segoe UI", 10), bg=bg,
                  fg=_UI["muted"]).pack(side="left", padx=(0, 6))
         self._traffic_slider = tk.Scale(
-            bar, from_=25, to=300, orient="horizontal",
-            showvalue=False, borderwidth=0, highlightthickness=0,
-            sliderrelief="flat", sliderlength=18, width=10, length=90,
-            background=_UI["seg_off"], troughcolor=_UI["panel"],
-            activebackground=_UI["accent"], command=self._on_traffic_slider)
+            bar, from_=25, to=300, command=self._on_traffic_slider,
+            **slider_dress)
         self._traffic_slider.set(int(round(Parameters.DEMAND_SCALE * 100)))
         self._traffic_slider.pack(side="left", padx=(0, 6))
         self._traffic_label = tk.Label(
@@ -6457,6 +6669,28 @@ class DhakaSimFrame:
         tk.Label(total_row, textvariable=self.legend_total, bg=bg,
                  fg=_UI["accent_text"], width=5, anchor="e",
                  font=mono).pack(side="left")
+
+        # How the network is coping, not only how full it is.  A count says
+        # nothing about whether seventy vehicles are flowing or queued; the
+        # mean speed beside the limit and the number standing still do, and
+        # they are what an engineer watches a run for.  Read off the same
+        # walk over the vehicles the counts make -- nothing is written.
+        self.legend_flow = {}
+        limit = Parameters.maximum_speed * 3.6
+        for key, name, unit in (
+                ("speed", "Mean speed", f"of {limit:.0f} km/h"),
+                ("standing", "Standing still", "")):
+            row = tk.Frame(body, bg=bg)
+            row.pack(anchor="w", fill="x")
+            tk.Label(row, text=name, bg=bg, fg=_UI["muted"], width=15,
+                     anchor="w", font=row_font).pack(side="left")
+            value = tk.StringVar(value="\u2013")
+            tk.Label(row, textvariable=value, bg=bg, fg=_UI["text"],
+                     width=5, anchor="e", font=mono).pack(side="left")
+            note = tk.StringVar(value=unit)
+            tk.Label(row, textvariable=note, bg=bg, fg=_UI["faint"],
+                     font=unit_font).pack(side="left", padx=(4, 0))
+            self.legend_flow[key] = (value, note)
 
         # Side friction is drawn on the same canvas but never appears in the
         # counts above, because these are obstructions rather than trips.
@@ -6638,6 +6872,33 @@ class DhakaSimFrame:
             self.legend_total.set(str(total))
         except tk.TclError:
             pass
+        self._update_flow(vehicle_list)
+
+    #: Below this a vehicle is standing, in m/s: the keep-clear rule's own
+    #: threshold (``Processor._exit_has_room``), so the sidebar and the model
+    #: mean the same thing by a queue.
+    STANDING_SPEED = 0.5
+
+    def _update_flow(self, vehicle_list) -> None:
+        """Mean speed and vehicles standing, pedestrians left out."""
+        flow = getattr(self, "legend_flow", None)
+        if not flow:
+            return
+        walking = Constants.PEDESTRIANS_ALONG_THE_ROAD_TYPE
+        speeds = [v.get_speed() for v in vehicle_list
+                  if v.get_type() != walking]
+        try:
+            if not speeds:
+                flow["speed"][0].set("\u2013")
+                flow["standing"][0].set("\u2013")
+                flow["standing"][1].set("")
+                return
+            standing = sum(1 for s in speeds if s < self.STANDING_SPEED)
+            flow["speed"][0].set(f"{sum(speeds) / len(speeds) * 3.6:.0f}")
+            flow["standing"][0].set(str(standing))
+            flow["standing"][1].set(f"{100 * standing / len(speeds):.0f}%")
+        except tk.TclError:
+            pass
 
     def _fill_basemap_box(self) -> None:
         """The legend's imagery controls, for the run as it stands.
@@ -6672,13 +6933,19 @@ class DhakaSimFrame:
             # if someone re-fetches with --provider esri.
             # No sentence under it (owner, 12 Oct 2026): the toast on a
             # toggle says that the zoom snaps while the map is on.
-            tk.Checkbutton(box, text="Background map  (M)", bg=bg,
-                           fg=_UI["text"], font=("Segoe UI", 10), anchor="w",
-                           variable=self._basemap_var, command=flip,
-                           cursor="hand2", activebackground=bg,
-                           activeforeground=_UI["text"],
-                           selectcolor=_UI["seg_off"],
-                           highlightthickness=0).pack(side="left")
+            # A ring like every other control's, carried by a frame around
+            # it: a checkbox draws no border of its own on Windows (_ring).
+            holder = tk.Frame(box, bg=bg, highlightthickness=2,
+                              highlightbackground=bg)
+            holder.pack(side="left")
+            check = tk.Checkbutton(
+                holder, text="Background map  (M)", bg=bg, fg=_UI["text"],
+                font=("Segoe UI", 10), anchor="w",
+                variable=self._basemap_var, command=flip, cursor="hand2",
+                activebackground=bg, activeforeground=_UI["text"],
+                selectcolor=_UI["seg_off"], highlightthickness=0)
+            check.pack()
+            _ring(check, bg, holder)
             return
         if basemap_module.read_centre(Parameters.NETWORK_DIR) is None:
             return                    # nowhere on Earth to fetch for
@@ -6841,7 +7108,7 @@ class DhakaSimFrame:
         _ToolButton(top_bar, text="Help  (F1)", command=self.show_help).pack(
             side="left", padx=(8, 0))
         self.root.bind("<KeyPress-v>", lambda _e: self.toggle_view())
-        self.root.bind("<KeyPress-space>", lambda _e: self.toggle_pause())
+        self.root.bind("<KeyPress-space>", self._space)
         self.root.bind("<KeyPress-m>", lambda _e: self.toggle_basemap())
         self._build_view_controls(top_bar)
 
@@ -6908,6 +7175,24 @@ class DhakaSimFrame:
                     "map, the wheel zooms")
         panel.start()
 
+    def _space(self, event) -> None:
+        """Space pauses -- unless it has just pressed the control that has
+        the focus.
+
+        Tk's own buttons and checkboxes take Space in their class binding,
+        which does not stop the event, so it arrives here as well: Space on
+        the focused map checkbox hid the map and paused the run, and on
+        Reset it reset the zoom and paused.  The screen's own label buttons
+        stop the key themselves (``_consume``); these cannot, so they are
+        let through here instead.
+        """
+        try:
+            pressed = event.widget.winfo_class() in ("Button", "Checkbutton")
+        except (AttributeError, tk.TclError):
+            pressed = False
+        if not pressed:
+            self.toggle_pause()
+
     def toggle_pause(self) -> None:
         """Hold or resume the run, from the toolbar or the space bar."""
         if self.panel is None or self.panel._finished:
@@ -6966,8 +7251,8 @@ class DhakaSimFrame:
         if self.panel is None or self._zoom_syncing:
             return
         self.panel.set_scale(self._slider_to_scale(value))
-        self.panel.toast("Zoom x%.2g of the whole-network framing"
-                         % (self.panel.scale / max(self.panel.home_scale, 1e-9)))
+        self.panel.toast(zoom_message(
+            self.panel.scale / max(self.panel.home_scale, 1e-9)))
 
     def _on_traffic_slider(self, value) -> None:
         """The legend's traffic slider: a multiplier on every route's

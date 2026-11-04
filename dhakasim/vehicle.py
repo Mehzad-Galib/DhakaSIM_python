@@ -1372,13 +1372,41 @@ class Vehicle:
                         or not self.is_object_in_proximity()):
                     self._move_to_lower_index_lane()
 
+    def _hold_behind_object(self) -> None:
+        """Stand still this step: an object is in proximity and no strip
+        change was found.
+
+        ``move_vehicle_in_segment`` skips the forward move whenever an object
+        is in proximity, and the forward move is the only place a vehicle's
+        speed is recomputed.  Without this the vehicle stood still while still
+        reporting last step's speed: a follower car-followed that phantom speed
+        into its tail, froze beside the same object, and the pair stayed
+        overlapped for minutes, logged as a near crash every step.  The stale
+        speed also went into ``avg_speed_vehicle``, and the step was never
+        counted as waiting, which only ``_move_forward_in_segment`` does.
+
+        Only an ``ObjectMode On`` run reaches this -- with no objects there is
+        never one in proximity -- so the Java-parity runs are untouched.
+        """
+        self._store_prev_speeds()
+        self._speed = 0
+        self._acceleration = 0
+        self._waiting_time += 1
+        self._waiting_time_in_segment += 1
+
     # TODO optimize
     def move_vehicle_in_segment(self) -> None:
         if self._type != PEDESTRIANS_ALONG_THE_ROAD_TYPE:
-            # the order of the three conditions is important and must not be changed
-            if (self.is_object_in_proximity() or not self._move_forward_in_segment()
+            # the order of the three conditions is important and must not be
+            # changed; the proximity test is kept in a name, not repeated, so
+            # it is still asked exactly once and first
+            object_near = self.is_object_in_proximity()
+            if (object_near or not self._move_forward_in_segment()
                     or self._is_slower_vehicle_in_proximity()):
+                strip_before = self._strip_index
                 self.try_lane_change(True)
+                if object_near and self._strip_index == strip_before:
+                    self._hold_behind_object()
         else:
             if (Utilities.rand_int(0, 101)
                     < Parameters.PEDESTRIAN_RANDOM_LANE_CHANGE_PERCENTAGE):

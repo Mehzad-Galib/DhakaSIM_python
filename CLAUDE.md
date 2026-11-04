@@ -1,9 +1,10 @@
 # DhakaSim (Python) — working notes
 
-`README.md` documents what the simulator does, every parameter, the input and
-output files, and a list of long-standing behavioural quirks under **Behaviour
-worth knowing about**. Read it first; this file only covers what the README
-does not.
+`README.md` is the short front page for newcomers. `docs/REFERENCE.md` documents
+what the simulator does, every parameter, the input and output files, and a
+list of long-standing behavioural quirks under **Behaviour worth knowing
+about**. Read the reference first; this file only covers what those two do
+not.
 
 ## Where you are
 
@@ -885,6 +886,116 @@ it; the statistics still report the survey's demand. Live traffic from a
 map provider was asked for and declined on evidence: no provider gives
 density without a per-user key, and the import's demand is synthetic.
 
+## Run records for analysis (28 Oct 2026)
+
+The inherited CSVs could not be used as a dataset: one bare row per run, nothing naming the run or its settings,
+and `statistics/csv` had 137 rows from several networks with the per-link files at
+412. `dhakasim/run_data.py` writes four keyed files beside them (`runs.csv`,
+`run_results.csv`, `link_minute.csv`, `near_crash_episodes.csv`; `docs/REFERENCE.md`,
+"Run records for analysis").
+
+**The inherited files must not change, and they did not.** `hash_run.py`
+reported only the four files as new on all seven baselined networks and no
+existing component moved; the baseline was then re-recorded to include them.
+That is the check for any change here: new components may appear, old ones
+may not move.
+
+**`flow.csv` is zero on purpose.** It is the Java original's counter for a
+sensor at link 0, 950 m in, that only the retired synthetic network had. It
+stays for parity; `Statistics.flow_series`, which counts every segment
+sensor, is what the report charts and what `run_results.csv` writes as
+`network_flow`.
+
+**`run_id` is a count, not a clock.** One more than the rows in `runs.csv`,
+so a fresh folder writes the same bytes on every run and the files can be
+hashed. A timestamp in any of the four would make `hash_run.py` drift on
+every run.
+
+**It only reads.** `RunRecord` is built at the end of `Processor.__init__`,
+sampled in the per-minute block of `_run_at_each_time_step`, and written at
+the end of `_generate_statistics`; it never touches `Parameters.random` or a
+simulation object. Episodes are made after the run from the accident log,
+from the byte offset the log had when the run began (the log is shared
+across runs and kept open, so it is flushed at both ends before measuring).
+
+**The last minute is never closed.** The step at `SimulationEndTime` is not
+simulated, so `flow_series` keeps a zero in its last slot that is not a
+measurement; only the minutes `sample_minute` saw are written.
+
+## Keyboard, colour vision and the flow readout (26 Oct 2026)
+
+The owner asked for the alternatives to Nielsen's heuristics to be applied.
+`docs/dhakasim-heuristics-beyond-nielsen.html` is the evaluation
+(Shneiderman, Norman, Gerhardt-Powals, ISO 9241-110, WCAG 2.2); this is
+what the code now depends on.
+
+**Tk 8.6 on Windows never rings a label.** Measured from the window's
+pixels: a `tk.Label` with `highlightthickness=2` and a `highlightcolor`,
+given the focus with `focus_force` and its window in front, draws no ring
+at all, where a `tk.Scale` beside it draws one. Every button and choice
+cell here is a label, so until this no button or choice showed the
+keyboard focus -- on the owner's start screen 5 of 58 stops did, the
+entries. `_ring(widget, rest)` switches `highlightbackground`, which a
+label *does* paint, on focus in and out. A `Checkbutton` paints no border
+in either colour, so the map checkbox sits in a frame that carries the
+ring (`holder=`). Setting `highlightcolor` alone changes nothing on screen,
+and palette arithmetic will report a ring that is not there; the first
+reading of this finding did exactly that. `test_keyboard`'s
+`test_every_stop_*_shows_the_focus` checks the configuration that draws it.
+
+**Binding a focus event makes a widget focusable.** Tk's traversal counts
+a widget left at the default `takefocus` as focusable once it has any Key
+or Focus binding, so binding `<FocusIn>` down a whole row -- as
+`_bind_hint`, `_bind_focus` and `_bind_wheel` do -- put 24 icons and
+pictures on the Tab order. `_takes_focus` is asked first, and it has to be
+asked *before* binding, because the binding is the answer.
+
+**A choice strip is one Tab stop, and the arrows move without choosing.**
+`_Segmented._render` gives `takefocus` to the chosen cell only (the first
+cell, in a junction group that holds none of the shared variable). `_move`
+takes the arrows, Down being a row's width so the junction grid maps;
+`_leave` steps out on Tab and Shift+Tab. Shift+Tab is bound by its physical
+name as well, because a physical `<Tab>` binding also matches a Tab with
+Shift held and beats the virtual `<<PrevWindow>>`. The arrows must not
+choose as they go, radio-button style: a junction rewrites the place's
+defaults and drops part of the undo history, and browsing past four must
+not load four. Focus previews and explains a choice exactly as the pointer
+does.
+
+**Space belongs to the focused control first.** The run screen binds Space
+on the window to pause. The label buttons return "break" from their key
+handlers (`_consume`); without it Space on the focused Pause button paused
+and resumed in one keystroke. Tk's own `Button` and `Checkbutton` take Space
+in their class binding and cannot stop it, so `DhakaSimFrame._space`
+ignores Space whose widget is one of them -- or Space on the map checkbox
+hid the map and paused the run.
+
+**The focused row is kept in view.** `_reveal` rides on `_bind_wheel`
+because that pass already reaches every descendant and is re-run on every
+cell a strip rebuilds (`wheel=`). At 1280x580 the form is 1016 px in a
+475 px view.
+
+**The signal colours are pinned by numbers**, in `tests/test_colour.py`:
+red and green at least 3:1 in relative luminance for normal vision and for
+protan, deutan and tritan vision simulated after Machado et al. (2009), at
+least 3:1 on the casing, and further than dE 13.9 from every vehicle
+colour. They were found by searching for the pair nearest the old one that
+meets all three; change them the same way, not by eye. Yellow cannot also
+be 3:1 from green, and that was accepted.
+
+**The vehicle palette was left alone on purpose.** Rickshaw, van/cart and
+CNG collapse for protan and deutan readers and share a footprint, so size
+cannot separate them either. But the colours are written into each vehicle
+by `Processor._create_vehicle`, so they reach `trace.txt` and the report;
+a colour-vision palette belongs in the drawing surfaces as an opt-in, and
+it is the owner's decision.
+
+**The flow readout** (`legend_flow`, `_update_flow`) reads speeds during
+the walk `update_legend_counts` already makes, and writes nothing.
+"Standing still" is below `STANDING_SPEED`, 0.5 m/s, the keep-clear rule's
+own threshold, so the sidebar and the model mean the same thing by a queue;
+pedestrians walking along the road are left out of both figures.
+
 ## The start screen's preview pictures (7, 10 and 11 Oct 2026)
 
 The owner asked for the picture a game's settings menu has: "while I
@@ -1124,11 +1235,12 @@ after the cycle (degenerate -- clearing everything scores zero on both
 objectives and the vehicle-class weight stops doing anything at all), and beats
 reading `R(i)` as the red before an approach's green rather than its total red.
 Do not re-litigate this without re-running the numbers; the harnesses are in
-`scratchpad`-style scripts and the results are in README.
+`scratchpad`-style scripts and the results are in `docs/REFERENCE.md`.
 
 `moo-v1` beats fixed-time on the mixed-traffic networks and `moo-v2` does not,
 which is the opposite of the paper's ordering. The mechanism is written up in
-README under "What it measures on the shipped networks" -- briefly, Equation 4
+`docs/REFERENCE.md` under "What it measures on the shipped networks" --
+briefly, Equation 4
 reduces to `cycle − Σ C(i)g(i)/Σ C(i)`, which for a fixed cycle length is
 minimised by giving the whole cycle to the busiest approach. That is a real
 property of the objective, not a bug.
@@ -1232,6 +1344,14 @@ use.
   and screen grabs come back black. To drive the GUI programmatically, cancel
   `panel._timer`, set `panel._finished = True`, and call
   `panel.action_performed()` yourself.
+- **A locked workstation photographs as the lock screen.** `ImageGrab`
+  grabs the screen, so while the session is locked every capture is the
+  Windows lock screen whatever `-topmost` says -- the run-dhakasim driver's
+  too -- and it is easy to save one into `docs/images/` without looking.
+  `PrintWindow` with flag 2 (`PW_RENDERFULLCONTENT`) has the window paint
+  itself into a bitmap and works locked or covered; the beyond-Nielsen
+  figures were taken that way. Keyboard tests still pass while locked, since
+  Tk's focus model is its own.
 
 ## Conventions
 
@@ -1242,6 +1362,12 @@ use.
 - `statistics/csv/` is appended to, never truncated. Delete the folder between
   experiments or every CSV grows a row per run.
 - Commit only when asked.
+- **Keep the README current.** When a change improves the simulator, or moves
+  anything in `README.md`'s status table, open issues, network count or test
+  count, update `README.md` in the same piece of work and put the detail in
+  `docs/REFERENCE.md`. Retake a screenshot when the screen it shows has
+  changed. Keep the README short and in plain, active sentences; detail
+  belongs in the reference.
 
 ## The map-import dialog
 
