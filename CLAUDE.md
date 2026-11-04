@@ -352,7 +352,8 @@ stipple at all.
 
 Miami was an idealised grid until 22 Sep 2026, so its map was placed
 correctly while its roads did not line up with it; the note stays because
-the grid is still in `removed_networks/miami_grid` and `make_grid.py` still
+the grid is still in `removed_networks/miami_grid` (local, gitignored) and
+`make_grid.py` still
 writes one. The shipped Miami is a real extract now (see the rebuild note
 at the end of this file).
 
@@ -565,6 +566,7 @@ twenty-two links had no real road under them). Since 22 Sep 2026 both Miami
 and Riyadh are picker-built extracts, fitted by the import chain like every
 other, so `--all` is safe everywhere. The `experiments/` paper comparison was
 run on the old straight grids, which only `removed_networks/` still holds.
+That folder is gitignored and lives on the owner's machine alone.
 
 ## The report's framing
 
@@ -1631,7 +1633,8 @@ junction keeps three.
 
 `input/khamarbari/` was removed on the owner's instruction (24 Aug 2026): the
 survey data was inconsistent and its road geometry had been refitted. It sits
-in `removed_networks/khamarbari/` rather than being deleted, because
+in `removed_networks/khamarbari/` (local, gitignored since 4 Nov 2026) rather
+than being deleted, because
 `basemap.png`, `basemap.txt` and `osm_roads.json` are gitignored and are not
 recoverable from history; the other files are. Delete that folder when you are
 sure.

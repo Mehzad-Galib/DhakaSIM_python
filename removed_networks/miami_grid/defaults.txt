@@ -1,1 +1,0 @@
-MaximumSpeed 100.0   # km/h -- wide, high-speed arterials

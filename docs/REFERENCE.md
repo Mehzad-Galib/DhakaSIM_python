@@ -1340,8 +1340,7 @@ junction or the edge of a 1 km extract; each `geometry.txt` names the
 junctions at the top. They replace the arterial builds of 24 Aug 2026 (one
 link per carriageway, ninety and sixty links, every junction a cluster of
 stubs whose signal bars sat inside the drawn box), which in turn replaced the
-idealised grids `make_grid.py` still writes (archived in
-`removed_networks/miami_grid` and `riyadh_grid`):
+idealised grids `make_grid.py` still writes:
 
 ```bash
 python make_grid.py riyadh --out riyadh.geojson

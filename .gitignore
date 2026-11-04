@@ -49,3 +49,6 @@ docs/*
 # Local tool hooks. They name this machine's home folder, and nobody else can
 # use them.
 .claude/settings.json
+
+# Retired networks: an archive on this machine. The simulator never reads it.
+removed_networks/
